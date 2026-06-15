@@ -4,6 +4,8 @@
 
 当前版本：`v1 runtime lite`
 
+实验结果记录见：[docs/experiments/v0-v1-results.md](docs/experiments/v0-v1-results.md)
+
 ## v0/v1 目标
 
 v0 是评测地基，先建立稳定、可复现的纯文本基线和指标系统。
