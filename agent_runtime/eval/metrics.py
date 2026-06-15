@@ -40,6 +40,11 @@ class TaskMetricRow:
     retrieved_memory_tokens: int = 0
     control_llm_tokens: int = 0
     retry_tokens: int = 0
+    llm_call_count: int = 0
+    llm_prompt_tokens: int = 0
+    llm_completion_tokens: int = 0
+    llm_total_tokens: int = 0
+    llm_latency_ms: float = 0.0
     end_to_end_collaboration_tokens: int = 0
     latency_ms: float = 0.0
     success: bool = False
@@ -131,6 +136,22 @@ class MetricsCollector:
         row.prompt_view_tokens += token_count.token_count
         self._apply_token_meta(row, token_count)
 
+    def record_llm_call(
+        self,
+        *,
+        task_id: str,
+        round_id: int,
+        mode: Mode,
+        usage: dict[str, int],
+        latency_ms: float,
+    ) -> None:
+        row = self._row(task_id, round_id, mode)
+        row.llm_call_count += 1
+        row.llm_prompt_tokens += int(usage.get("prompt_tokens", 0) or 0)
+        row.llm_completion_tokens += int(usage.get("completion_tokens", 0) or 0)
+        row.llm_total_tokens += int(usage.get("total_tokens", 0) or 0)
+        row.llm_latency_ms += latency_ms
+
     def finish_task(
         self,
         task_id: str,
@@ -173,6 +194,11 @@ class MetricsCollector:
                 "retrieved_memory_tokens": 0,
                 "control_llm_tokens": 0,
                 "retry_tokens": 0,
+                "llm_call_count": 0,
+                "llm_prompt_tokens": 0,
+                "llm_completion_tokens": 0,
+                "llm_total_tokens": 0,
+                "llm_latency_ms": 0.0,
                 "end_to_end_collaboration_tokens": 0,
                 "memory_hit_count": 0,
                 "memory_query_count": 0,
@@ -197,6 +223,11 @@ class MetricsCollector:
             bucket["retrieved_memory_tokens"] += row.retrieved_memory_tokens
             bucket["control_llm_tokens"] += row.control_llm_tokens
             bucket["retry_tokens"] += row.retry_tokens
+            bucket["llm_call_count"] += row.llm_call_count
+            bucket["llm_prompt_tokens"] += row.llm_prompt_tokens
+            bucket["llm_completion_tokens"] += row.llm_completion_tokens
+            bucket["llm_total_tokens"] += row.llm_total_tokens
+            bucket["llm_latency_ms"] += row.llm_latency_ms
             bucket["end_to_end_collaboration_tokens"] += (
                 row.end_to_end_collaboration_tokens
             )
@@ -210,6 +241,9 @@ class MetricsCollector:
         for bucket in by_mode.values():
             task_runs = max(1, bucket["task_runs"])
             bucket["avg_latency_ms"] = bucket["latency_ms"] / task_runs
+            bucket["avg_llm_latency_ms"] = (
+                bucket["llm_latency_ms"] / max(1, bucket["llm_call_count"])
+            )
             bucket["success_rate"] = bucket["success_count"] / task_runs
             memory_hits = max(1, bucket["memory_hit_count"])
             bucket["memory_hit_rate"] = (

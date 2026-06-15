@@ -11,8 +11,10 @@ GitHub 默认打开的是 `main` 分支的最新状态，所以 v0、v1 的代�
 | `main` | 当前最新开发主干，持续向 v2/v3 推进 | 是 |
 | `version/v0-baseline` | v0 基线评测版本快照，便于在 GitHub 直接浏览 | 否 |
 | `version/v1-runtime-lite` | v1 三线 Lite 闭环版本快照，便于在 GitHub 直接浏览 | 否 |
+| `version/v2-llm-eval` | v2 真实 LLM 实验版本快照，便于在 GitHub 直接浏览 | 否 |
 | `v0.0-baseline` | v0 不可变标签 | 否 |
 | `v1.0-runtime-lite` | v1 不可变标签 | 否 |
+| `v2.0-llm-eval` | v2 不可变标签 | 否 |
 
 ## 当前版本边界
 
@@ -20,6 +22,7 @@ GitHub 默认打开的是 `main` 分支的最新状态，所以 v0、v1 的代�
 | --- | --- | --- |
 | v0 | `v0.0-baseline` / `version/v0-baseline` | 纯文本基线、tokenizer 统计、metrics/trace 输出、任务集与测试 |
 | v1 | `v1.0-runtime-lite` / `version/v1-runtime-lite` | SHP-lite、StatePool-lite、MemoryStore-lite、端到端成本统计、v0/v1 实验记录 |
+| v2 | `v2.0-llm-eval` / `version/v2-llm-eval` | MiMo v2.5 LLM 实验层、旅行任务组 A1-A5、真实模型对比结果 |
 
 ## 如何在本地切换版本
 
@@ -37,6 +40,13 @@ git fetch --all --tags
 git switch version/v1-runtime-lite
 ```
 
+查看 v2：
+
+```powershell
+git fetch --all --tags
+git switch version/v2-llm-eval
+```
+
 回到最新开发主干：
 
 ```powershell
@@ -48,6 +58,7 @@ git switch main
 ```powershell
 git checkout v0.0-baseline
 git checkout v1.0-runtime-lite
+git checkout v2.0-llm-eval
 ```
 
 注意：直接 checkout tag 会进入 detached HEAD 状态，只适合查看或复现实验，不适合继续开发。

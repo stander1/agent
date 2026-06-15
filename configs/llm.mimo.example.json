@@ -1,0 +1,10 @@
+{
+  "provider": "mimo",
+  "base_url": "https://token-plan-cn.xiaomimimo.com/v1",
+  "model": "mimo-v2.5",
+  "api_key_env": "MIMO_API_KEY",
+  "timeout_seconds": 120,
+  "max_completion_tokens": 300,
+  "temperature": 0.2,
+  "top_p": 0.9
+}

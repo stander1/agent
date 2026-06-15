@@ -110,7 +110,9 @@ class V0Runtime:
                 },
             )
 
-            if mode == "runtime_lite":
+            if getattr(agent, "expects_runtime_prompt", False):
+                agent_context = [AgentOutput(agent_id="runtime_prompt", content=prompt)]
+            elif mode == "runtime_lite":
                 agent_context = lite_context + [
                     AgentOutput(agent_id="runtime_prompt_view", content=prompt)
                 ]
@@ -118,6 +120,15 @@ class V0Runtime:
                 agent_context = context
 
             output = agent.run(task, agent_context)
+            llm_meta = output.metadata.get("llm", {})
+            if llm_meta:
+                self.metrics.record_llm_call(
+                    task_id=task.task_id,
+                    round_id=round_id,
+                    mode=mode,
+                    usage=llm_meta.get("usage", {}),
+                    latency_ms=float(llm_meta.get("latency_ms", 0.0) or 0.0),
+                )
             context.append(output)
 
             output_state_refs: list[StateRef] = []
@@ -128,7 +139,7 @@ class V0Runtime:
                 output_state_refs.append(state_ref)
                 state_refs.append(state_ref)
 
-                if agent.agent_id in {"writer", "reviewer"}:
+                if agent.agent_id in {"writer", "reviewer", "memory_manager"}:
                     memory_ref = self.memory_store.write_memory(
                         task_id=task.task_id,
                         source_agent=agent.agent_id,

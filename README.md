@@ -2,9 +2,12 @@
 
 本仓库用于迭代实现一个面向多 Agent 协作的跨框架运行时工具层，目标是在多 Agent 任务中通过结构化通信、非文本状态传递和共享记忆复用降低协作开销。
 
-当前版本：`v1 runtime lite`
+当前版本：`v2 llm evaluation harness`
 
-实验结果记录见：[docs/experiments/v0-v1-results.md](docs/experiments/v0-v1-results.md)
+实验结果记录见：
+
+- [docs/experiments/v0-v1-results.md](docs/experiments/v0-v1-results.md)
+- [docs/experiments/v2-llm-travel-results.md](docs/experiments/v2-llm-travel-results.md)
 
 版本切换与 GitHub 浏览方式见：[docs/versioning.md](docs/versioning.md)
 
@@ -82,3 +85,22 @@ token_count_method=estimated
 token_count_method=compatible
 tokenizer_name=tiktoken:cl100k_base
 ```
+
+## v2 LLM 实验入口
+
+v2 开始提供可选真实 LLM evaluation harness。API key 不写入仓库，建议通过本地环境变量提供：
+
+```powershell
+$env:MIMO_API_KEY='你的本地 key'
+F:\software\anaconda\envs\multi-agent-demo\python.exe .\examples\run_v2_llm_eval.py --rounds 1 --mode both --config .\configs\llm.mimo.example.json
+```
+
+默认任务集为 `benchmarks/travel_task_group_a.json`，来自 `question/A.md` 的个性化旅行规划任务组。
+
+当前 MiMo 示例配置使用开发者计划 Token Plan 的 OpenAI-compatible 地址：
+
+```text
+https://token-plan-cn.xiaomimimo.com/v1
+```
+
+`https://token-plan-cn.xiaomimimo.com/anthropic` 属于 Anthropic-compatible 接口，当前 v2 runner 暂未启用。

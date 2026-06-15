@@ -10,5 +10,6 @@ runs/
 artifacts/
 reports/
 .env
+configs/*.local.json
+configs/llm.local.json
 .DS_Store
-

@@ -1,0 +1,65 @@
+{
+  "tasks": [
+    {
+      "task_id": "A1",
+      "group_id": "travel_A",
+      "title": "旅行偏好与约束抽取",
+      "prompt": "我和朋友打算安排一个 3 天 2 晚的短途旅行，总预算 3000 元以内。我们更喜欢自然风景、轻徒步、当地美食，不太想去人特别多的商业景点。每天步行强度不要太高，晚上希望能有比较轻松的活动。请先帮我整理需求和约束。",
+      "documents": [
+        "任务目标：抽取用户旅行偏好、预算、时间、禁忌条件，并形成旅行需求矩阵。",
+        "必须识别 duration_days=3、nights=2、budget_max=3000、preferred_activities=[自然风景, 轻徒步, 当地美食]、avoid=[人流密集商业景点, 高强度步行]。",
+        "后续任务会复用 A1 的 preference_state 和用户旅行偏好记忆。"
+      ],
+      "expected_agents": ["planner", "analyzer", "writer", "reviewer", "memory_manager"]
+    },
+    {
+      "task_id": "A2",
+      "group_id": "travel_A",
+      "title": "候选目的地与景点检索",
+      "prompt": "基于刚才的旅行偏好，请从本地资料库中筛选 3 个适合的短途目的地，并说明各自适合或不适合的原因。",
+      "documents": [
+        "城市资料：city_001 山湖镇，交通 1.5 小时，自然景观丰富，人流中低，美食以湖鲜和小吃为主。",
+        "城市资料：city_004 古桥湾，交通 2 小时，古镇街区和河湾徒步线路，人流中等，住宿价格适中。",
+        "城市资料：city_007 云杉谷，交通 2.5 小时，自然风景最佳，轻徒步线路成熟，但周末住宿较贵。",
+        "排除资料：city_009 商业乐园，人流高、活动偏商业化，与用户偏好不符。"
+      ],
+      "expected_agents": ["planner", "retriever", "ranker", "writer", "memory_manager"]
+    },
+    {
+      "task_id": "A3",
+      "group_id": "travel_A",
+      "title": "生成初版 3 天 2 晚行程",
+      "prompt": "请基于 A2 的候选目的地，选择最合适的一个，并生成 3 天 2 晚的初版行程。",
+      "documents": [
+        "行程节奏建议：3 天 2 晚低强度旅行应采用抵达适应、核心自然体验、轻量返程的节奏。",
+        "山湖镇可选活动：湖边步道 walk_002、轻徒步 trail_001、本地市场 market_002、湖鲜餐 food_003。",
+        "约束提醒：不要安排连续高强度步行，晚上安排轻松活动。"
+      ],
+      "expected_agents": ["planner", "writer", "reviewer", "memory_manager"]
+    },
+    {
+      "task_id": "A4",
+      "group_id": "travel_A",
+      "title": "预算与时间约束优化",
+      "prompt": "请检查 A3 的行程是否超过 3000 元预算，并优化交通、住宿和活动安排，使总成本控制在预算内。",
+      "documents": [
+        "初版预算：交通 760 元，住宿 1200 元，餐饮 760 元，活动 540 元，总计 3260 元。",
+        "可优化项：住宿可从 1200 元降到 900 元；交通可从 760 元降到 620 元；活动保留核心自然体验，不优先删除。",
+        "优化后预算目标：总价不超过 3000 元，同时维持自然风景、轻徒步、当地美食三个核心偏好。"
+      ],
+      "expected_agents": ["planner", "calculator", "optimizer", "reviewer", "memory_manager"]
+    },
+    {
+      "task_id": "A5",
+      "group_id": "travel_A",
+      "title": "最终旅行手册生成",
+      "prompt": "请整合前面的偏好、目的地选择、行程和预算优化结果，生成一份最终旅行手册，包括每日安排、预算表、注意事项和备选方案。",
+      "documents": [
+        "最终手册必须整合 A1 偏好、A2 候选地理由、A3 初版行程和 A4 预算优化。",
+        "输出应包含每日安排、预算表、注意事项、备选方案，并检查是否仍满足 3000 元预算和低强度偏好。",
+        "Baseline 模式会携带完整历史文本；Runtime Lite 模式应主要依赖 state_refs 和 memory_refs 的 Prompt View。"
+      ],
+      "expected_agents": ["planner", "writer", "reviewer", "memory_manager"]
+    }
+  ]
+}
