@@ -6,6 +6,8 @@
 
 实验结果记录见：[docs/experiments/v0-v1-results.md](docs/experiments/v0-v1-results.md)
 
+版本切换与 GitHub 浏览方式见：[docs/versioning.md](docs/versioning.md)
+
 ## v0/v1 目标
 
 v0 是评测地基，先建立稳定、可复现的纯文本基线和指标系统。
