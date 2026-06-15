@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 
-Mode = Literal["baseline_text", "runtime_stub"]
+Mode = Literal["baseline_text", "runtime_stub", "runtime_lite"]
 
 
 @dataclass(slots=True)
@@ -42,4 +42,3 @@ class AgentOutput:
     agent_id: str
     content: str
     metadata: dict[str, Any] = field(default_factory=dict)
-

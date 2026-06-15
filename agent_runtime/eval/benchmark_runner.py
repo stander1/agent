@@ -9,6 +9,8 @@ from agent_runtime.core.runtime import V0Runtime
 from agent_runtime.eval.metrics import MetricsCollector
 from agent_runtime.eval.token_counter import TokenCounter
 from agent_runtime.eval.trace_logger import TraceLogger
+from agent_runtime.memory.memory_store import MemoryStoreLite
+from agent_runtime.state.state_pool import StatePoolLite
 
 
 def load_task_suite(path: Path) -> list[TaskSpec]:
@@ -29,6 +31,8 @@ def run_v0_benchmark(
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics = MetricsCollector()
     trace = TraceLogger(output_dir)
+    state_pool = StatePoolLite(output_dir)
+    memory_store = MemoryStoreLite()
     token_counter = TokenCounter(
         tokenizer_name=tokenizer_name,
         model_name=model_name,
@@ -39,6 +43,8 @@ def run_v0_benchmark(
         token_counter=token_counter,
         metrics=metrics,
         trace=trace,
+        state_pool=state_pool,
+        memory_store=memory_store,
     )
 
     tasks: list[TaskSpec] = []
