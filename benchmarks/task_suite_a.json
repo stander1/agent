@@ -1,0 +1,43 @@
+{
+  "suite_id": "task_suite_a",
+  "description": "多 Agent 机制分析连续任务",
+  "tasks": [
+    {
+      "task_id": "A1",
+      "group_id": "A",
+      "title": "分析低开销通信机制",
+      "prompt": "分析多 Agent 协作中自然语言长文本交接为什么会造成 token 开销、重复解析和上下文污染，并给出结构化通信的改进方向。",
+      "documents": [
+        "当前主流多 Agent 系统通常将上游 Agent 的中间结果写成自然语言或 JSON，再交给下游 Agent 继续处理。",
+        "当 Planner、Retriever、Writer、Reviewer 串联工作时，上游计划、证据和阶段结论会反复进入下游 prompt。",
+        "只传 memory_id 不一定降低总成本，因为下游 Agent 可能仍然读取完整 raw content，造成 cost shifting。"
+      ],
+      "expected_agents": ["planner", "retriever", "writer", "reviewer"]
+    },
+    {
+      "task_id": "A2",
+      "group_id": "A",
+      "title": "分析非文本状态传递机制",
+      "prompt": "分析如何通过 state_refs、Runtime State Pool 和 Prompt View 避免检索状态、工具产物和失败状态反复文本化。",
+      "documents": [
+        "SHP-State 将中间结果注册为运行时状态对象，Agent 间只传轻量摘要和 state_refs。",
+        "Prompt View Renderer 根据 Agent 角色和 token 预算渲染最小可用上下文，而不是直接展开完整状态。",
+        "Runtime State Pool 与 Memory Pool 的边界必须清楚，前者服务当前任务，后者服务跨任务复用。"
+      ],
+      "expected_agents": ["planner", "retriever", "writer", "reviewer"]
+    },
+    {
+      "task_id": "A3",
+      "group_id": "A",
+      "title": "分析共享记忆复用机制",
+      "prompt": "分析共享记忆如何通过 Claim Card、MemoryView、生命周期状态和语义检索支持连续任务复用，同时避免记忆污染。",
+      "documents": [
+        "TLC-Memory 不把记忆看作普通文本块，而是结构化为 Claim Card、Memory Object 和 MemoryView。",
+        "MemoryView 不创造事实，只组织事实，并通过 Prompt View 与 Audit View 分离降低 token 开销。",
+        "生命周期状态可以防止 outdated、deprecated、superseded 记忆被下游 Agent 当成当前事实使用。"
+      ],
+      "expected_agents": ["planner", "retriever", "writer", "reviewer"]
+    }
+  ]
+}
+

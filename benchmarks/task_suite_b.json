@@ -1,0 +1,43 @@
+{
+  "suite_id": "task_suite_b",
+  "description": "代码执行与报告生成连续任务",
+  "tasks": [
+    {
+      "task_id": "B1",
+      "group_id": "B",
+      "title": "整理运行时评测数据需求",
+      "prompt": "设计一组用于比较 baseline_text_mode 和 runtime_optimized_mode 的指标，覆盖消息数量、token、状态传递、记忆命中和耗时。",
+      "documents": [
+        "评测应统计 direct_text_tokens、handoff_packet_tokens、prompt_view_tokens、retrieved_memory_tokens 和 control_llm_tokens。",
+        "为了证明没有 cost shifting，需要展示显式通信成本与隐式记忆读取成本的堆叠图。",
+        "10 轮连续任务的成功率和平均耗时是比赛演示中的稳定性指标。"
+      ],
+      "expected_agents": ["planner", "retriever", "writer", "reviewer"]
+    },
+    {
+      "task_id": "B2",
+      "group_id": "B",
+      "title": "分析 CodeAct 执行产物",
+      "prompt": "说明 CodeAct Executor 应如何将 Python 执行结果保存为 artifact_state 和 failure_state，而不是把完整日志塞进 Agent 消息。",
+      "documents": [
+        "CodeAct 允许 LLM 生成 Python 代码并在轻量沙箱中执行，执行结果应以 artifact_ref 形式进入状态池。",
+        "长日志和 stderr 应保存为 file-ref 或 mmap-ref，下游 Agent 默认只读取压缩后的 failure summary。",
+        "如果执行失败，failure_state 需要记录错误类型、失败命令、stderr_ref 和可复用修复建议。"
+      ],
+      "expected_agents": ["planner", "retriever", "writer", "reviewer"]
+    },
+    {
+      "task_id": "B3",
+      "group_id": "B",
+      "title": "生成比赛实验报告草案",
+      "prompt": "基于前两步内容，生成一份实验报告草案结构，说明如何展示通信开销、状态复用、记忆命中、鲁棒性守卫和 openEuler 部署结果。",
+      "documents": [
+        "实验报告需要同时包含 baseline_text_mode 与 runtime_optimized_mode 的同任务对比。",
+        "报告应导出 metrics.csv、metrics.json、trace.jsonl 和成本拆解图。",
+        "openEuler 24.03-LTS-SP3 部署文档需要说明 Python 版本、依赖安装、benchmark 命令和无外网降级方案。"
+      ],
+      "expected_agents": ["planner", "retriever", "writer", "reviewer"]
+    }
+  ]
+}
+
