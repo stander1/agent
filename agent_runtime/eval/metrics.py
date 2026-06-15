@@ -22,13 +22,23 @@ class TaskMetricRow:
     direct_text_tokens: int = 0
     prompt_chars: int = 0
     prompt_tokens: int = 0
+    prompt_view_tokens: int = 0
     state_refs_count: int = 0
     state_payload_bytes: int = 0
+    embedding_state_count: int = 0
+    retrieval_state_count: int = 0
+    artifact_state_count: int = 0
     memory_refs_count: int = 0
     memory_hit_count: int = 0
     memory_hit_rate: float = 0.0
+    useful_memory_hit_count: int = 0
+    useful_memory_hit_rate: float = 0.0
+    wrong_memory_hit_count: int = 0
+    memory_supported_output_count: int = 0
     retrieved_memory_tokens: int = 0
     control_llm_tokens: int = 0
+    retry_tokens: int = 0
+    end_to_end_collaboration_tokens: int = 0
     latency_ms: float = 0.0
     success: bool = False
     token_count_method: str = ""
@@ -68,6 +78,7 @@ class MetricsCollector:
         token_count = token_counter.count(prompt)
         row.prompt_chars += len(prompt)
         row.prompt_tokens += token_count.token_count
+        row.prompt_view_tokens += token_count.token_count
         self._apply_token_meta(row, token_count)
 
     def finish_task(
@@ -83,6 +94,16 @@ class MetricsCollector:
         row.success = success
         if row.memory_refs_count:
             row.memory_hit_rate = row.memory_hit_count / row.memory_refs_count
+            row.useful_memory_hit_rate = (
+                row.useful_memory_hit_count / row.memory_refs_count
+            )
+        row.end_to_end_collaboration_tokens = (
+            row.direct_text_tokens
+            + row.prompt_view_tokens
+            + row.retrieved_memory_tokens
+            + row.control_llm_tokens
+            + row.retry_tokens
+        )
 
     def rows(self) -> list[TaskMetricRow]:
         return list(self._rows.values())
@@ -97,8 +118,17 @@ class MetricsCollector:
                 "direct_text_tokens": 0,
                 "prompt_chars": 0,
                 "prompt_tokens": 0,
+                "prompt_view_tokens": 0,
                 "latency_ms": 0.0,
                 "success_count": 0,
+                "retrieved_memory_tokens": 0,
+                "control_llm_tokens": 0,
+                "retry_tokens": 0,
+                "end_to_end_collaboration_tokens": 0,
+                "memory_hit_count": 0,
+                "useful_memory_hit_count": 0,
+                "wrong_memory_hit_count": 0,
+                "memory_supported_output_count": 0,
             }
         )
         for row in self.rows():
@@ -110,13 +140,30 @@ class MetricsCollector:
             bucket["direct_text_tokens"] += row.direct_text_tokens
             bucket["prompt_chars"] += row.prompt_chars
             bucket["prompt_tokens"] += row.prompt_tokens
+            bucket["prompt_view_tokens"] += row.prompt_view_tokens
             bucket["latency_ms"] += row.latency_ms
             bucket["success_count"] += int(row.success)
+            bucket["retrieved_memory_tokens"] += row.retrieved_memory_tokens
+            bucket["control_llm_tokens"] += row.control_llm_tokens
+            bucket["retry_tokens"] += row.retry_tokens
+            bucket["end_to_end_collaboration_tokens"] += (
+                row.end_to_end_collaboration_tokens
+            )
+            bucket["memory_hit_count"] += row.memory_hit_count
+            bucket["useful_memory_hit_count"] += row.useful_memory_hit_count
+            bucket["wrong_memory_hit_count"] += row.wrong_memory_hit_count
+            bucket["memory_supported_output_count"] += row.memory_supported_output_count
 
         for bucket in by_mode.values():
             task_runs = max(1, bucket["task_runs"])
             bucket["avg_latency_ms"] = bucket["latency_ms"] / task_runs
             bucket["success_rate"] = bucket["success_count"] / task_runs
+            memory_hits = max(1, bucket["memory_hit_count"])
+            bucket["useful_memory_hit_rate"] = (
+                bucket["useful_memory_hit_count"] / memory_hits
+                if bucket["memory_hit_count"]
+                else 0.0
+            )
 
         return {"by_mode": dict(by_mode), "tokenizer": self._tokenizer_meta}
 
@@ -149,4 +196,3 @@ class MetricsCollector:
             "tokenizer_name": token_count.tokenizer_name,
             "tokenizer_version": token_count.tokenizer_version,
         }
-
