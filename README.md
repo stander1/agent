@@ -8,6 +8,7 @@
 
 - [docs/experiments/v0-v1-results.md](docs/experiments/v0-v1-results.md)
 - [docs/experiments/v2-llm-travel-results.md](docs/experiments/v2-llm-travel-results.md)
+- [docs/experiments/v2-longcontext-travel-results.md](docs/experiments/v2-longcontext-travel-results.md)
 
 版本切换与 GitHub 浏览方式见：[docs/versioning.md](docs/versioning.md)
 

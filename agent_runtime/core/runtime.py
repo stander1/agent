@@ -34,10 +34,14 @@ class V0Runtime:
         self.trace = trace
         self.state_pool = state_pool or StatePoolLite(Path("runs") / "state")
         self.memory_store = memory_store or MemoryStoreLite()
+        self._baseline_full_history: dict[tuple[int, str], list[AgentOutput]] = {}
 
     def run_task(self, task: TaskSpec, round_id: int, mode: Mode) -> AgentOutput:
         started = time.perf_counter()
-        context: list[AgentOutput] = []
+        history_key = (round_id, mode)
+        full_history = self._baseline_full_history.get(history_key, [])
+        context: list[AgentOutput] = list(full_history) if mode == "baseline_text" else []
+        current_task_outputs: list[AgentOutput] = []
         self.trace.write(
             "task_started",
             {
@@ -45,6 +49,9 @@ class V0Runtime:
                 "round_id": round_id,
                 "mode": mode,
                 "title": task.title,
+                "baseline_full_history_items": len(full_history)
+                if mode == "baseline_text"
+                else 0,
             },
         )
 
@@ -130,6 +137,7 @@ class V0Runtime:
                     latency_ms=float(llm_meta.get("latency_ms", 0.0) or 0.0),
                 )
             context.append(output)
+            current_task_outputs.append(output)
 
             output_state_refs: list[StateRef] = []
             output_memory_refs: list[MemoryRef] = []
@@ -209,6 +217,8 @@ class V0Runtime:
                 mode=mode,
                 count=len(memory_refs_used),
             )
+        if mode == "baseline_text":
+            self._baseline_full_history[history_key] = full_history + current_task_outputs
 
         elapsed_ms = (time.perf_counter() - started) * 1000
         self.metrics.finish_task(
