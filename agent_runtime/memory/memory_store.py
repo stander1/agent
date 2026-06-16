@@ -118,6 +118,64 @@ class MemoryWriteReport:
 
 
 @dataclass(slots=True)
+class MemoryCandidate:
+    candidate_id: str
+    task_id: str
+    source_agent: str
+    task_topic: str
+    summary: str
+    key_points: list[str]
+    tags: list[str]
+    reuse_scope: list[str]
+    confidence: float
+    importance_hint: float
+    coverage_score: float
+    compression_loss_risk: str
+    raw_required_hint: bool
+    slot_hint: str
+    source_state_ids: list[str]
+    evidence_refs: list[str]
+    created_at: str
+    admission_status: str = "pending"
+    admission_reasons: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ClaimCandidate:
+    candidate_id: str
+    memory_candidate_id: str
+    subject: str
+    predicate: str
+    object: str
+    condition: str
+    confidence: float
+    source_pointer: str
+    admission_status: str = "pending"
+
+
+@dataclass(slots=True)
+class MemoryAdmissionReport:
+    candidate_id: str
+    admission_status: str
+    admission_reasons: list[str] = field(default_factory=list)
+    memory_ref: MemoryRef | None = None
+    memory_candidate_count: int = 1
+    claim_candidate_count: int = 0
+    memory_admitted_count: int = 0
+    memory_rejected_count: int = 0
+    memory_pending_count: int = 0
+    memory_audit_only_count: int = 0
+    admission_unresolved_slot_count: int = 0
+    claim_to_memoryview_count: int = 0
+    memory_write_count: int = 0
+    claim_card_count: int = 0
+    memory_view_count: int = 0
+    promotion_view_count: int = 0
+    alias_mapping_hit_count: int = 0
+    unresolved_slot_count: int = 0
+
+
+@dataclass(slots=True)
 class MemorySearchReport:
     refs: list[MemoryRef]
     retrieval_backend: str = "keyword_overlap_v3_lite"
@@ -141,6 +199,8 @@ class MemoryStoreLite:
         self._claims: dict[str, ClaimCard] = {}
         self._views: dict[str, MemoryView] = {}
         self._promotion_views: dict[str, PromotionView] = {}
+        self._memory_candidates: dict[str, MemoryCandidate] = {}
+        self._claim_candidates: dict[str, ClaimCandidate] = {}
 
     def write_memory(
         self,
@@ -240,6 +300,119 @@ class MemoryStoreLite:
             alias_mapping_hit_count=int(resolved.alias_hit),
             unresolved_slot_count=int(resolved.unresolved),
         )
+
+    def write_memory_candidate_with_report(
+        self,
+        *,
+        task_id: str,
+        source_agent: str,
+        task_topic: str,
+        memory_card: dict[str, Any] | None,
+        claim_cards: list[dict[str, Any]] | None,
+        tags: list[str],
+        slot_hint: str | None = None,
+        source_state_ids: list[str] | None = None,
+        evidence_refs: list[str] | None = None,
+        reuse_intent: str | None = None,
+        fallback_summary: str = "",
+    ) -> MemoryAdmissionReport:
+        card = memory_card if isinstance(memory_card, dict) else {}
+        summary = str(card.get("summary") or fallback_summary).strip()
+        key_points = self._as_str_list(card.get("key_points"))
+        card_tags = self._as_str_list(card.get("tags"))
+        reuse_scope = self._as_str_list(card.get("reuse_scope"))
+        candidate_tags = self._dedupe(tags + card_tags)
+        confidence = self._float_between(card.get("confidence"), default=0.5)
+        importance_hint = self._float_between(card.get("importance_hint"), default=0.5)
+        coverage_score = self._float_between(card.get("coverage_score"), default=0.5)
+        compression_loss_risk = str(
+            card.get("compression_loss_risk") or "medium"
+        ).lower()
+        raw_required_hint = bool(card.get("raw_required_hint", False))
+        candidate_slot_hint = str(
+            card.get("slot_id") or card.get("slot_hint") or slot_hint or ""
+        )
+        if not candidate_slot_hint:
+            candidate_slot_hint = self._infer_slot_hint(candidate_tags, task_topic)
+
+        source_state_ids = source_state_ids or []
+        evidence_refs = evidence_refs or source_state_ids[:3]
+        now = datetime.now(timezone.utc).isoformat()
+        candidate_id = self._next_candidate_id(
+            "mc", task_id, source_agent, summary or task_topic
+        )
+        candidate = MemoryCandidate(
+            candidate_id=candidate_id,
+            task_id=task_id,
+            source_agent=source_agent,
+            task_topic=task_topic,
+            summary=summary,
+            key_points=key_points,
+            tags=candidate_tags,
+            reuse_scope=reuse_scope,
+            confidence=confidence,
+            importance_hint=importance_hint,
+            coverage_score=coverage_score,
+            compression_loss_risk=compression_loss_risk,
+            raw_required_hint=raw_required_hint,
+            slot_hint=candidate_slot_hint,
+            source_state_ids=source_state_ids,
+            evidence_refs=evidence_refs,
+            created_at=now,
+        )
+
+        claim_candidates = self._capture_claim_candidates(
+            candidate_id=candidate_id,
+            task_topic=task_topic,
+            claim_cards=claim_cards or [],
+        )
+        resolved = self._resolve_slot(candidate.slot_hint)
+        status, reasons = self._admit_candidate(candidate, resolved)
+        candidate.admission_status = status
+        candidate.admission_reasons = reasons
+        self._memory_candidates[candidate_id] = candidate
+        for claim in claim_candidates:
+            claim.admission_status = status
+            self._claim_candidates[claim.candidate_id] = claim
+
+        report = MemoryAdmissionReport(
+            candidate_id=candidate_id,
+            admission_status=status,
+            admission_reasons=reasons,
+            claim_candidate_count=len(claim_candidates),
+            memory_admitted_count=int(status == "admitted"),
+            memory_rejected_count=int(status == "rejected"),
+            memory_pending_count=int(status == "pending"),
+            memory_audit_only_count=int(status == "audit_only"),
+            admission_unresolved_slot_count=int(status == "unresolved_slot"),
+            alias_mapping_hit_count=int(resolved.alias_hit),
+            unresolved_slot_count=int(resolved.unresolved),
+        )
+
+        if status != "admitted":
+            return report
+
+        write_report = self.write_memory_with_report(
+            task_id=task_id,
+            source_agent=source_agent,
+            task_topic=task_topic,
+            summary=summary,
+            tags=candidate_tags,
+            slot_hint=resolved.slot_id,
+            source_state_ids=source_state_ids,
+            evidence_refs=evidence_refs,
+            reuse_intent=reuse_intent,
+            confidence=confidence,
+        )
+        report.memory_ref = write_report.memory_ref
+        report.memory_write_count = write_report.memory_write_count
+        report.claim_card_count = write_report.claim_card_count
+        report.memory_view_count = write_report.memory_view_count
+        report.promotion_view_count = write_report.promotion_view_count
+        report.alias_mapping_hit_count += write_report.alias_mapping_hit_count
+        report.unresolved_slot_count += write_report.unresolved_slot_count
+        report.claim_to_memoryview_count = write_report.claim_card_count
+        return report
 
     def search_memory(
         self, query: str, tags: list[str] | None = None, top_k: int = 3
@@ -358,6 +531,62 @@ class MemoryStoreLite:
         summaries = [self._claims[item].summary for item in claim_ids[-4:]]
         return "；".join(summaries)
 
+    def _capture_claim_candidates(
+        self,
+        *,
+        candidate_id: str,
+        task_topic: str,
+        claim_cards: list[dict[str, Any]],
+    ) -> list[ClaimCandidate]:
+        candidates: list[ClaimCandidate] = []
+        for index, item in enumerate(claim_cards):
+            if not isinstance(item, dict):
+                continue
+            subject = str(item.get("subject") or task_topic)
+            predicate = str(item.get("predicate") or item.get("claim_type") or "claims")
+            obj = str(item.get("object") or item.get("summary") or item.get("claim") or "")
+            condition = str(item.get("condition") or "")
+            source_pointer = str(item.get("source_pointer") or item.get("source") or "")
+            confidence = self._float_between(item.get("confidence"), default=0.5)
+            claim_id = self._next_candidate_id(
+                "cc", candidate_id, str(index), f"{subject}:{predicate}:{obj}"
+            )
+            candidates.append(
+                ClaimCandidate(
+                    candidate_id=claim_id,
+                    memory_candidate_id=candidate_id,
+                    subject=subject,
+                    predicate=predicate,
+                    object=obj,
+                    condition=condition,
+                    confidence=confidence,
+                    source_pointer=source_pointer,
+                )
+            )
+        return candidates
+
+    def _admit_candidate(
+        self, candidate: MemoryCandidate, resolved: SlotResolution
+    ) -> tuple[str, list[str]]:
+        reasons: list[str] = []
+        if resolved.unresolved:
+            return "unresolved_slot", ["slot_unresolved"]
+        if not candidate.summary:
+            return "rejected", ["empty_summary"]
+        if candidate.confidence < 0.35:
+            return "rejected", ["confidence_below_rejection_threshold"]
+        if candidate.raw_required_hint and candidate.compression_loss_risk == "high":
+            return "audit_only", ["high_loss_raw_required"]
+        if candidate.confidence < 0.55:
+            reasons.append("confidence_below_admission_threshold")
+        if candidate.importance_hint < 0.45:
+            reasons.append("importance_below_admission_threshold")
+        if candidate.coverage_score < 0.35:
+            reasons.append("coverage_below_admission_threshold")
+        if reasons:
+            return "pending", reasons
+        return "admitted", ["rules_admitted"]
+
     def _resolve_slot(self, slot_hint: str) -> SlotResolution:
         normalized = self._normalize_slot(slot_hint)
         if normalized in CANONICAL_SLOTS:
@@ -391,6 +620,16 @@ class MemoryStoreLite:
         digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12]
         return f"mem_{digest}"
 
+    def _next_candidate_id(
+        self, prefix: str, task_id: str, source_agent: str, summary: str
+    ) -> str:
+        seed = (
+            f"{prefix}:{task_id}:{source_agent}:{summary}:"
+            f"{len(self._memory_candidates)}:{len(self._claim_candidates)}"
+        )
+        digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12]
+        return f"{prefix}_{digest}"
+
     def _group_overlap(self, requested_tags: set[str], memory_tags: set[str]) -> int:
         requested_groups = {tag for tag in requested_tags if tag.endswith(("_A", "_B"))}
         memory_groups = {tag for tag in memory_tags if tag.endswith(("_A", "_B"))}
@@ -403,3 +642,28 @@ class MemoryStoreLite:
     @staticmethod
     def _terms(text: str) -> list[str]:
         return [item.lower() for item in _WORD_RE.findall(text)]
+
+    @staticmethod
+    def _as_str_list(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item) for item in value if item is not None and str(item).strip()]
+
+    @staticmethod
+    def _dedupe(items: list[str]) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for item in items:
+            normalized = item.strip()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                result.append(normalized)
+        return result
+
+    @staticmethod
+    def _float_between(value: Any, *, default: float) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return default
+        return max(0.0, min(1.0, number))

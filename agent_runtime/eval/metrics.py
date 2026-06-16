@@ -44,6 +44,15 @@ class TaskMetricRow:
     wrong_memory_hit_count: int = 0
     memory_supported_output_count: int = 0
     memory_write_count: int = 0
+    memory_candidate_count: int = 0
+    claim_candidate_count: int = 0
+    memory_admitted_count: int = 0
+    memory_rejected_count: int = 0
+    memory_pending_count: int = 0
+    memory_audit_only_count: int = 0
+    admission_unresolved_slot_count: int = 0
+    claim_to_memoryview_count: int = 0
+    memory_admission_rate: float = 0.0
     claim_card_count: int = 0
     memory_view_count: int = 0
     promotion_view_count: int = 0
@@ -180,6 +189,31 @@ class MetricsCollector:
         row.promotion_view_count += promotion_view_count
         row.alias_mapping_hit_count += alias_mapping_hit_count
         row.unresolved_slot_count += unresolved_slot_count
+
+    def record_memory_admission(
+        self,
+        *,
+        task_id: str,
+        round_id: int,
+        mode: Mode,
+        memory_candidate_count: int = 0,
+        claim_candidate_count: int = 0,
+        memory_admitted_count: int = 0,
+        memory_rejected_count: int = 0,
+        memory_pending_count: int = 0,
+        memory_audit_only_count: int = 0,
+        admission_unresolved_slot_count: int = 0,
+        claim_to_memoryview_count: int = 0,
+    ) -> None:
+        row = self._row(task_id, round_id, mode)
+        row.memory_candidate_count += memory_candidate_count
+        row.claim_candidate_count += claim_candidate_count
+        row.memory_admitted_count += memory_admitted_count
+        row.memory_rejected_count += memory_rejected_count
+        row.memory_pending_count += memory_pending_count
+        row.memory_audit_only_count += memory_audit_only_count
+        row.admission_unresolved_slot_count += admission_unresolved_slot_count
+        row.claim_to_memoryview_count += claim_to_memoryview_count
 
     def record_memory_search_backend(
         self,
@@ -346,6 +380,10 @@ class MetricsCollector:
             row.memory_hit_rate = row.memory_query_hit_count / row.memory_query_count
         if row.memory_hit_count:
             row.useful_memory_hit_rate = row.useful_memory_hit_count / row.memory_hit_count
+        if row.memory_candidate_count:
+            row.memory_admission_rate = (
+                row.memory_admitted_count / row.memory_candidate_count
+            )
         row.end_to_end_collaboration_tokens = (
             row.direct_text_tokens
             + row.prompt_view_tokens
@@ -386,6 +424,14 @@ class MetricsCollector:
                 "wrong_memory_hit_count": 0,
                 "memory_supported_output_count": 0,
                 "memory_write_count": 0,
+                "memory_candidate_count": 0,
+                "claim_candidate_count": 0,
+                "memory_admitted_count": 0,
+                "memory_rejected_count": 0,
+                "memory_pending_count": 0,
+                "memory_audit_only_count": 0,
+                "admission_unresolved_slot_count": 0,
+                "claim_to_memoryview_count": 0,
                 "claim_card_count": 0,
                 "memory_view_count": 0,
                 "promotion_view_count": 0,
@@ -448,6 +494,16 @@ class MetricsCollector:
             bucket["wrong_memory_hit_count"] += row.wrong_memory_hit_count
             bucket["memory_supported_output_count"] += row.memory_supported_output_count
             bucket["memory_write_count"] += row.memory_write_count
+            bucket["memory_candidate_count"] += row.memory_candidate_count
+            bucket["claim_candidate_count"] += row.claim_candidate_count
+            bucket["memory_admitted_count"] += row.memory_admitted_count
+            bucket["memory_rejected_count"] += row.memory_rejected_count
+            bucket["memory_pending_count"] += row.memory_pending_count
+            bucket["memory_audit_only_count"] += row.memory_audit_only_count
+            bucket["admission_unresolved_slot_count"] += (
+                row.admission_unresolved_slot_count
+            )
+            bucket["claim_to_memoryview_count"] += row.claim_to_memoryview_count
             bucket["claim_card_count"] += row.claim_card_count
             bucket["memory_view_count"] += row.memory_view_count
             bucket["promotion_view_count"] += row.promotion_view_count
@@ -508,6 +564,11 @@ class MetricsCollector:
             bucket["useful_memory_hit_rate"] = (
                 bucket["useful_memory_hit_count"] / memory_hits
                 if bucket["memory_hit_count"]
+                else 0.0
+            )
+            bucket["memory_admission_rate"] = (
+                bucket["memory_admitted_count"] / bucket["memory_candidate_count"]
+                if bucket["memory_candidate_count"]
                 else 0.0
             )
             bucket["schema_valid_rate"] = (

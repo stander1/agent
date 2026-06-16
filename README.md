@@ -2,7 +2,7 @@
 
 本仓库用于迭代实现一个面向多 Agent 协作的跨框架运行时工具层，目标是在多 Agent 任务中通过结构化通信、非文本状态传递和共享记忆复用降低协作开销。
 
-当前版本：`v3.2 runtime output reliability guard`
+当前版本：`v3.3 memory candidate admission lite`
 
 实验结果记录见：
 
@@ -15,6 +15,7 @@
 - [docs/experiments/v3-full-ab-results.md](docs/experiments/v3-full-ab-results.md)
 - [docs/experiments/v3.1-final-schema-results.md](docs/experiments/v3.1-final-schema-results.md)
 - [docs/experiments/v3.2-reliability-guard-results.md](docs/experiments/v3.2-reliability-guard-results.md)
+- [docs/experiments/v3.3-memory-admission-results.md](docs/experiments/v3.3-memory-admission-results.md)
 
 版本切换与 GitHub 浏览方式见：[docs/versioning.md](docs/versioning.md)
 
@@ -173,3 +174,29 @@ A1 runtime_lite:
 ```
 
 这一步不是追求更高质量分，而是保证后续 v4 的 Retry Budget、Read Lease、GC 等机制建立在稳定输出契约之上。
+
+v3.3 按照 TLC-Memory 创新方案补齐 Memory Candidate Admission Lite：
+
+```text
+Contract Guard control.memory_card / claim_cards
+  -> MemoryCandidate / ClaimCandidate
+  -> Admission Lite
+  -> admitted candidates only
+  -> MemoryStore / ClaimCard / MemoryView
+```
+
+A1 runtime_lite smoke 显示：
+
+```text
+memory_candidate_count: 3
+memory_admitted_count: 3
+memory_rejected_count: 0
+memory_pending_count: 0
+memory_audit_only_count: 0
+admission_unresolved_slot_count: 0
+claim_to_memoryview_count: 3
+memory_admission_rate: 1.0
+schema_valid_rate: 1.0
+```
+
+这一步确认 `memory_card` 不再被视为最终长期记忆，而是先进入候选池和准入门控；只有 admitted candidate 才更新 MemoryView。

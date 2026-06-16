@@ -274,29 +274,16 @@ class V0Runtime:
                 state_refs.append(state_ref)
 
                 if agent.agent_id in {"writer", "reviewer", "memory_manager"}:
-                    write_report = self.memory_store.write_memory_with_report(
-                        task_id=task.task_id,
-                        source_agent=agent.agent_id,
-                        task_topic=task.title,
-                        summary=self._summary(output.content, 180),
-                        tags=[task.group_id, task.task_id, agent.agent_id],
-                        slot_hint=self._slot_hint_for_task(task, agent.agent_id),
-                        source_state_ids=[ref.state_id for ref in state_refs[-4:]],
-                        evidence_refs=[ref.state_id for ref in output_state_refs],
-                        reuse_intent=f"供 {task.group_id} 后续连续任务复用",
-                    )
-                    memory_ref = write_report.memory_ref
-                    output_memory_refs.append(memory_ref)
-                    self.metrics.record_memory_write(
-                        task_id=task.task_id,
-                        round_id=round_id,
-                        mode=mode,
-                        memory_write_count=write_report.memory_write_count,
-                        claim_card_count=write_report.claim_card_count,
-                        memory_view_count=write_report.memory_view_count,
-                        promotion_view_count=write_report.promotion_view_count,
-                        alias_mapping_hit_count=write_report.alias_mapping_hit_count,
-                        unresolved_slot_count=write_report.unresolved_slot_count,
+                    output_memory_refs.extend(
+                        self._write_runtime_memory(
+                            task=task,
+                            round_id=round_id,
+                            mode=mode,
+                            agent=agent,
+                            output=output,
+                            state_refs=state_refs,
+                            output_state_refs=output_state_refs,
+                        )
                     )
 
                 message_content = self._build_shp_message(
@@ -381,6 +368,96 @@ class V0Runtime:
             },
         )
         return context[-1]
+
+    def _write_runtime_memory(
+        self,
+        *,
+        task: TaskSpec,
+        round_id: int,
+        mode: Mode,
+        agent: DeterministicAgent,
+        output: AgentOutput,
+        state_refs: list[StateRef],
+        output_state_refs: list[StateRef],
+    ) -> list[MemoryRef]:
+        tags = [task.group_id, task.task_id, agent.agent_id]
+        source_state_ids = [ref.state_id for ref in state_refs[-4:]]
+        evidence_refs = [ref.state_id for ref in output_state_refs]
+        reuse_intent = f"供 {task.group_id} 后续连续任务复用"
+        contract_guard = output.metadata.get("contract_guard")
+
+        if isinstance(contract_guard, dict):
+            control = contract_guard.get("control", {})
+            if not contract_guard.get("schema_valid") or not isinstance(control, dict):
+                control = {}
+            admission_report = self.memory_store.write_memory_candidate_with_report(
+                task_id=task.task_id,
+                source_agent=agent.agent_id,
+                task_topic=task.title,
+                memory_card=control.get("memory_card"),
+                claim_cards=control.get("claim_cards"),
+                tags=tags,
+                slot_hint=self._slot_hint_for_task(task, agent.agent_id),
+                source_state_ids=source_state_ids,
+                evidence_refs=evidence_refs,
+                reuse_intent=reuse_intent,
+                fallback_summary=self._summary(output.content, 180),
+            )
+            self.metrics.record_memory_admission(
+                task_id=task.task_id,
+                round_id=round_id,
+                mode=mode,
+                memory_candidate_count=admission_report.memory_candidate_count,
+                claim_candidate_count=admission_report.claim_candidate_count,
+                memory_admitted_count=admission_report.memory_admitted_count,
+                memory_rejected_count=admission_report.memory_rejected_count,
+                memory_pending_count=admission_report.memory_pending_count,
+                memory_audit_only_count=admission_report.memory_audit_only_count,
+                admission_unresolved_slot_count=(
+                    admission_report.admission_unresolved_slot_count
+                ),
+                claim_to_memoryview_count=admission_report.claim_to_memoryview_count,
+            )
+            self.metrics.record_memory_write(
+                task_id=task.task_id,
+                round_id=round_id,
+                mode=mode,
+                memory_write_count=admission_report.memory_write_count,
+                claim_card_count=admission_report.claim_card_count,
+                memory_view_count=admission_report.memory_view_count,
+                promotion_view_count=admission_report.promotion_view_count,
+                alias_mapping_hit_count=admission_report.alias_mapping_hit_count,
+                unresolved_slot_count=admission_report.unresolved_slot_count,
+            )
+            return (
+                [admission_report.memory_ref]
+                if admission_report.memory_ref is not None
+                else []
+            )
+
+        write_report = self.memory_store.write_memory_with_report(
+            task_id=task.task_id,
+            source_agent=agent.agent_id,
+            task_topic=task.title,
+            summary=self._summary(output.content, 180),
+            tags=tags,
+            slot_hint=self._slot_hint_for_task(task, agent.agent_id),
+            source_state_ids=source_state_ids,
+            evidence_refs=evidence_refs,
+            reuse_intent=reuse_intent,
+        )
+        self.metrics.record_memory_write(
+            task_id=task.task_id,
+            round_id=round_id,
+            mode=mode,
+            memory_write_count=write_report.memory_write_count,
+            claim_card_count=write_report.claim_card_count,
+            memory_view_count=write_report.memory_view_count,
+            promotion_view_count=write_report.promotion_view_count,
+            alias_mapping_hit_count=write_report.alias_mapping_hit_count,
+            unresolved_slot_count=write_report.unresolved_slot_count,
+        )
+        return [write_report.memory_ref]
 
     def _apply_contract_guard(
         self,

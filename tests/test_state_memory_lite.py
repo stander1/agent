@@ -111,6 +111,94 @@ class MemoryStoreLiteTest(unittest.TestCase):
         self.assertIn("Deliverable View", deliverable_view)
         self.assertIn("预算表", deliverable_view)
 
+    def test_memory_candidate_admission_writes_only_admitted_candidates(self) -> None:
+        store = MemoryStoreLite()
+        report = store.write_memory_candidate_with_report(
+            task_id="A2",
+            source_agent="writer",
+            task_topic="行程约束整合",
+            memory_card={
+                "summary": "用户预算 3000 元，偏好不辣餐食和低晕车路线。",
+                "key_points": ["预算 3000", "不辣", "低晕车"],
+                "tags": ["travel"],
+                "reuse_scope": ["travel_A"],
+                "confidence": 0.82,
+                "importance_hint": 0.78,
+                "coverage_score": 0.74,
+                "compression_loss_risk": "low",
+                "raw_required_hint": False,
+            },
+            claim_cards=[
+                {
+                    "subject": "user_requirement",
+                    "predicate": "budget",
+                    "object": "3000",
+                    "confidence": 0.84,
+                }
+            ],
+            tags=["travel_A", "A2", "writer"],
+            slot_hint="travel_preference",
+            source_state_ids=["state_a"],
+        )
+
+        self.assertEqual(report.admission_status, "admitted")
+        self.assertEqual(report.memory_candidate_count, 1)
+        self.assertEqual(report.claim_candidate_count, 1)
+        self.assertEqual(report.memory_admitted_count, 1)
+        self.assertEqual(report.memory_write_count, 1)
+        self.assertEqual(report.claim_to_memoryview_count, 1)
+        self.assertIsNotNone(report.memory_ref)
+        hits = store.search_memory("预算 不辣 晕车", tags=["travel_A"])
+        self.assertTrue(hits)
+
+    def test_memory_candidate_unresolved_slot_does_not_update_memory_view(self) -> None:
+        store = MemoryStoreLite()
+        report = store.write_memory_candidate_with_report(
+            task_id="X1",
+            source_agent="writer",
+            task_topic="未知槽位测试",
+            memory_card={
+                "summary": "这条候选没有可解析 slot。",
+                "confidence": 0.9,
+                "importance_hint": 0.9,
+                "coverage_score": 0.9,
+            },
+            claim_cards=[],
+            tags=["misc"],
+            slot_hint="ambiguous_slot_that_is_not_registered",
+        )
+
+        self.assertEqual(report.admission_status, "unresolved_slot")
+        self.assertEqual(report.memory_candidate_count, 1)
+        self.assertEqual(report.admission_unresolved_slot_count, 1)
+        self.assertEqual(report.memory_write_count, 0)
+        self.assertIsNone(report.memory_ref)
+        self.assertFalse(store.search_memory("候选", tags=["misc"]))
+
+    def test_high_loss_raw_required_candidate_is_audit_only(self) -> None:
+        store = MemoryStoreLite()
+        report = store.write_memory_candidate_with_report(
+            task_id="B3",
+            source_agent="reviewer",
+            task_topic="证据链审计",
+            memory_card={
+                "summary": "完整审计证据必须查看原文，摘要不足以支持复用。",
+                "confidence": 0.88,
+                "importance_hint": 0.8,
+                "coverage_score": 0.7,
+                "compression_loss_risk": "high",
+                "raw_required_hint": True,
+            },
+            claim_cards=[],
+            tags=["security_B", "B3", "reviewer"],
+            slot_hint="security_audit",
+        )
+
+        self.assertEqual(report.admission_status, "audit_only")
+        self.assertEqual(report.memory_audit_only_count, 1)
+        self.assertEqual(report.memory_write_count, 0)
+        self.assertIsNone(report.memory_ref)
+
 
 class DeliverableSchemaTest(unittest.TestCase):
     def test_travel_final_task_has_required_schema(self) -> None:

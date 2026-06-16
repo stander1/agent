@@ -61,6 +61,7 @@ TLC-Memory:
 | v3.0 | `v3.0-memory-view-lite` | v3 | PromotionView、ClaimCard、MemoryView、Alias Mapping、Deliverable View | 对齐 v3 |
 | v3.1 | `v3.1-final-schema` | v3 内部补强 | Final Deliverable Schema、Reviewer Guard、质量记录 | 属于 v3 最终交付质量补强，不改变主线 |
 | v3.2 | `v3.2-reliability-guard` | v2 缺口补齐 + v3 稳定性守卫 | Provider Response Guard、Agent Output Contract Guard、degraded fallback | 这是对 v2 应有能力的补齐，同时服务 v3 连续任务稳定性 |
+| v3.3 | `v3.3-memory-admission` | v3 内部补齐 | MemoryCandidate、ClaimCandidate、Admission Lite、admitted-only MemoryView 更新、准入状态指标 | 对齐 TLC-Memory 的候选池与准入门控，不改变主线 |
 
 ## 4. 已经发生的路线偏差
 
@@ -144,7 +145,7 @@ Raw State 不能直接进入 Memory Pool；
 无法解析 slot_id 的 Claim 不能进入正式 MemoryView。
 ```
 
-因此如果继续做 v3.3，名称和边界必须是：
+v3.3 已按以下名称和边界落地：
 
 ```text
 v3.3 Memory Candidate Admission Lite
@@ -180,7 +181,7 @@ MemoryStore / ClaimCard / MemoryView
 | 纯文本 baseline | Eval | v0 | 已实现 | v5 继续作为对照组 |
 | SHP-lite | CMJCC | v1 | 已实现 | 后续与 Contract Control Header 对齐 |
 | StatePool-lite | SHP-State | v1 | 已实现 | SQLite/State Access API 仍需增强 |
-| MemoryStore-lite | TLC-Memory | v1 | 已实现 | 需要 Candidate Admission 后再写入 |
+| MemoryStore-lite | TLC-Memory | v1 | 已实现 | v3.3 已接 Candidate Admission，后续补生命周期 |
 | LLM eval harness | Eval | v2 | 已实现 | 保持 API key 仅环境变量 |
 | Agent Output Contract | CMJCC | v2 | v3.2 已实现 lite | 后续让 memory_card/claim_cards 驱动候选池 |
 | Output Contract Guard | CMJCC | v2 | v3.2 已实现 lite | 增加更多 schema 和 retry budget |
@@ -192,8 +193,8 @@ MemoryStore / ClaimCard / MemoryView
 | Alias Mapping | TLC-Memory | v3 | 已实现 lite | 继续避免粗粒度误合并 |
 | Final Deliverable Schema | CMJCC / TLC-Memory view | v3 补强 | v3.1 已实现 | 不等同 Memory Admission |
 | Context-Pruned Retry-lite | CMJCC | v3 | v3.2 部分实现 | 需接 Retry Budget |
-| Memory Admission Gate | TLC-Memory | v3/v4 | 未完整实现 | 下一步若继续 v3，必须优先做 |
-| Memory Candidate Pool | TLC-Memory / SHP-State Bridge | v3 | 未完整实现 | 下一步 v3.3 的正确目标 |
+| Memory Admission Gate | TLC-Memory | v3/v4 | v3.3 已实现 lite | v4 继续补 lifecycle / conflict resolver / budget gate |
+| Memory Candidate Pool | TLC-Memory / SHP-State Bridge | v3 | v3.3 已实现 lite | 已接 Contract Guard memory_card / claim_cards |
 | Lifecycle Status | TLC-Memory | v4 | 未实现 | v4 做 |
 | Preflight Validation-lite | TLC-Memory / CMJCC | v4 | 未实现 | v4 做，防高成本重写 |
 | Read Lease-lite | SHP-State | v4 | 未实现 | v4 与 GC 同步做 |
@@ -225,14 +226,15 @@ MemoryStore / ClaimCard / MemoryView
 | v2.3 | v2 / v3 前置 | StatePool 分层前调 |
 | v3.1 | v3 | Final Deliverable Schema 质量补强 |
 | v3.2 | v2 缺口补齐 / v3 稳定性守卫 | Output Reliability Guard 工程化 |
+| v3.3 | v3 | Memory Candidate Admission Lite，补齐 TLC-Memory 候选池与准入门控 |
 
-未来若出现：
+已登记并实现：
 
 ```text
 v3.3 Memory Candidate Admission Lite
 ```
 
-必须满足：
+v3.3 已满足：
 
 ```text
 1. 不直接把 memory_card 写入长期 MemoryStore；
@@ -247,12 +249,12 @@ v3.3 Memory Candidate Admission Lite
 当前主干已经到：
 
 ```text
-v3.2 = v3 主线 + v2 可靠性缺口补齐
+v3.3 = v3 主线 + v2 可靠性缺口补齐 + TLC-Memory 候选准入层
 ```
 
-下一步有两个选择。
+选择 A 已完成，下一步不再继续扩展 v3 小版本，而是进入 v4。
 
-### 选择 A：继续补齐 v3 主线
+### 已完成：选择 A 补齐 v3 主线
 
 名称：
 
@@ -260,7 +262,7 @@ v3.2 = v3 主线 + v2 可靠性缺口补齐
 v3.3 Memory Candidate Admission Lite
 ```
 
-目标：
+已实现目标：
 
 ```text
 把 Contract Guard 产出的 memory_card / claim_cards 变成候选；
@@ -268,28 +270,28 @@ v3.3 Memory Candidate Admission Lite
 只让 admitted candidate 进入 MemoryStore / MemoryView。
 ```
 
-这是最符合当前状态的下一步，因为 v3 的 TLC-Memory 仍缺候选准入层。
+这一步已经在 v3.3 落地，v3 的 TLC-Memory 不再保留 direct-to-MemoryStore 的架构缺口。
 
-### 选择 B：冻结 v3，进入 v4
+### 下一步：冻结 v3，进入 v4
 
 前提：
 
 ```text
 明确 v3 当前是 lite 版；
-承认 Memory Admission 仍是 v4 前置或 v3 未完成项；
+基于 v3.3 Memory Admission Lite 继续扩展生命周期；
 进入 Retry Budget / Read Lease / GC / Preflight Validation。
 ```
 
 风险：
 
 ```text
-如果不补 Candidate Admission，TLC-Memory 容易被质疑“Claim 直接入池，缺少生命周期准入”。
+如果 v4 绕过 Candidate Admission，TLC-Memory 会重新退化为“Claim 直接入池”。
 ```
 
-因此推荐：
+因此当前推荐：
 
 ```text
-先做选择 A，再进 v4。
+进入 v4，开始 Retry Budget / Read Lease / GC / Preflight Validation。
 ```
 
 ## 8. 答辩口径校准
@@ -302,7 +304,7 @@ v0-v1 建立完整闭环；
 v2 进入真实 LLM 和协议可靠化，但 Output Guard 在 v3.2 才补齐工程实现；
 v3 聚焦连续任务复用，已实现 ClaimCard / MemoryView / Alias Mapping / Deliverable View；
 v3.1 和 v3.2 是 v3 的质量与稳定性补强；
-下一步补 Memory Candidate Admission，随后进入 v4 的成本治理和生命周期。
+Memory Candidate Admission 已在 v3.3 补齐，随后进入 v4 的成本治理和生命周期。
 ```
 
 不要说：
