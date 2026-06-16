@@ -2,6 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agent_runtime.core.deliverable_schema import schema_coverage, schema_for_task
+from agent_runtime.core.models import TaskSpec
 from agent_runtime.memory.memory_store import MemoryStoreLite
 from agent_runtime.state.state_pool import StatePoolLite
 
@@ -108,6 +110,54 @@ class MemoryStoreLiteTest(unittest.TestCase):
         )
         self.assertIn("Deliverable View", deliverable_view)
         self.assertIn("预算表", deliverable_view)
+
+
+class DeliverableSchemaTest(unittest.TestCase):
+    def test_travel_final_task_has_required_schema(self) -> None:
+        task = TaskSpec(
+            task_id="A10",
+            group_id="travel_A",
+            title="最终修订版旅行手册与决策日志",
+            prompt="生成最终旅行手册",
+        )
+        schema = schema_for_task(task)
+        self.assertIsNotNone(schema)
+        self.assertIn("budget_table", schema.required_fields)
+        hits, required = schema_coverage(
+            schema,
+            "selected_destination duration day1_plan day2_plan day3_plan "
+            "itinerary_table budget_table total_budget transport_plan lodging_plan local_food_plan "
+            "non_spicy_option souvenir_budget weather_fallback "
+            "motion_sickness_guard decision_log",
+        )
+        self.assertEqual(hits, required)
+        chinese_hits, chinese_required = schema_coverage(
+            schema,
+            "最终旅行手册包含每日行程表、预算表、目的地、3 天 2 晚、第一天、第二天、"
+            "第三天、总预算、交通、住宿、当地特色餐、不吃辣、伴手礼、雨天备选、"
+            "晕车和决策日志。",
+        )
+        self.assertEqual(chinese_hits, chinese_required)
+
+    def test_first_draft_final_title_does_not_trigger_final_schema(self) -> None:
+        task = TaskSpec(
+            task_id="A5",
+            group_id="travel_A",
+            title="第一版最终旅行手册生成",
+            prompt="生成第一版旅行手册",
+        )
+        self.assertIsNone(schema_for_task(task))
+
+    def test_security_final_task_has_required_schema(self) -> None:
+        task = TaskSpec(
+            task_id="B10",
+            group_id="security_B",
+            title="最终审计手册与系统决策日志",
+            prompt="生成最终合成安全审计手册",
+        )
+        schema = schema_for_task(task)
+        self.assertIsNotNone(schema)
+        self.assertIn("evidence_refs", schema.required_fields)
 
 
 if __name__ == "__main__":

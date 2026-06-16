@@ -54,6 +54,10 @@ class TaskMetricRow:
     alias_mapping_hit_count: int = 0
     vector_retrieval_count: int = 0
     retrieval_backend: str = ""
+    deliverable_schema_required_count: int = 0
+    deliverable_schema_hit_count: int = 0
+    deliverable_schema_complete: bool = False
+    final_quality_retry_count: int = 0
     retrieved_memory_tokens: int = 0
     control_llm_tokens: int = 0
     retry_tokens: int = 0
@@ -186,6 +190,43 @@ class MetricsCollector:
         row = self._row(task_id, round_id, mode)
         row.audit_view_expansion_count += count
 
+    def record_deliverable_schema(
+        self,
+        *,
+        task_id: str,
+        round_id: int,
+        mode: Mode,
+        hit_count: int,
+        required_count: int,
+    ) -> None:
+        row = self._row(task_id, round_id, mode)
+        row.deliverable_schema_hit_count = max(
+            row.deliverable_schema_hit_count, hit_count
+        )
+        row.deliverable_schema_required_count = max(
+            row.deliverable_schema_required_count, required_count
+        )
+        row.deliverable_schema_complete = row.deliverable_schema_complete or (
+            required_count > 0 and hit_count >= required_count
+        )
+
+    def record_final_quality_retry(
+        self,
+        *,
+        task_id: str,
+        round_id: int,
+        mode: Mode,
+        retry_prompt: str,
+        retry_output: str,
+        token_counter: TokenCounter,
+    ) -> None:
+        row = self._row(task_id, round_id, mode)
+        prompt_count = token_counter.count(retry_prompt)
+        output_count = token_counter.count(retry_output)
+        row.final_quality_retry_count += 1
+        row.retry_tokens += prompt_count.token_count + output_count.token_count
+        self._apply_token_meta(row, prompt_count)
+
     def record_prompt(
         self,
         task_id: str,
@@ -284,6 +325,10 @@ class MetricsCollector:
                 "alias_mapping_hit_count": 0,
                 "vector_retrieval_count": 0,
                 "retrieval_backend": "",
+                "deliverable_schema_required_count": 0,
+                "deliverable_schema_hit_count": 0,
+                "deliverable_schema_complete_count": 0,
+                "final_quality_retry_count": 0,
                 "hot_state_count": 0,
                 "warm_state_count": 0,
                 "cold_state_count": 0,
@@ -333,6 +378,14 @@ class MetricsCollector:
             bucket["vector_retrieval_count"] += row.vector_retrieval_count
             if row.retrieval_backend:
                 bucket["retrieval_backend"] = row.retrieval_backend
+            bucket["deliverable_schema_required_count"] += (
+                row.deliverable_schema_required_count
+            )
+            bucket["deliverable_schema_hit_count"] += row.deliverable_schema_hit_count
+            bucket["deliverable_schema_complete_count"] += int(
+                row.deliverable_schema_complete
+            )
+            bucket["final_quality_retry_count"] += row.final_quality_retry_count
             bucket["hot_state_count"] += row.hot_state_count
             bucket["warm_state_count"] += row.warm_state_count
             bucket["cold_state_count"] += row.cold_state_count

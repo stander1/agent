@@ -23,11 +23,19 @@ class LlmAgent:
     def run(self, task: TaskSpec, context: list[AgentOutput]) -> AgentOutput:
         runtime_prompt = context[-1].content if context else task.prompt
         final_task_instruction = ""
+        length_instruction = (
+            "5. 输出控制在 180 到 260 个中文字符，MemoryManagerAgent 可控制在 120 到 180 个中文字符。"
+        )
         if task.task_id.endswith("10") or "最终" in task.title:
             final_task_instruction = (
                 "\n当前任务是最终收束任务：必须输出可直接交付的完整结果，"
                 "不要只输出方法论摘要。若上下文包含 Deliverable View，"
                 "必须覆盖其中的关键结论、证据表、修订日志和决策日志。"
+                "若上下文包含 Final Deliverable Schema，必须逐项覆盖 schema 的必需章节和字段，"
+                "并在小标题或表格字段中显式保留关键 schema 字段名或中文字段标签。"
+            )
+            length_instruction = (
+                "5. 最终收束任务可输出 550 到 850 个中文字符；MemoryManagerAgent 控制在 200 到 320 个中文字符。"
             )
         system_prompt = (
             f"你是 {self.role}，正在参与一个多 Agent 连续协作任务。\n"
@@ -38,7 +46,7 @@ class LlmAgent:
             "2. 保持结论可被下游 Agent 复用。\n"
             "3. 不要虚构实时网页数据，只能使用给定任务、上游上下文和本地资料。\n"
             "4. 尽量使用结构化小标题和列表，避免冗长寒暄。\n"
-            "5. 输出控制在 180 到 260 个中文字符，MemoryManagerAgent 可控制在 120 到 180 个中文字符。"
+            f"{length_instruction}"
         )
         user_prompt = (
             f"任务编号：{task.task_id}\n"

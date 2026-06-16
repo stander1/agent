@@ -2,7 +2,7 @@
 
 本仓库用于迭代实现一个面向多 Agent 协作的跨框架运行时工具层，目标是在多 Agent 任务中通过结构化通信、非文本状态传递和共享记忆复用降低协作开销。
 
-当前版本：`v3-lite memory reuse`
+当前版本：`v3.1 final deliverable schema`
 
 实验结果记录见：
 
@@ -13,6 +13,7 @@
 - [docs/experiments/v2-security-b-results.md](docs/experiments/v2-security-b-results.md)
 - [docs/experiments/v3-lite-smoke-results.md](docs/experiments/v3-lite-smoke-results.md)
 - [docs/experiments/v3-full-ab-results.md](docs/experiments/v3-full-ab-results.md)
+- [docs/experiments/v3.1-final-schema-results.md](docs/experiments/v3.1-final-schema-results.md)
 
 版本切换与 GitHub 浏览方式见：[docs/versioning.md](docs/versioning.md)
 
@@ -127,3 +128,21 @@ B1-B10 合成安全审计:
 但两组 v2.3 的 MiMo 严格质量裁判都判定 `baseline_text` 的最终收束结果更完整，说明 v3 需要重点补 ClaimCard / MemoryView / Deliverable View / Reviewer 修复闭环，避免低开销压缩牺牲最终交付质量。
 
 v3-lite 已开始补齐这条质量链路：当前实现了 Promotion View、ClaimCard、MemoryView、Alias Mapping 和 Deliverable View。完整 A/B 重跑显示：A 组旅行规划仍由 `baseline_text` 质量胜出，说明通用 Deliverable View 还不足以生成具体行程手册；B 组合成安全审计中 `runtime_lite` 质量反超 baseline，说明 Claim/Evidence/Decision Log 类任务已经能从 v3 记忆视图中受益。
+
+v3.1 在 v3 基础上加入 Final Deliverable Schema：A10/B10 最终收束任务会注入领域化 schema，Reviewer 可触发一次短上下文修复，并记录 `deliverable_schema_complete` / `final_quality_retry_count`。正式 A/B 实验显示：
+
+```text
+A1-A10 旅行规划:
+  end_to_end_collaboration_tokens 降低 88.8%
+  llm_total_tokens 降低 85.1%
+  schema 覆盖 16/16
+  质量裁判 baseline_text 胜出 26 vs 22
+
+B1-B10 合成安全审计:
+  end_to_end_collaboration_tokens 降低 89.7%
+  llm_total_tokens 降低 86.3%
+  schema 覆盖 12/12
+  质量裁判 runtime_lite 胜出 35 vs 22
+```
+
+结论：v3.1 已证明低开销通信和最终交付 schema 可以兼容；但 A 组仍需要在后续版本增强领域事实保真和细节充分性，而 B 组这类证据链任务已经比较适合当前 Runtime Lite 路线。

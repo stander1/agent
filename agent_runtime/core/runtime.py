@@ -8,6 +8,12 @@ from pathlib import Path
 from typing import Iterable
 
 from agent_runtime.core.agents import DeterministicAgent
+from agent_runtime.core.deliverable_schema import (
+    render_schema_prompt,
+    schema_field_coverage,
+    schema_coverage,
+    schema_for_task,
+)
 from agent_runtime.core.models import AgentOutput, Mode, RuntimeMessage, TaskSpec
 from agent_runtime.eval.metrics import MetricsCollector
 from agent_runtime.eval.token_counter import TokenCounter
@@ -62,6 +68,8 @@ class V0Runtime:
         task_memory_refs: list[MemoryRef] = []
         task_memory_prompt_views: list[str] = []
         deliverable_view = ""
+        deliverable_schema = schema_for_task(task)
+        deliverable_schema_prompt = render_schema_prompt(deliverable_schema)
         if mode == "runtime_lite":
             search_report = self.memory_store.search_memory_with_report(
                 task.prompt,
@@ -114,6 +122,9 @@ class V0Runtime:
                 deliverable_view=deliverable_view
                 if mode == "runtime_lite" and agent.agent_id in {"writer", "reviewer", "memory_manager"}
                 else "",
+                deliverable_schema_prompt=deliverable_schema_prompt
+                if mode == "runtime_lite" and agent.agent_id in {"writer", "reviewer", "memory_manager"}
+                else "",
                 agent_role=agent.role,
             )
             self.metrics.record_prompt(
@@ -145,6 +156,82 @@ class V0Runtime:
                 agent_context = context
 
             output = agent.run(task, agent_context)
+            if mode == "runtime_lite" and deliverable_schema and agent.agent_id in {
+                "writer",
+                "reviewer",
+                "memory_manager",
+            }:
+                hit_count, required_count, missing_fields = schema_field_coverage(
+                    deliverable_schema, output.content
+                )
+                self.metrics.record_deliverable_schema(
+                    task_id=task.task_id,
+                    round_id=round_id,
+                    mode=mode,
+                    hit_count=hit_count,
+                    required_count=required_count,
+                )
+                if agent.agent_id == "reviewer" and missing_fields:
+                    retry_prompt = self._build_schema_retry_prompt(
+                        task=task,
+                        reviewer_output=output.content,
+                        missing_fields=missing_fields,
+                        deliverable_view=deliverable_view,
+                        deliverable_schema_prompt=deliverable_schema_prompt,
+                    )
+                    retry_output = agent.run(
+                        task,
+                        [AgentOutput(agent_id="runtime_prompt", content=retry_prompt)],
+                    )
+                    retry_llm_meta = retry_output.metadata.get("llm", {})
+                    if retry_llm_meta:
+                        self.metrics.record_llm_call(
+                            task_id=task.task_id,
+                            round_id=round_id,
+                            mode=mode,
+                            usage=retry_llm_meta.get("usage", {}),
+                            latency_ms=float(
+                                retry_llm_meta.get("latency_ms", 0.0) or 0.0
+                            ),
+                        )
+                    self.metrics.record_final_quality_retry(
+                        task_id=task.task_id,
+                        round_id=round_id,
+                        mode=mode,
+                        retry_prompt=retry_prompt,
+                        retry_output=retry_output.content,
+                        token_counter=self.token_counter,
+                    )
+                    self.trace.write(
+                        "final_quality_retry",
+                        {
+                            "task_id": task.task_id,
+                            "round_id": round_id,
+                            "mode": mode,
+                            "agent_id": agent.agent_id,
+                            "missing_fields": missing_fields,
+                            "retry_output_chars": len(retry_output.content),
+                        },
+                    )
+                    output = AgentOutput(
+                        agent_id=output.agent_id,
+                        content=(
+                            f"{output.content}\n\n"
+                            "【Final Schema 修复补丁】\n"
+                            f"{retry_output.content}"
+                        ),
+                        metadata=output.metadata,
+                    )
+                    hit_count, required_count = schema_coverage(
+                        deliverable_schema, output.content
+                    )
+                    self.metrics.record_deliverable_schema(
+                        task_id=task.task_id,
+                        round_id=round_id,
+                        mode=mode,
+                        hit_count=hit_count,
+                        required_count=required_count,
+                    )
             llm_meta = output.metadata.get("llm", {})
             if llm_meta:
                 self.metrics.record_llm_call(
@@ -282,6 +369,7 @@ class V0Runtime:
         state_refs: list[StateRef] | None = None,
         memory_prompt_views: list[str] | None = None,
         deliverable_view: str = "",
+        deliverable_schema_prompt: str = "",
         agent_role: str = "",
     ) -> str:
         if mode == "baseline_text":
@@ -305,12 +393,16 @@ class V0Runtime:
                 if deliverable_view
                 else ""
             )
+            schema_block = (
+                f"\n\n{deliverable_schema_prompt}" if deliverable_schema_prompt else ""
+            )
             return (
                 f"任务：{task.prompt}\n\n"
                 "runtime_lite 控制字段：下游仅通过 Prompt View 读取状态和记忆。\n"
                 f"Memory Prompt View:\n{memory_block or '无可复用记忆'}\n\n"
                 f"State Prompt View:\n{state_block or '无上游状态'}"
                 f"{deliverable_block}"
+                f"{schema_block}"
             )
 
         previous = "\n\n".join(
@@ -321,6 +413,28 @@ class V0Runtime:
             f"任务：{task.prompt}\n\n"
             "runtime_stub_mode 控制字段：state_refs=[]; memory_refs=[]\n"
             f"轻量上游摘要：\n{previous}"
+        )
+
+    def _build_schema_retry_prompt(
+        self,
+        *,
+        task: TaskSpec,
+        reviewer_output: str,
+        missing_fields: list[str],
+        deliverable_view: str,
+        deliverable_schema_prompt: str,
+    ) -> str:
+        missing = ", ".join(missing_fields)
+        return (
+            f"任务：{task.prompt}\n\n"
+            "这是一次 Context-Pruned Final Schema Retry，只允许根据下方裁剪上下文补齐最终交付缺项，"
+            "不要展开原始全量历史。\n\n"
+            f"缺失字段：{missing}\n\n"
+            f"{deliverable_schema_prompt}\n\n"
+            f"Deliverable View:\n{deliverable_view or '无'}\n\n"
+            f"Reviewer 初稿：\n{reviewer_output[:900]}\n\n"
+            "请输出一段可直接附加到最终交付中的修复补丁，逐项覆盖缺失字段；"
+            "每个缺失项都必须显式写出字段名或中文字段标签。"
         )
 
     def _write_agent_state(

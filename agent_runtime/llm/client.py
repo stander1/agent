@@ -92,7 +92,12 @@ class OpenAICompatibleChatClient:
                 with urllib.request.urlopen(
                     request, timeout=self.config.timeout_seconds
                 ) as response:
-                    return json.loads(response.read().decode("utf-8"))
+                    payload = json.loads(response.read().decode("utf-8"))
+                    if not isinstance(payload, dict):
+                        raise ValueError(
+                            f"LLM response root must be object, got {type(payload).__name__}"
+                        )
+                    return payload
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="replace")
                 if exc.code < 500 or attempt >= attempts:
@@ -107,6 +112,10 @@ class OpenAICompatibleChatClient:
             except (http.client.RemoteDisconnected, TimeoutError, ConnectionError) as exc:
                 if attempt >= attempts:
                     raise RuntimeError(f"LLM connection failed: {exc}") from exc
+                last_error = exc
+            except ValueError as exc:
+                if attempt >= attempts:
+                    raise RuntimeError(f"LLM response malformed: {exc}") from exc
                 last_error = exc
             time.sleep(self.config.retry_backoff_seconds * attempt)
         raise RuntimeError(f"LLM request failed after retries: {last_error}") from last_error
