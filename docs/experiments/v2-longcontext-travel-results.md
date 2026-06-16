@@ -159,3 +159,88 @@ avg_latency_ms 降低 7.3%
 ```
 
 重新实验还加入了 MiMo 严格质量裁判。裁判结果显示 `runtime_lite` 在 A10 最终结果质量上优于 `baseline_text`，但两个版本都仍需补强预算表、决策日志和质量修复闭环。详见：[v2-longcontext-quality-judge.md](v2-longcontext-quality-judge.md)。
+
+## v2.3 三层状态池重跑
+
+v2.3 目标不是进入 v3 的 MemoryView/ClaimCard，而是修正 v2.2 的状态池边界：
+
+```text
+Hot Tier:
+  当前马上使用的 retrieval_state、小型 metadata。
+
+Warm Tier:
+  预留给上一轮状态、中间 conclusion_state、候选 memory_candidate。
+
+Cold Tier:
+  完整 artifact content、审计 payload、大对象和低频对象。
+```
+
+本轮代码将 `artifact_state` 的完整 `content` 从普通状态 payload 中移出，只写入 `state_cold/*.audit.json`。普通 `artifact_state` 元数据文件只保留 `artifact_id`、`sha256`、`summary`、`audit_payload_ref` 和 `audit_payload_hash`。普通 Agent 仍通过 `render_prompt_view()` 获取最小 Prompt View；质量裁判和调试工具通过 cold audit payload 读取完整正文。
+
+原始输出目录：`runs/v2.3-longcontext-a1-a10-mimo25`
+
+运行命令：
+
+```powershell
+F:\software\anaconda\envs\multi-agent-demo\python.exe .\examples\run_v2_llm_eval.py --rounds 1 --mode both --config .\configs\llm.mimo.example.json --max-completion-tokens 300 --output-dir runs\v2.3-longcontext-a1-a10-mimo25
+```
+
+### 总体结果
+
+| 指标 | baseline_text | runtime_lite | 降低幅度 |
+| --- | ---: | ---: | ---: |
+| direct_text_tokens | 22770 | 14008 | 38.5% |
+| prompt_view_tokens | 561779 | 31032 | 94.5% |
+| llm_prompt_tokens | 371230 | 36235 | 90.2% |
+| llm_total_tokens | 385978 | 49454 | 87.2% |
+| end_to_end_collaboration_tokens | 584549 | 48639 | 91.7% |
+| avg_latency_ms | 32729.7 | 35931.9 | -9.8% |
+| success_rate | 100% | 100% | 持平 |
+
+注意：延迟列中 `-9.8%` 表示 runtime_lite 平均延迟上升 9.8%。本轮说明 token 降低仍然显著，但真实 LLM 端到端延迟受服务波动、提示结构和重试影响，不能只用 token 代表全部通信开销。
+
+### 三层状态池验证
+
+| 指标 | runtime_lite |
+| --- | ---: |
+| hot_state_count | 10 |
+| warm_state_count | 0 |
+| cold_state_count | 40 |
+| hot_state_bytes | 11144 |
+| warm_state_bytes | 0 |
+| cold_state_bytes | 87351 |
+| cold metadata files | 40 |
+| cold audit files | 40 |
+| metadata content 字段命中 | 0 |
+| audit content 字段命中 | 40 |
+
+解释：
+
+- 10 个 `retrieval_state` 进入 Hot Tier。
+- 40 个 Agent 产物进入 Cold Tier 的 audit payload。
+- 普通 cold metadata 文件没有 `content` 字段，说明完整正文没有混入普通 Prompt View 可读状态。
+- `state_cold/*.audit.json` 保留完整 content，用于 Reviewer、质量裁判和调试审计。
+
+### 质量裁判
+
+裁判文件：`runs/v2.3-longcontext-a1-a10-mimo25/quality_judge_mimo_v2_3_strict_1to5.json`
+
+严格 1-5 分裁判结果：
+
+```text
+winner: baseline_text
+baseline_total: 35
+runtime_lite_total: 28
+```
+
+裁判认为 baseline_text 的 A10 最终摘要覆盖约束更完整，尤其是天气备选、伴手礼预算来源、预算明细和决策日志。runtime_lite 的最终摘要更短，虽然低开销优势明显，但最终整合质量不足。
+
+因此 v2.3 的结论应写为：
+
+```text
+v2.3 证明三层状态池和 Cold audit payload 可行，
+并且普通 Agent 不读取 raw content 的情况下仍保持 91.7% 端到端 token 降低。
+但 v2.3 还不能证明最终答案质量稳定优于 baseline_text；
+v3 必须通过 Promotion View、ClaimCard、MemoryView 和 Prompt/Audit View 分离，
+增强最终整合质量与可追踪性。
+```

@@ -2,7 +2,7 @@
 
 本仓库用于迭代实现一个面向多 Agent 协作的跨框架运行时工具层，目标是在多 Agent 任务中通过结构化通信、非文本状态传递和共享记忆复用降低协作开销。
 
-当前版本：`v2 llm evaluation harness`
+当前版本：`v2.3 tiered state pool`
 
 实验结果记录见：
 
@@ -107,4 +107,4 @@ https://token-plan-cn.xiaomimimo.com/v1
 
 `https://token-plan-cn.xiaomimimo.com/anthropic` 属于 Anthropic-compatible 接口，当前 v2 runner 暂未启用。
 
-长上下文重跑结果显示，`runtime_lite` 在 A1-A10 任务中端到端协作 token 降低 91.8%，MiMo 严格质量裁判也判定 A10 最终结果质量优于 `baseline_text`，但仍需继续补强预算表、决策日志和 Reviewer 修复闭环。
+v2.3 将 Runtime State Pool 升级为 Hot / Warm / Cold 三层。完整 artifact content 只进入 Cold audit payload，普通 Agent 仍只读取 Prompt View。最新 A1-A10 实验显示，`runtime_lite` 端到端协作 token 降低 91.7%，LLM total token 降低 87.2%；但本轮 MiMo 严格质量裁判判定 `baseline_text` 的 A10 最终摘要更完整，说明 v3 需要重点补 ClaimCard / MemoryView / 最终整合质量。

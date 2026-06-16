@@ -219,3 +219,25 @@ runtime_lite 不仅显著降低长上下文协作成本，
 - Reviewer 发现预算表或决策日志缺失时，应触发 Writer 修复或格式重试。
 - A10 必须增加质量评分字段，不能只记录 success_rate。
 - MemoryManager 应保存更细的 revision log，而不是只写概括摘要。
+
+## v2.3 三层状态池后的质量裁判
+
+关联实验：`runs/v2.3-longcontext-a1-a10-mimo25`  
+裁判文件：`runs/v2.3-longcontext-a1-a10-mimo25/quality_judge_mimo_v2_3_strict_1to5.json`
+
+v2.3 不再把完整 `content` 放在普通 `artifact_state` payload 中，而是将其写入 Cold Tier audit payload。质量裁判通过 `state_cold/*.audit.json` 读取 `runtime_lite` 的 A10 最终产物。
+
+严格 1-5 分裁判结果：
+
+| 指标 | baseline_text | runtime_lite |
+| --- | ---: | ---: |
+| 总分 | 35 | 28 |
+
+本轮裁判判定 `baseline_text` 更优。主要原因是 baseline 的 A10 最终摘要更完整地覆盖了预算、天气备选、伴手礼、约束修订和决策日志；`runtime_lite` 的最终摘要更短，虽然保留了核心约束，但预算明细和证据链不足。
+
+新的解释口径：
+
+- v2.3 的结构目标达成：完整正文只在 Cold audit payload，普通 Prompt View 不读 raw content。
+- v2.3 的成本目标达成：端到端协作 token 降低 91.7%。
+- v2.3 的质量目标尚未稳定达成：最终整合质量本轮输给 baseline_text。
+- v3 需要引入 Promotion View、ClaimCard、MemoryView 和更强的最终汇总模板，避免低开销压缩牺牲最终交付完整度。

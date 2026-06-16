@@ -295,6 +295,9 @@ class V0Runtime:
             state_type = "retrieval_state"
             summary = f"{task.title} 的检索状态，包含 {len(task.documents)} 条证据和排序分数。"
             usage_hint = "summary_context_selection"
+            tier = "hot"
+            access_policy = "prompt_view_only"
+            audit_payload = None
         else:
             artifact_id = f"artifact_{task.task_id}_{round_id}_{agent.agent_id}"
             sha256 = hashlib.sha256(output.content.encode("utf-8")).hexdigest()
@@ -306,11 +309,18 @@ class V0Runtime:
                 "file_path": None,
                 "sha256": sha256,
                 "summary": self._summary(output.content, 240),
-                "content": output.content,
             }
             state_type = "artifact_state"
             summary = f"{agent.agent_id} 产物状态：{self._summary(output.content, 120)}"
             usage_hint = "artifact_summary"
+            tier = "cold"
+            access_policy = "prompt_view_with_audit_cold_access"
+            audit_payload = {
+                "artifact_id": artifact_id,
+                "sha256": sha256,
+                "content": output.content,
+                "content_chars": len(output.content),
+            }
 
         state_ref, state = self.state_pool.write_state(
             task_id=task.task_id,
@@ -320,6 +330,9 @@ class V0Runtime:
             summary=summary,
             usage_hint=usage_hint,
             contains_embedding_refs=False,
+            tier=tier,
+            access_policy=access_policy,
+            audit_payload=audit_payload,
         )
         self.metrics.record_state_write(
             task_id=task.task_id,
@@ -327,6 +340,7 @@ class V0Runtime:
             mode=mode,
             state_type=state_type,
             payload_bytes=state.size_bytes,
+            tier=state.tier,
         )
         self.trace.write(
             "state_written",

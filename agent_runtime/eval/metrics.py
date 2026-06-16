@@ -28,6 +28,12 @@ class TaskMetricRow:
     embedding_state_count: int = 0
     retrieval_state_count: int = 0
     artifact_state_count: int = 0
+    hot_state_count: int = 0
+    warm_state_count: int = 0
+    cold_state_count: int = 0
+    hot_state_bytes: int = 0
+    warm_state_bytes: int = 0
+    cold_state_bytes: int = 0
     memory_refs_count: int = 0
     memory_query_count: int = 0
     memory_query_hit_count: int = 0
@@ -79,6 +85,7 @@ class MetricsCollector:
         mode: Mode,
         state_type: str,
         payload_bytes: int,
+        tier: str = "",
     ) -> None:
         row = self._row(task_id, round_id, mode)
         row.state_payload_bytes += payload_bytes
@@ -88,6 +95,15 @@ class MetricsCollector:
             row.retrieval_state_count += 1
         elif state_type == "artifact_state":
             row.artifact_state_count += 1
+        if tier == "hot":
+            row.hot_state_count += 1
+            row.hot_state_bytes += payload_bytes
+        elif tier == "warm":
+            row.warm_state_count += 1
+            row.warm_state_bytes += payload_bytes
+        elif tier == "cold":
+            row.cold_state_count += 1
+            row.cold_state_bytes += payload_bytes
 
     def record_memory_retrieval(
         self,
@@ -206,6 +222,12 @@ class MetricsCollector:
                 "useful_memory_hit_count": 0,
                 "wrong_memory_hit_count": 0,
                 "memory_supported_output_count": 0,
+                "hot_state_count": 0,
+                "warm_state_count": 0,
+                "cold_state_count": 0,
+                "hot_state_bytes": 0,
+                "warm_state_bytes": 0,
+                "cold_state_bytes": 0,
             }
         )
         for row in self.rows():
@@ -237,6 +259,12 @@ class MetricsCollector:
             bucket["useful_memory_hit_count"] += row.useful_memory_hit_count
             bucket["wrong_memory_hit_count"] += row.wrong_memory_hit_count
             bucket["memory_supported_output_count"] += row.memory_supported_output_count
+            bucket["hot_state_count"] += row.hot_state_count
+            bucket["warm_state_count"] += row.warm_state_count
+            bucket["cold_state_count"] += row.cold_state_count
+            bucket["hot_state_bytes"] += row.hot_state_bytes
+            bucket["warm_state_bytes"] += row.warm_state_bytes
+            bucket["cold_state_bytes"] += row.cold_state_bytes
 
         for bucket in by_mode.values():
             task_runs = max(1, bucket["task_runs"])
