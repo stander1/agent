@@ -17,6 +17,7 @@ GitHub 默认打开的是 `main` 分支的最新状态，所以 v0、v1 的代�
 | `version/v2-tiered-state` | v2.3 Hot/Warm/Cold 状态池分层版本快照 | 否 |
 | `version/v3-memory-view-lite` | v3-lite 记忆复用与 Deliverable View 版本快照 | 否 |
 | `version/v3-final-schema` | v3.1 Final Deliverable Schema 与 Reviewer Guard 版本快照 | 否 |
+| `version/v3-reliability-guard` | v3.2 Runtime Output Reliability Guard 版本快照 | 否 |
 | `v0.0-baseline` | v0 不可变标签 | 否 |
 | `v1.0-runtime-lite` | v1 不可变标签 | 否 |
 | `v2.0-llm-eval` | v2 不可变标签 | 否 |
@@ -25,6 +26,7 @@ GitHub 默认打开的是 `main` 分支的最新状态，所以 v0、v1 的代�
 | `v2.3-tiered-state` | v2.3 不可变标签 | 否 |
 | `v3.0-memory-view-lite` | v3-lite 不可变标签 | 否 |
 | `v3.1-final-schema` | v3.1 不可变标签 | 否 |
+| `v3.2-reliability-guard` | v3.2 不可变标签 | 否 |
 
 ## 当前版本边界
 
@@ -38,6 +40,7 @@ GitHub 默认打开的是 `main` 分支的最新状态，所以 v0、v1 的代�
 | v2.3 | `v2.3-tiered-state` / `version/v2-tiered-state` | Hot/Warm/Cold State Pool、Cold audit payload、Prompt/Audit 访问分离、分层指标 |
 | v3-lite | `v3.0-memory-view-lite` / `version/v3-memory-view-lite` | PromotionView、ClaimCard、MemoryView、Alias Mapping、Deliverable View、v3 指标 |
 | v3.1 | `v3.1-final-schema` / `version/v3-final-schema` | Final Deliverable Schema、中文字段覆盖、Reviewer 短上下文修复、A/B 最终交付质量记录 |
+| v3.2 | `v3.2-reliability-guard` / `version/v3-reliability-guard` | Provider Response Guard、Agent Output Contract Guard、规则修复、degraded fallback、输出可靠性指标 |
 
 ## 如何在本地切换版本
 
@@ -97,6 +100,13 @@ git fetch --all --tags
 git switch version/v3-final-schema
 ```
 
+查看 v3.2：
+
+```powershell
+git fetch --all --tags
+git switch version/v3-reliability-guard
+```
+
 回到最新开发主干：
 
 ```powershell
@@ -114,6 +124,7 @@ git checkout v2.2-quality-rerun
 git checkout v2.3-tiered-state
 git checkout v3.0-memory-view-lite
 git checkout v3.1-final-schema
+git checkout v3.2-reliability-guard
 ```
 
 注意：直接 checkout tag 会进入 detached HEAD 状态，只适合查看或复现实验，不适合继续开发。

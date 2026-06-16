@@ -22,10 +22,35 @@ class LlmAgent:
 
     def run(self, task: TaskSpec, context: list[AgentOutput]) -> AgentOutput:
         runtime_prompt = context[-1].content if context else task.prompt
+        is_runtime_lite = "runtime_lite 控制字段" in runtime_prompt
         final_task_instruction = ""
         length_instruction = (
             "5. 输出控制在 180 到 260 个中文字符，MemoryManagerAgent 可控制在 120 到 180 个中文字符。"
         )
+        contract_instruction = ""
+        if is_runtime_lite:
+            contract_instruction = (
+                "\n6. 你必须使用 Agent Output Contract 输出，格式为：\n"
+                "<CMJCC_CONTROL>\n"
+                "{\"msg_type\":\"agent_output\",\"task_id\":\""
+                f"{task.task_id}"
+                "\",\"from\":\""
+                f"{self.agent_id}"
+                "\",\"action_completed\":\""
+                f"{self.agent_id}_completed"
+                "\",\"memory_card\":{\"summary\":\"短摘要\",\"key_points\":[],\"evidence_snippets\":[],\"tags\":[],"
+                "\"reuse_scope\":[],\"confidence\":0.7,\"importance_hint\":0.6,\"coverage_score\":0.6,"
+                "\"compression_loss_risk\":\"medium\",\"raw_required_hint\":false,"
+                "\"sufficient_for_actions\":[],\"insufficient_for_actions\":[]},"
+                "\"claim_cards\":[],\"handoff_suggestion\":{\"next_action\":\"continue\","
+                "\"required_capabilities\":[],\"suggested_memory_refs\":[]},"
+                "\"cost_report\":{\"output_tokens\":0,\"summary_tokens\":0,\"raw_pointer\":\"\"}}\n"
+                "</CMJCC_CONTROL>\n"
+                "<ARTIFACT>\n"
+                "你的中文正文结果\n"
+                "</ARTIFACT>\n"
+                "控制头必须是合法 JSON；长正文只能放在 ARTIFACT 中。"
+            )
         if task.task_id.endswith("10") or "最终" in task.title:
             final_task_instruction = (
                 "\n当前任务是最终收束任务：必须输出可直接交付的完整结果，"
@@ -47,6 +72,7 @@ class LlmAgent:
             "3. 不要虚构实时网页数据，只能使用给定任务、上游上下文和本地资料。\n"
             "4. 尽量使用结构化小标题和列表，避免冗长寒暄。\n"
             f"{length_instruction}"
+            f"{contract_instruction}"
         )
         user_prompt = (
             f"任务编号：{task.task_id}\n"
@@ -68,6 +94,7 @@ class LlmAgent:
                     "usage": result.usage,
                     "latency_ms": result.latency_ms,
                     "finish_reason": result.raw_finish_reason,
+                    "provider_guard": result.provider_guard,
                 }
             },
         )

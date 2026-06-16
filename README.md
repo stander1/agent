@@ -2,7 +2,7 @@
 
 本仓库用于迭代实现一个面向多 Agent 协作的跨框架运行时工具层，目标是在多 Agent 任务中通过结构化通信、非文本状态传递和共享记忆复用降低协作开销。
 
-当前版本：`v3.1 final deliverable schema`
+当前版本：`v3.2 runtime output reliability guard`
 
 实验结果记录见：
 
@@ -14,6 +14,7 @@
 - [docs/experiments/v3-lite-smoke-results.md](docs/experiments/v3-lite-smoke-results.md)
 - [docs/experiments/v3-full-ab-results.md](docs/experiments/v3-full-ab-results.md)
 - [docs/experiments/v3.1-final-schema-results.md](docs/experiments/v3.1-final-schema-results.md)
+- [docs/experiments/v3.2-reliability-guard-results.md](docs/experiments/v3.2-reliability-guard-results.md)
 
 版本切换与 GitHub 浏览方式见：[docs/versioning.md](docs/versioning.md)
 
@@ -146,3 +147,27 @@ B1-B10 合成安全审计:
 ```
 
 结论：v3.1 已证明低开销通信和最终交付 schema 可以兼容；但 A 组仍需要在后续版本增强领域事实保真和细节充分性，而 B 组这类证据链任务已经比较适合当前 Runtime Lite 路线。
+
+v3.2 按照创新方案中的 Output Contract Guard 路线补齐输出可靠性地基：
+
+```text
+Provider Response Guard:
+  先规则恢复 provider response envelope，恢复不了才 retry。
+
+Agent Output Contract Guard:
+  提取 <CMJCC_CONTROL>，规则修复 JSON，schema 校验，默认值补齐，
+  失败时短上下文 Same-Agent Format Retry，仍失败才 degraded_fallback。
+```
+
+v3.2 smoke 结果：
+
+```text
+A1 runtime_lite:
+  contract_guard_checked_count: 5
+  contract_schema_valid_count: 5
+  schema_valid_rate: 1.0
+  contract_retry_count: 0
+  fallback_count: 0
+```
+
+这一步不是追求更高质量分，而是保证后续 v4 的 Retry Budget、Read Lease、GC 等机制建立在稳定输出契约之上。

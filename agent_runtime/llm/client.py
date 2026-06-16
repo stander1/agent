@@ -9,6 +9,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from agent_runtime.llm.config import LlmConfig
+from agent_runtime.reliability.provider_guard import (
+    NormalizedProviderResponse,
+    ProviderResponseError,
+    normalize_provider_response,
+)
 
 
 @dataclass(slots=True)
@@ -18,6 +23,7 @@ class ChatCompletionResult:
     usage: dict[str, int]
     latency_ms: float
     raw_finish_reason: str | None = None
+    provider_guard: dict[str, Any] | None = None
 
 
 class OpenAICompatibleChatClient:
@@ -45,37 +51,16 @@ class OpenAICompatibleChatClient:
         response_payload = self._post_with_retries(url, data)
 
         latency_ms = (time.perf_counter() - started) * 1000
-        choices: list[dict[str, Any]] = response_payload.get("choices", [])
-        if not choices:
-            raise RuntimeError("LLM response did not contain choices.")
-        choice = choices[0]
-        message = choice.get("message", {})
-        content = message.get("content", "")
-        if not isinstance(content, str) or not content.strip():
-            finish_reason = choice.get("finish_reason")
-            reasoning = message.get("reasoning_content", "")
-            raise RuntimeError(
-                "LLM response content was empty. "
-                f"finish_reason={finish_reason!r}; "
-                f"reasoning_chars={len(reasoning) if isinstance(reasoning, str) else 0}; "
-                f"response_keys={list(response_payload.keys())}"
-            )
-
-        usage = response_payload.get("usage", {}) or {}
-        normalized_usage = {
-            "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
-            "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
-            "total_tokens": int(usage.get("total_tokens", 0) or 0),
-        }
         return ChatCompletionResult(
-            content=content.strip(),
-            model=str(response_payload.get("model", self.config.model)),
-            usage=normalized_usage,
+            content=response_payload.content,
+            model=response_payload.model,
+            usage=response_payload.usage,
             latency_ms=latency_ms,
-            raw_finish_reason=choice.get("finish_reason"),
+            raw_finish_reason=response_payload.finish_reason,
+            provider_guard=response_payload.report.to_dict(),
         )
 
-    def _post_with_retries(self, url: str, data: bytes) -> dict[str, Any]:
+    def _post_with_retries(self, url: str, data: bytes) -> NormalizedProviderResponse:
         last_error: Exception | None = None
         attempts = max(1, self.config.max_retries + 1)
         for attempt in range(1, attempts + 1):
@@ -93,11 +78,29 @@ class OpenAICompatibleChatClient:
                     request, timeout=self.config.timeout_seconds
                 ) as response:
                     payload = json.loads(response.read().decode("utf-8"))
-                    if not isinstance(payload, dict):
-                        raise ValueError(
-                            f"LLM response root must be object, got {type(payload).__name__}"
-                        )
-                    return payload
+                    normalized = normalize_provider_response(
+                        payload, default_model=self.config.model
+                    )
+                    normalized.report.retry_attempts = attempt - 1
+                    return normalized
+            except ProviderResponseError as exc:
+                if attempt >= attempts:
+                    raise RuntimeError(
+                        f"LLM provider response unrecoverable: {exc}"
+                    ) from exc
+                last_error = exc
+            except json.JSONDecodeError as exc:
+                if attempt >= attempts:
+                    raise RuntimeError(
+                        f"LLM response JSON parse failed: {exc}"
+                    ) from exc
+                last_error = exc
+            except ValueError as exc:
+                if attempt >= attempts:
+                    raise RuntimeError(
+                        f"LLM response normalization failed: {exc}"
+                    ) from exc
+                last_error = exc
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="replace")
                 if exc.code < 500 or attempt >= attempts:
@@ -112,10 +115,6 @@ class OpenAICompatibleChatClient:
             except (http.client.RemoteDisconnected, TimeoutError, ConnectionError) as exc:
                 if attempt >= attempts:
                     raise RuntimeError(f"LLM connection failed: {exc}") from exc
-                last_error = exc
-            except ValueError as exc:
-                if attempt >= attempts:
-                    raise RuntimeError(f"LLM response malformed: {exc}") from exc
                 last_error = exc
             time.sleep(self.config.retry_backoff_seconds * attempt)
         raise RuntimeError(f"LLM request failed after retries: {last_error}") from last_error

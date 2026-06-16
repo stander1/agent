@@ -58,6 +58,16 @@ class TaskMetricRow:
     deliverable_schema_hit_count: int = 0
     deliverable_schema_complete: bool = False
     final_quality_retry_count: int = 0
+    provider_response_repair_count: int = 0
+    provider_response_retry_count: int = 0
+    provider_response_degraded_count: int = 0
+    malformed_provider_response_count: int = 0
+    contract_guard_checked_count: int = 0
+    contract_schema_valid_count: int = 0
+    contract_repair_success_count: int = 0
+    contract_retry_count: int = 0
+    contract_violation_count: int = 0
+    fallback_count: int = 0
     retrieved_memory_tokens: int = 0
     control_llm_tokens: int = 0
     retry_tokens: int = 0
@@ -227,6 +237,22 @@ class MetricsCollector:
         row.retry_tokens += prompt_count.token_count + output_count.token_count
         self._apply_token_meta(row, prompt_count)
 
+    def record_retry_tokens(
+        self,
+        *,
+        task_id: str,
+        round_id: int,
+        mode: Mode,
+        retry_prompt: str,
+        retry_output: str,
+        token_counter: TokenCounter,
+    ) -> None:
+        row = self._row(task_id, round_id, mode)
+        prompt_count = token_counter.count(retry_prompt)
+        output_count = token_counter.count(retry_output)
+        row.retry_tokens += prompt_count.token_count + output_count.token_count
+        self._apply_token_meta(row, prompt_count)
+
     def record_prompt(
         self,
         task_id: str,
@@ -259,6 +285,51 @@ class MetricsCollector:
         row.llm_completion_tokens += int(usage.get("completion_tokens", 0) or 0)
         row.llm_total_tokens += int(usage.get("total_tokens", 0) or 0)
         row.llm_latency_ms += latency_ms
+
+    def record_provider_guard(
+        self,
+        *,
+        task_id: str,
+        round_id: int,
+        mode: Mode,
+        provider_guard: dict[str, Any] | None,
+    ) -> None:
+        if not provider_guard:
+            return
+        row = self._row(task_id, round_id, mode)
+        status = provider_guard.get("status", "")
+        if status == "repaired":
+            row.provider_response_repair_count += 1
+        elif status == "degraded_fallback":
+            row.provider_response_degraded_count += 1
+        row.provider_response_retry_count += int(
+            provider_guard.get("retry_attempts", 0) or 0
+        )
+        if provider_guard.get("schema_errors"):
+            row.malformed_provider_response_count += 1
+
+    def record_contract_guard(
+        self,
+        *,
+        task_id: str,
+        round_id: int,
+        mode: Mode,
+        contract_report: dict[str, Any],
+    ) -> None:
+        row = self._row(task_id, round_id, mode)
+        row.contract_guard_checked_count += 1
+        if contract_report.get("schema_valid"):
+            row.contract_schema_valid_count += 1
+        status = contract_report.get("contract_status", "")
+        if status == "repaired":
+            row.contract_repair_success_count += 1
+        if contract_report.get("retry_required") or contract_report.get(
+            "retry_attempted"
+        ):
+            row.contract_retry_count += 1
+        if status == "degraded_fallback":
+            row.contract_violation_count += 1
+            row.fallback_count += 1
 
     def finish_task(
         self,
@@ -329,6 +400,16 @@ class MetricsCollector:
                 "deliverable_schema_hit_count": 0,
                 "deliverable_schema_complete_count": 0,
                 "final_quality_retry_count": 0,
+                "provider_response_repair_count": 0,
+                "provider_response_retry_count": 0,
+                "provider_response_degraded_count": 0,
+                "malformed_provider_response_count": 0,
+                "contract_guard_checked_count": 0,
+                "contract_schema_valid_count": 0,
+                "contract_repair_success_count": 0,
+                "contract_retry_count": 0,
+                "contract_violation_count": 0,
+                "fallback_count": 0,
                 "hot_state_count": 0,
                 "warm_state_count": 0,
                 "cold_state_count": 0,
@@ -386,6 +467,24 @@ class MetricsCollector:
                 row.deliverable_schema_complete
             )
             bucket["final_quality_retry_count"] += row.final_quality_retry_count
+            bucket["provider_response_repair_count"] += (
+                row.provider_response_repair_count
+            )
+            bucket["provider_response_retry_count"] += row.provider_response_retry_count
+            bucket["provider_response_degraded_count"] += (
+                row.provider_response_degraded_count
+            )
+            bucket["malformed_provider_response_count"] += (
+                row.malformed_provider_response_count
+            )
+            bucket["contract_guard_checked_count"] += row.contract_guard_checked_count
+            bucket["contract_schema_valid_count"] += row.contract_schema_valid_count
+            bucket["contract_repair_success_count"] += (
+                row.contract_repair_success_count
+            )
+            bucket["contract_retry_count"] += row.contract_retry_count
+            bucket["contract_violation_count"] += row.contract_violation_count
+            bucket["fallback_count"] += row.fallback_count
             bucket["hot_state_count"] += row.hot_state_count
             bucket["warm_state_count"] += row.warm_state_count
             bucket["cold_state_count"] += row.cold_state_count
@@ -409,6 +508,12 @@ class MetricsCollector:
             bucket["useful_memory_hit_rate"] = (
                 bucket["useful_memory_hit_count"] / memory_hits
                 if bucket["memory_hit_count"]
+                else 0.0
+            )
+            bucket["schema_valid_rate"] = (
+                bucket["contract_schema_valid_count"]
+                / bucket["contract_guard_checked_count"]
+                if bucket["contract_guard_checked_count"]
                 else 0.0
             )
 

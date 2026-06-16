@@ -19,6 +19,11 @@ from agent_runtime.eval.metrics import MetricsCollector
 from agent_runtime.eval.token_counter import TokenCounter
 from agent_runtime.eval.trace_logger import TraceLogger
 from agent_runtime.memory.memory_store import MemoryRef, MemoryStoreLite
+from agent_runtime.reliability.contract_guard import (
+    ContractContext,
+    guard_agent_output,
+    render_contract_retry_prompt,
+)
 from agent_runtime.state.state_pool import StatePoolLite, StateRef
 
 
@@ -156,6 +161,16 @@ class V0Runtime:
                 agent_context = context
 
             output = agent.run(task, agent_context)
+            if mode == "runtime_lite" and getattr(
+                agent, "expects_runtime_prompt", False
+            ):
+                output = self._apply_contract_guard(
+                    task=task,
+                    round_id=round_id,
+                    mode=mode,
+                    agent=agent,
+                    output=output,
+                )
             if mode == "runtime_lite" and deliverable_schema and agent.agent_id in {
                 "writer",
                 "reviewer",
@@ -240,6 +255,12 @@ class V0Runtime:
                     mode=mode,
                     usage=llm_meta.get("usage", {}),
                     latency_ms=float(llm_meta.get("latency_ms", 0.0) or 0.0),
+                )
+                self.metrics.record_provider_guard(
+                    task_id=task.task_id,
+                    round_id=round_id,
+                    mode=mode,
+                    provider_guard=llm_meta.get("provider_guard"),
                 )
             context.append(output)
             current_task_outputs.append(output)
@@ -361,6 +382,111 @@ class V0Runtime:
         )
         return context[-1]
 
+    def _apply_contract_guard(
+        self,
+        *,
+        task: TaskSpec,
+        round_id: int,
+        mode: Mode,
+        agent: DeterministicAgent,
+        output: AgentOutput,
+    ) -> AgentOutput:
+        context = ContractContext(
+            task_id=task.task_id,
+            agent_id=agent.agent_id,
+            role=agent.role,
+            next_action=self._next_agent_id(agent.agent_id),
+            artifact_ref=f"cold://{task.task_id}/{round_id}/{agent.agent_id}/artifact",
+        )
+        result = guard_agent_output(output.content, context)
+        self.trace.write(
+            "contract_guard_checked",
+            {
+                "task_id": task.task_id,
+                "round_id": round_id,
+                "mode": mode,
+                "agent_id": agent.agent_id,
+                "contract_status": result.contract_status,
+                "schema_valid": result.schema_valid,
+                "repair_actions": result.repair_actions,
+                "schema_errors": result.schema_errors,
+            },
+        )
+
+        if result.retry_required:
+            result.retry_attempted = True
+            retry_prompt = render_contract_retry_prompt(context=context, result=result)
+            retry_output = agent.run(
+                task,
+                [AgentOutput(agent_id="runtime_prompt", content=retry_prompt)],
+            )
+            retry_llm_meta = retry_output.metadata.get("llm", {})
+            if retry_llm_meta:
+                self.metrics.record_llm_call(
+                    task_id=task.task_id,
+                    round_id=round_id,
+                    mode=mode,
+                    usage=retry_llm_meta.get("usage", {}),
+                    latency_ms=float(retry_llm_meta.get("latency_ms", 0.0) or 0.0),
+                )
+                self.metrics.record_provider_guard(
+                    task_id=task.task_id,
+                    round_id=round_id,
+                    mode=mode,
+                    provider_guard=retry_llm_meta.get("provider_guard"),
+                )
+            self.metrics.record_retry_tokens(
+                task_id=task.task_id,
+                round_id=round_id,
+                mode=mode,
+                retry_prompt=retry_prompt,
+                retry_output=retry_output.content,
+                token_counter=self.token_counter,
+            )
+            retry_result = guard_agent_output(
+                retry_output.content,
+                ContractContext(
+                    task_id=task.task_id,
+                    agent_id=agent.agent_id,
+                    role=agent.role,
+                    next_action=self._next_agent_id(agent.agent_id),
+                    artifact_ref=context.artifact_ref,
+                ),
+            )
+            if retry_result.schema_valid:
+                result.control = retry_result.control
+                result.schema_valid = True
+                result.contract_status = "repaired"
+                result.repair_actions.extend(["context_pruned_format_retry"])
+                result.schema_errors = []
+                result.retry_required = False
+            self.trace.write(
+                "contract_guard_retry",
+                {
+                    "task_id": task.task_id,
+                    "round_id": round_id,
+                    "mode": mode,
+                    "agent_id": agent.agent_id,
+                    "retry_schema_valid": retry_result.schema_valid,
+                    "retry_status": retry_result.contract_status,
+                },
+            )
+
+        self.metrics.record_contract_guard(
+            task_id=task.task_id,
+            round_id=round_id,
+            mode=mode,
+            contract_report=result.to_dict(),
+        )
+
+        metadata = dict(output.metadata)
+        metadata["contract_guard"] = result.to_dict()
+        return AgentOutput(
+            agent_id=output.agent_id,
+            content=result.artifact,
+            metadata=metadata,
+        )
+
     def _build_prompt(
         self,
         task: TaskSpec,
@@ -445,7 +571,29 @@ class V0Runtime:
         agent: DeterministicAgent,
         output: AgentOutput,
     ) -> StateRef:
-        if agent.agent_id == "retriever":
+        contract_guard = output.metadata.get("contract_guard", {})
+        if contract_guard.get("contract_status") == "degraded_fallback":
+            payload = {
+                "error_type": "contract_violation",
+                "contract_status": "degraded_fallback",
+                "schema_errors": contract_guard.get("schema_errors", []),
+                "allowed_next_step": "review_or_retry_only",
+                "artifact_digest": contract_guard.get("artifact_digest", {}),
+            }
+            state_type = "failure_state"
+            summary = (
+                f"{agent.agent_id} 输出契约降级："
+                f"{'; '.join(contract_guard.get('schema_errors', [])[:2])}"
+            )
+            usage_hint = "review_or_retry_only"
+            tier = "hot"
+            access_policy = "prompt_view_only"
+            audit_payload = {
+                "content": output.content,
+                "contract_guard": contract_guard,
+                "content_chars": len(output.content),
+            }
+        elif agent.agent_id == "retriever":
             payload = self._build_retrieval_payload(task)
             state_type = "retrieval_state"
             summary = f"{task.title} 的检索状态，包含 {len(task.documents)} 条证据和排序分数。"
