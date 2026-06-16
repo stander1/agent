@@ -306,6 +306,7 @@ class V0Runtime:
                 "file_path": None,
                 "sha256": sha256,
                 "summary": self._summary(output.content, 240),
+                "content": output.content,
             }
             state_type = "artifact_state"
             summary = f"{agent.agent_id} 产物状态：{self._summary(output.content, 120)}"
