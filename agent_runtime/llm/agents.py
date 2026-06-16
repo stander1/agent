@@ -23,7 +23,7 @@ class LlmAgent:
     def run(self, task: TaskSpec, context: list[AgentOutput]) -> AgentOutput:
         runtime_prompt = context[-1].content if context else task.prompt
         system_prompt = (
-            f"你是 {self.role}，正在参与一个多 Agent 协作旅行规划任务。\n"
+            f"你是 {self.role}，正在参与一个多 Agent 连续协作任务。\n"
             f"{self.instruction}\n"
             "要求：\n"
             "1. 输出中文。\n"
@@ -68,13 +68,13 @@ def build_mimo_travel_agents(client: OpenAICompatibleChatClient) -> list[LlmAgen
         LlmAgent(
             agent_id="retriever",
             role="Retriever/AnalyzerAgent",
-            instruction="负责从本地资料和上游上下文中抽取约束、候选目的地、预算数据或证据，并给出可排序的结构化信息。",
+            instruction="负责从本地资料和上游上下文中抽取约束、候选项、预算数据、审计证据或可排序的结构化信息。",
             client=client,
         ),
         LlmAgent(
             agent_id="writer",
             role="WriterAgent",
-            instruction="负责生成面向用户的中间报告、对比表、行程草案或最终旅行手册。",
+            instruction="负责生成面向用户的中间报告、对比表、方案草案或最终交付文档。",
             client=client,
         ),
         LlmAgent(
@@ -86,7 +86,7 @@ def build_mimo_travel_agents(client: OpenAICompatibleChatClient) -> list[LlmAgen
         LlmAgent(
             agent_id="memory_manager",
             role="MemoryManagerAgent",
-            instruction="负责把本轮可复用的用户偏好、候选地选择理由、行程策略或预算优化经验压缩成共享记忆摘要。",
+            instruction="负责把本轮可复用的偏好、证据、选择理由、修订策略或优化经验压缩成共享记忆摘要。",
             client=client,
         ),
     ]

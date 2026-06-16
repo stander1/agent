@@ -1,0 +1,125 @@
+{
+  "tasks": [
+    {
+      "task_id": "B1",
+      "group_id": "security_B",
+      "title": "初始告警接入与硬约束抽取",
+      "prompt": "审计系统捕获了一条合成高危告警：边缘节点 Node_71 在凌晨 2:15 出现异常大额数据打包上传，目标指针为 proxy_token_PX42。请先抽取该告警的初始硬约束、核心线索和后续追踪键，作为链式审计的起点。",
+      "documents": [
+        "合成告警 alert_071：source_node=Node_71，timestamp=2026-06-15T02:15:00Z，event_type=bulk_upload_anomaly，target_pointer=proxy_token_PX42，severity=high。",
+        "任务目标：将初始告警抽象为 alert_state，并把 proxy_token_PX42 作为下一跳 lookup key。",
+        "后续 B2-B10 会反复复用 B1 的告警起点、追踪键和审计链起始记忆。"
+      ],
+      "expected_agents": ["planner", "analyzer", "writer", "reviewer", "memory_manager"]
+    },
+    {
+      "task_id": "B2",
+      "group_id": "security_B",
+      "title": "第一层线索解析：网络观测表检索",
+      "prompt": "基于 B1 锁定的 proxy_token_PX42，请从本地 network_observations.csv 中检索对应的合成设备标识、关联账户和证据行。请说明哪些字段可以作为下一跳审计依据。",
+      "documents": [
+        "network_row_8402：proxy_token=proxy_token_PX42，resolved_device=device_shadow_17，touched_accounts=[wallet_demo_902,wallet_demo_911]，confidence=0.86。",
+        "network_row_11904：proxy_token=proxy_token_PX42，resolved_device=device_shadow_17，touched_accounts=[wallet_demo_911]，confidence=0.79。",
+        "验证重点：Retriever 应生成 retrieval_state，不应把完整 CSV 文本传给下游 Agent。"
+      ],
+      "expected_agents": ["planner", "retriever", "writer", "reviewer", "memory_manager"]
+    },
+    {
+      "task_id": "B3",
+      "group_id": "security_B",
+      "title": "第二层线索解析：合成载荷备注映射",
+      "prompt": "网络观测显示 wallet_demo_911 带有一条合成载荷备注。请读取本地 payload_notes.json 的已知映射，解析该备注指向的下一跳实体标记。注意：这里只做本地合成资料映射，不生成真实解密代码。",
+      "documents": [
+        "payload_note_911：wallet_id=wallet_demo_911，decoded_marker=ROUTE_VIA_ENTITY_085，mapping_source=synthetic_payload_notes。",
+        "工具产物应写成 artifact_state；完整映射记录和执行日志进入 Cold audit payload。",
+        "普通 Prompt View 只展示 artifact_id、summary、sha256 和 next_lookup_key=ENTITY_085。"
+      ],
+      "expected_agents": ["planner", "retriever", "writer", "reviewer", "memory_manager"]
+    },
+    {
+      "task_id": "B4",
+      "group_id": "security_B",
+      "title": "第三层线索解析：合成账本路径审计",
+      "prompt": "B3 得到的实体标记是 ENTITY_085。请在 synthetic_ledger.csv 中进行多跳路径审计，找出该实体在合成账本中的最终受益账户，并记录路径证据。",
+      "documents": [
+        "ledger_path_085：entity=ENTITY_085，path=[ENTITY_085,intermediary_demo_302,beneficiary_demo_999]，amount_bucket=high。",
+        "证据行：ledger_1022、ledger_1067、ledger_1098。",
+        "应生成 evidence_chain_state，记录 hop_path、ultimate_target、amount_bucket 和 evidence_refs。"
+      ],
+      "expected_agents": ["planner", "retriever", "writer", "reviewer", "memory_manager"]
+    },
+    {
+      "task_id": "B5",
+      "group_id": "security_B",
+      "title": "第一版审计链路报告",
+      "prompt": "请把 B1-B4 已获得的初始告警、网络观测、载荷映射和账本路径，融合成一份第一版合成安全审计链路报告。报告需要列出每一跳的依赖指针、证据引用和当前不确定性。",
+      "documents": [
+        "第一版报告必须整合 B1 alert_state、B2 retrieval_state、B3 artifact_state 和 B4 evidence_chain_state。",
+        "报告应列出每一跳的 lookup key、state_ref、evidence_refs 和未确认风险。",
+        "Baseline 模式会携带完整历史文本；Runtime Lite 模式应主要依赖 StateView 和 MemoryView。"
+      ],
+      "expected_agents": ["planner", "writer", "reviewer", "memory_manager"]
+    },
+    {
+      "task_id": "B6",
+      "group_id": "security_B",
+      "title": "新增反混淆修订：设备标识可能被污染",
+      "prompt": "接到新的合成情报：早期 device_shadow_17 可能受到标识混淆影响，不应再作为强证据。请在不推翻 B1-B5 整体审计骨架的前提下，重新标记 B2 的设备线索，并说明后续应改用哪些证据作为主依据。",
+      "documents": [
+        "新增修订：device_shadow_17 标记为 deprecated clue，不再作为强证据。",
+        "主证据切换为 wallet_demo_911、ledger_path 和 entity_registry_match。",
+        "受影响状态：B2 network lookup、B4 ledger path；审计骨架不应被整体推翻。"
+      ],
+      "expected_agents": ["planner", "retriever", "writer", "reviewer", "memory_manager"]
+    },
+    {
+      "task_id": "B7",
+      "group_id": "security_B",
+      "title": "第四层线索解析：相似实体聚类与去重",
+      "prompt": "由于 B6 标记了设备线索污染，现在 entity_registry.json 中出现 5 个相似的候选实体。请利用本地 vector_clusters.json 的合成向量聚类结果，对这些候选实体做去重，找出最可能对应 beneficiary_demo_999 的实体画像。",
+      "documents": [
+        "vector_clusters：query_embedding_id=emb_query_beneficiary_demo_999，vector_dim=384。",
+        "相似度：entity_profile_085=0.91，entity_profile_086=0.74，entity_profile_091=0.69。",
+        "应生成 embedding_state；Prompt View 只展示 top-k 候选、分数、冲突点和选择理由，不展示完整向量矩阵。"
+      ],
+      "expected_agents": ["planner", "retriever", "writer", "reviewer", "memory_manager"]
+    },
+    {
+      "task_id": "B8",
+      "group_id": "security_B",
+      "title": "控制预算下降下的历史风险核验",
+      "prompt": "现在运行时控制预算下降：本轮控制模型调用应尽量限制在 1 次以内，重试输入 token 预算压缩到 500。请在这个限制下，继续核验 beneficiary_demo_999 的历史关联风险，并说明哪些证据足够、哪些证据需要暂缓展开。",
+      "documents": [
+        "控制约束：control_llm_call_limit=1，retry_token_budget=500。",
+        "允许视图：summary、top_k_evidence、audit_digest。",
+        "禁止默认展开：full_raw_log、full_vector_matrix、full_ledger_dump。"
+      ],
+      "expected_agents": ["planner", "retriever", "writer", "reviewer", "memory_manager"]
+    },
+    {
+      "task_id": "B9",
+      "group_id": "security_B",
+      "title": "第五层线索解析：合规证据链匹配",
+      "prompt": "请结合 B1 初始告警、B6 反混淆修订、B7 实体画像和 compliance_rules.md，对 beneficiary_demo_999 的最终风险类型进行合规证据链匹配。如果证据不足，请明确输出 blocked 或 needs_more_evidence，不要强行编造结论。",
+      "documents": [
+        "候选风险类型：synthetic_fraud_ring、synthetic_internal_collusion、insufficient_evidence。",
+        "支持状态应包括 B1 alert profile、B4 ledger path、B6 anti-obfuscation、B7 entity cluster。",
+        "质量守卫：证据不足时必须输出 needs_more_evidence，不能为了成功率编造结论。"
+      ],
+      "expected_agents": ["planner", "retriever", "writer", "reviewer", "memory_manager"]
+    },
+    {
+      "task_id": "B10",
+      "group_id": "security_B",
+      "title": "最终审计手册与系统决策日志",
+      "prompt": "请基于 B1-B9 所有已经确认和修订过的内容，生成最终合成安全审计手册。除了链路图谱、风险类型和证据表，还要附上一份“系统决策日志”，说明 B6 线索污染和 B8 控制预算下降时，系统如何避免脏读、过期线索和 raw content 过度展开。",
+      "documents": [
+        "最终手册必须整合 B1-B9 所有确认内容和修订约束。",
+        "必须覆盖：初始告警、网络线索、payload 映射、账本路径、device_shadow_17 deprecated、实体聚类、预算下降、合规风险类型。",
+        "系统决策日志必须解释 B6 和 B8 如何避免脏读、过期线索和 raw content 过度展开。",
+        "这是成本放大任务：Baseline 应携带完整历史；Runtime Lite 应读取裁剪后的 StateView、MemoryView 和 Cold audit digest。"
+      ],
+      "expected_agents": ["planner", "writer", "reviewer", "memory_manager"]
+    }
+  ]
+}
