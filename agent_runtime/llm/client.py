@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import http.client
 import time
 import urllib.error
 import urllib.request
@@ -102,6 +103,10 @@ class OpenAICompatibleChatClient:
             except urllib.error.URLError as exc:
                 if attempt >= attempts:
                     raise RuntimeError(f"LLM request failed: {exc.reason}") from exc
+                last_error = exc
+            except (http.client.RemoteDisconnected, TimeoutError, ConnectionError) as exc:
+                if attempt >= attempts:
+                    raise RuntimeError(f"LLM connection failed: {exc}") from exc
                 last_error = exc
             time.sleep(self.config.retry_backoff_seconds * attempt)
         raise RuntimeError(f"LLM request failed after retries: {last_error}") from last_error

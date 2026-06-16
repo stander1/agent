@@ -10,6 +10,7 @@
 - [docs/experiments/v2-llm-travel-results.md](docs/experiments/v2-llm-travel-results.md)
 - [docs/experiments/v2-longcontext-travel-results.md](docs/experiments/v2-longcontext-travel-results.md)
 - [docs/experiments/v2-longcontext-quality-judge.md](docs/experiments/v2-longcontext-quality-judge.md)
+- [docs/experiments/v2-security-b-results.md](docs/experiments/v2-security-b-results.md)
 
 版本切换与 GitHub 浏览方式见：[docs/versioning.md](docs/versioning.md)
 
@@ -107,4 +108,18 @@ https://token-plan-cn.xiaomimimo.com/v1
 
 `https://token-plan-cn.xiaomimimo.com/anthropic` 属于 Anthropic-compatible 接口，当前 v2 runner 暂未启用。
 
-v2.3 将 Runtime State Pool 升级为 Hot / Warm / Cold 三层。完整 artifact content 只进入 Cold audit payload，普通 Agent 仍只读取 Prompt View。最新 A1-A10 实验显示，`runtime_lite` 端到端协作 token 降低 91.7%，LLM total token 降低 87.2%；但本轮 MiMo 严格质量裁判判定 `baseline_text` 的 A10 最终摘要更完整，说明 v3 需要重点补 ClaimCard / MemoryView / 最终整合质量。
+v2.3 将 Runtime State Pool 升级为 Hot / Warm / Cold 三层。完整 artifact content 只进入 Cold audit payload，普通 Agent 仍只读取 Prompt View。
+
+最新 A/B 两组连续任务实验显示：
+
+```text
+A1-A10 旅行规划:
+  end_to_end_collaboration_tokens 降低 91.7%
+  llm_total_tokens 降低 87.2%
+
+B1-B10 合成安全审计:
+  end_to_end_collaboration_tokens 降低 90.9%
+  llm_total_tokens 降低 86.7%
+```
+
+但两组 v2.3 的 MiMo 严格质量裁判都判定 `baseline_text` 的最终收束结果更完整，说明 v3 需要重点补 ClaimCard / MemoryView / Deliverable View / Reviewer 修复闭环，避免低开销压缩牺牲最终交付质量。
