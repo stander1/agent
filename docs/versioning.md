@@ -13,10 +13,12 @@ GitHub 默认打开的是 `main` 分支的最新状态，所以 v0、v1 的代�
 | `version/v1-runtime-lite` | v1 三线 Lite 闭环版本快照，便于在 GitHub 直接浏览 | 否 |
 | `version/v2-llm-eval` | v2 真实 LLM 实验版本快照，便于在 GitHub 直接浏览 | 否 |
 | `version/v2-longcontext-eval` | v2.1 长上下文真实 LLM 实验版本快照 | 否 |
+| `version/v2-quality-rerun` | v2.2 长上下文质量重跑版本快照 | 否 |
 | `v0.0-baseline` | v0 不可变标签 | 否 |
 | `v1.0-runtime-lite` | v1 不可变标签 | 否 |
 | `v2.0-llm-eval` | v2 不可变标签 | 否 |
 | `v2.1-longcontext-eval` | v2.1 不可变标签 | 否 |
+| `v2.2-quality-rerun` | v2.2 不可变标签 | 否 |
 
 ## 当前版本边界
 
@@ -26,6 +28,7 @@ GitHub 默认打开的是 `main` 分支的最新状态，所以 v0、v1 的代�
 | v1 | `v1.0-runtime-lite` / `version/v1-runtime-lite` | SHP-lite、StatePool-lite、MemoryStore-lite、端到端成本统计、v0/v1 实验记录 |
 | v2 | `v2.0-llm-eval` / `version/v2-llm-eval` | MiMo v2.5 LLM 实验层、旅行任务组 A1-A5、真实模型对比结果 |
 | v2.1 | `v2.1-longcontext-eval` / `version/v2-longcontext-eval` | A1-A10 长上下文实验、baseline 跨任务完整历史、主实验结果 |
+| v2.2 | `v2.2-quality-rerun` / `version/v2-quality-rerun` | artifact 完整内容留档、网络重试、MiMo 质量裁判重跑 |
 
 ## 如何在本地切换版本
 
@@ -57,6 +60,13 @@ git fetch --all --tags
 git switch version/v2-longcontext-eval
 ```
 
+查看 v2.2：
+
+```powershell
+git fetch --all --tags
+git switch version/v2-quality-rerun
+```
+
 回到最新开发主干：
 
 ```powershell
@@ -70,6 +80,7 @@ git checkout v0.0-baseline
 git checkout v1.0-runtime-lite
 git checkout v2.0-llm-eval
 git checkout v2.1-longcontext-eval
+git checkout v2.2-quality-rerun
 ```
 
 注意：直接 checkout tag 会进入 detached HEAD 状态，只适合查看或复现实验，不适合继续开发。

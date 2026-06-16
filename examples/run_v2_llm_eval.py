@@ -35,6 +35,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default=None)
     parser.add_argument("--api-key-env", default=None)
     parser.add_argument("--timeout-seconds", type=float, default=None)
+    parser.add_argument("--max-retries", type=int, default=None)
+    parser.add_argument("--retry-backoff-seconds", type=float, default=None)
     parser.add_argument("--max-completion-tokens", type=int, default=None)
     parser.add_argument("--temperature", type=float, default=None)
     parser.add_argument("--top-p", type=float, default=None)
@@ -69,6 +71,8 @@ def main() -> int:
         model=args.model,
         api_key_env=args.api_key_env,
         timeout_seconds=args.timeout_seconds,
+        max_retries=args.max_retries,
+        retry_backoff_seconds=args.retry_backoff_seconds,
         max_completion_tokens=args.max_completion_tokens,
         temperature=args.temperature,
         top_p=args.top_p,

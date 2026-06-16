@@ -140,3 +140,22 @@ LLM total token 降低 87.3%，
 平均任务延迟降低 7.0%，
 成功率保持 100%。
 ```
+
+## 重新实验补充
+
+在修复 `artifact_state` 完整内容留档后，重新跑了一轮：
+
+原始输出目录：`runs/v2-longcontext-travel-a1-a10-rerun2-quality-mimo25`
+
+重新实验结果：
+
+```text
+direct_text_tokens 降低 38.9%
+prompt_view_tokens 降低 94.6%
+llm_prompt_tokens 降低 90.5%
+llm_total_tokens 降低 87.4%
+end_to_end_collaboration_tokens 降低 91.8%
+avg_latency_ms 降低 7.3%
+```
+
+重新实验还加入了 MiMo 严格质量裁判。裁判结果显示 `runtime_lite` 在 A10 最终结果质量上优于 `baseline_text`，但两个版本都仍需补强预算表、决策日志和质量修复闭环。详见：[v2-longcontext-quality-judge.md](v2-longcontext-quality-judge.md)。

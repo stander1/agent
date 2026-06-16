@@ -144,3 +144,78 @@ runtime_lite 在长上下文实验中显著降低 token 和延迟成本；
 本记录之后，代码已修改：后续 `artifact_state` 会保存完整 `content` 字段，便于重新实验后进行同口径质量裁判。
 
 注意：本次质量裁判基于旧实验输出，因此 runtime_lite 证据不完整。需要重新跑一轮 A1-A10 后，才能获得更公平的质量裁判。
+
+## 重新实验后的质量裁判
+
+重新实验目录：`runs/v2-longcontext-travel-a1-a10-rerun2-quality-mimo25`
+
+本轮在 `artifact_state` 中保存了完整 `content` 字段，因此 `runtime_lite` 的 A10 Writer/Reviewer/MemoryManager 输出可以从 StatePool 恢复，质量裁判证据更完整。
+
+### 成本结果
+
+| 指标 | baseline_text | runtime_lite | runtime_lite 相对变化 |
+| --- | ---: | ---: | ---: |
+| direct_text_tokens | 22564 | 13783 | 降低 38.9% |
+| prompt_view_tokens | 551828 | 30012 | 降低 94.6% |
+| llm_prompt_tokens | 368543 | 35136 | 降低 90.5% |
+| llm_total_tokens | 383227 | 48463 | 降低 87.4% |
+| end_to_end_collaboration_tokens | 574392 | 47374 | 降低 91.8% |
+| avg_latency_ms | 30510.40 | 28295.78 | 降低 7.3% |
+
+### MiMo 严格质量裁判
+
+裁判模型：`mimo-v2.5`
+
+裁判要求：只评价 A10 最终结果质量，不评价 token 成本，不因结构化协议加分。
+
+裁判结果：
+
+```json
+{
+  "winner": "runtime_lite",
+  "baseline_total": 15,
+  "runtime_lite_total": 23,
+  "verdict": "runtime_lite 显著优于 baseline"
+}
+```
+
+分项结果：
+
+| 维度 | baseline_text | runtime_lite |
+| --- | ---: | ---: |
+| requirement_coverage | 3 | 4 |
+| constraint_consistency | 3 | 4 |
+| actionability | 2 | 3 |
+| budget_verifiability | 1 | 3 |
+| decision_log_quality | 2 | 3 |
+| deliverable_completeness | 2 | 3 |
+| evidence_completeness | 2 | 3 |
+| total | 15 | 23 |
+
+裁判给出的主要理由：
+
+- `runtime_lite` 的 Planner 任务拆解更清晰，明确要求整合 A1-A9、每日安排、预算表和决策日志。
+- `runtime_lite` 的 Writer 产物包含预算表和决策日志框架，比 baseline 更接近 A10 要求。
+- `runtime_lite` 的 Reviewer 给出更具体的修正路径，而 baseline 的最终产物更缺少预算表与决策日志。
+
+裁判同时指出质量风险：
+
+- 两个版本都没有达到完美最终交付，预算明细和决策日志仍需更完整。
+- `runtime_lite` 的预算解释仍需要校验，尤其是伴手礼预算和总预算口径。
+- MemoryManager 输出仍偏概括，没有充分保存 A1-A9 每次修改的具体理由。
+
+## 当前质量结论
+
+重新实验后，结论可以更新为：
+
+```text
+runtime_lite 不仅显著降低长上下文协作成本，
+在可见 A10 最终输出质量上也优于 baseline_text；
+但最终交付质量仍未达到可直接比赛展示的理想水平。
+```
+
+因此后续版本需要加入质量闭环：
+
+- Reviewer 发现预算表或决策日志缺失时，应触发 Writer 修复或格式重试。
+- A10 必须增加质量评分字段，不能只记录 success_rate。
+- MemoryManager 应保存更细的 revision log，而不是只写概括摘要。

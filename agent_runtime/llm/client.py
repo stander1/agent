@@ -40,28 +40,8 @@ class OpenAICompatibleChatClient:
         }
         url = self.config.base_url.rstrip("/") + "/chat/completions"
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        request = urllib.request.Request(
-            url,
-            data=data,
-            headers={
-                "Content-Type": "application/json",
-                "api-key": self.config.resolved_api_key,
-            },
-            method="POST",
-        )
         started = time.perf_counter()
-        try:
-            with urllib.request.urlopen(
-                request, timeout=self.config.timeout_seconds
-            ) as response:
-                response_payload = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(
-                f"LLM request failed with HTTP {exc.code}: {detail[:800]}"
-            ) from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"LLM request failed: {exc.reason}") from exc
+        response_payload = self._post_with_retries(url, data)
 
         latency_ms = (time.perf_counter() - started) * 1000
         choices: list[dict[str, Any]] = response_payload.get("choices", [])
@@ -93,3 +73,35 @@ class OpenAICompatibleChatClient:
             latency_ms=latency_ms,
             raw_finish_reason=choice.get("finish_reason"),
         )
+
+    def _post_with_retries(self, url: str, data: bytes) -> dict[str, Any]:
+        last_error: Exception | None = None
+        attempts = max(1, self.config.max_retries + 1)
+        for attempt in range(1, attempts + 1):
+            request = urllib.request.Request(
+                url,
+                data=data,
+                headers={
+                    "Content-Type": "application/json",
+                    "api-key": self.config.resolved_api_key,
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(
+                    request, timeout=self.config.timeout_seconds
+                ) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                if exc.code < 500 or attempt >= attempts:
+                    raise RuntimeError(
+                        f"LLM request failed with HTTP {exc.code}: {detail[:800]}"
+                    ) from exc
+                last_error = exc
+            except urllib.error.URLError as exc:
+                if attempt >= attempts:
+                    raise RuntimeError(f"LLM request failed: {exc.reason}") from exc
+                last_error = exc
+            time.sleep(self.config.retry_backoff_seconds * attempt)
+        raise RuntimeError(f"LLM request failed after retries: {last_error}") from last_error

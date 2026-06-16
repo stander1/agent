@@ -4,6 +4,8 @@
   "model": "mimo-v2.5",
   "api_key_env": "MIMO_API_KEY",
   "timeout_seconds": 120,
+  "max_retries": 2,
+  "retry_backoff_seconds": 2.0,
   "max_completion_tokens": 300,
   "temperature": 0.2,
   "top_p": 0.9

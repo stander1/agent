@@ -106,3 +106,5 @@ https://token-plan-cn.xiaomimimo.com/v1
 ```
 
 `https://token-plan-cn.xiaomimimo.com/anthropic` 属于 Anthropic-compatible 接口，当前 v2 runner 暂未启用。
+
+长上下文重跑结果显示，`runtime_lite` 在 A1-A10 任务中端到端协作 token 降低 91.8%，MiMo 严格质量裁判也判定 A10 最终结果质量优于 `baseline_text`，但仍需继续补强预算表、决策日志和 Reviewer 修复闭环。
