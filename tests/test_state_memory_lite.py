@@ -79,7 +79,35 @@ class MemoryStoreLiteTest(unittest.TestCase):
         self.assertTrue(hits)
         self.assertEqual(hits[0].memory_id, ref.memory_id)
         view = store.render_prompt_view(hits[0])
+        self.assertIn("memory_view", view)
         self.assertIn("结构化 SHP", view)
+
+    def test_claim_memory_view_and_deliverable_view(self) -> None:
+        store = MemoryStoreLite()
+        report = store.write_memory_with_report(
+            task_id="A10",
+            source_agent="writer",
+            task_topic="最终修订版旅行手册与决策日志",
+            summary="最终手册需要覆盖预算表、修订日志和决策日志。",
+            tags=["travel_A", "A10", "writer"],
+            slot_hint="final_deliverable",
+            source_state_ids=["state_a", "state_b"],
+        )
+
+        self.assertEqual(report.claim_card_count, 1)
+        self.assertEqual(report.memory_view_count, 1)
+        self.assertEqual(report.promotion_view_count, 1)
+        self.assertEqual(report.unresolved_slot_count, 0)
+        self.assertEqual(report.memory_ref.slot_id, "slot.system.deliverable_requirement")
+
+        hits = store.search_memory("最终手册预算表决策日志", tags=["travel_A"])
+        self.assertTrue(hits)
+        deliverable_view = store.render_deliverable_view(
+            hits,
+            task_title="最终修订版旅行手册与决策日志",
+        )
+        self.assertIn("Deliverable View", deliverable_view)
+        self.assertIn("预算表", deliverable_view)
 
 
 if __name__ == "__main__":

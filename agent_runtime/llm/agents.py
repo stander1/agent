@@ -22,9 +22,17 @@ class LlmAgent:
 
     def run(self, task: TaskSpec, context: list[AgentOutput]) -> AgentOutput:
         runtime_prompt = context[-1].content if context else task.prompt
+        final_task_instruction = ""
+        if task.task_id.endswith("10") or "最终" in task.title:
+            final_task_instruction = (
+                "\n当前任务是最终收束任务：必须输出可直接交付的完整结果，"
+                "不要只输出方法论摘要。若上下文包含 Deliverable View，"
+                "必须覆盖其中的关键结论、证据表、修订日志和决策日志。"
+            )
         system_prompt = (
             f"你是 {self.role}，正在参与一个多 Agent 连续协作任务。\n"
             f"{self.instruction}\n"
+            f"{final_task_instruction}\n"
             "要求：\n"
             "1. 输出中文。\n"
             "2. 保持结论可被下游 Agent 复用。\n"

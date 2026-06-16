@@ -61,15 +61,30 @@ class V0Runtime:
         lite_context: list[AgentOutput] = []
         task_memory_refs: list[MemoryRef] = []
         task_memory_prompt_views: list[str] = []
+        deliverable_view = ""
         if mode == "runtime_lite":
-            task_memory_refs = self.memory_store.search_memory(
+            search_report = self.memory_store.search_memory_with_report(
                 task.prompt,
-                tags=[task.group_id, task.task_id],
-                top_k=2,
+                tags=[task.group_id],
+                top_k=4 if self._is_final_task(task) else 2,
+            )
+            task_memory_refs = search_report.refs
+            self.metrics.record_memory_search_backend(
+                task_id=task.task_id,
+                round_id=round_id,
+                mode=mode,
+                retrieval_backend=search_report.retrieval_backend,
+                vector_retrieval_count=search_report.vector_retrieval_count,
             )
             task_memory_prompt_views = [
                 self.memory_store.render_prompt_view(ref) for ref in task_memory_refs
             ]
+            if self._is_final_task(task):
+                deliverable_view = self.memory_store.render_deliverable_view(
+                    task_memory_refs,
+                    task_title=task.title,
+                    budget_chars=2200,
+                )
             if task_memory_prompt_views:
                 self.metrics.record_memory_retrieval(
                     task_id=task.task_id,
@@ -96,6 +111,9 @@ class V0Runtime:
                 mode,
                 state_refs=state_refs,
                 memory_prompt_views=memory_prompt_views,
+                deliverable_view=deliverable_view
+                if mode == "runtime_lite" and agent.agent_id in {"writer", "reviewer", "memory_manager"}
+                else "",
                 agent_role=agent.role,
             )
             self.metrics.record_prompt(
@@ -148,14 +166,30 @@ class V0Runtime:
                 state_refs.append(state_ref)
 
                 if agent.agent_id in {"writer", "reviewer", "memory_manager"}:
-                    memory_ref = self.memory_store.write_memory(
+                    write_report = self.memory_store.write_memory_with_report(
                         task_id=task.task_id,
                         source_agent=agent.agent_id,
                         task_topic=task.title,
                         summary=self._summary(output.content, 180),
                         tags=[task.group_id, task.task_id, agent.agent_id],
+                        slot_hint=self._slot_hint_for_task(task, agent.agent_id),
+                        source_state_ids=[ref.state_id for ref in state_refs[-4:]],
+                        evidence_refs=[ref.state_id for ref in output_state_refs],
+                        reuse_intent=f"供 {task.group_id} 后续连续任务复用",
                     )
+                    memory_ref = write_report.memory_ref
                     output_memory_refs.append(memory_ref)
+                    self.metrics.record_memory_write(
+                        task_id=task.task_id,
+                        round_id=round_id,
+                        mode=mode,
+                        memory_write_count=write_report.memory_write_count,
+                        claim_card_count=write_report.claim_card_count,
+                        memory_view_count=write_report.memory_view_count,
+                        promotion_view_count=write_report.promotion_view_count,
+                        alias_mapping_hit_count=write_report.alias_mapping_hit_count,
+                        unresolved_slot_count=write_report.unresolved_slot_count,
+                    )
 
                 message_content = self._build_shp_message(
                     task=task,
@@ -247,6 +281,7 @@ class V0Runtime:
         mode: Mode,
         state_refs: list[StateRef] | None = None,
         memory_prompt_views: list[str] | None = None,
+        deliverable_view: str = "",
         agent_role: str = "",
     ) -> str:
         if mode == "baseline_text":
@@ -265,11 +300,17 @@ class V0Runtime:
                 )
             memory_block = "\n".join(memory_prompt_views or [])
             state_block = "\n\n".join(state_views)
+            deliverable_block = (
+                f"\n\nDeliverable View:\n{deliverable_view}"
+                if deliverable_view
+                else ""
+            )
             return (
                 f"任务：{task.prompt}\n\n"
                 "runtime_lite 控制字段：下游仅通过 Prompt View 读取状态和记忆。\n"
                 f"Memory Prompt View:\n{memory_block or '无可复用记忆'}\n\n"
                 f"State Prompt View:\n{state_block or '无上游状态'}"
+                f"{deliverable_block}"
             )
 
         previous = "\n\n".join(
@@ -407,6 +448,20 @@ class V0Runtime:
         except ValueError:
             return "runtime"
         return ids[index + 1] if index + 1 < len(ids) else "runtime"
+
+    def _is_final_task(self, task: TaskSpec) -> bool:
+        title = task.title.lower()
+        return task.task_id.endswith("10") or "最终" in task.title or "final" in title
+
+    def _slot_hint_for_task(self, task: TaskSpec, agent_id: str) -> str:
+        if self._is_final_task(task):
+            return "final_deliverable"
+        group = task.group_id.lower()
+        if "travel" in group or task.task_id.startswith("A"):
+            return "travel_preference" if agent_id != "reviewer" else "reuse_strategy"
+        if "security" in group or task.task_id.startswith("B"):
+            return "security_audit" if agent_id != "reviewer" else "failure_reason"
+        return "reuse_strategy"
 
     @staticmethod
     def _summary(text: str, limit: int) -> str:

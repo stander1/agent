@@ -43,6 +43,17 @@ class TaskMetricRow:
     useful_memory_hit_rate: float = 0.0
     wrong_memory_hit_count: int = 0
     memory_supported_output_count: int = 0
+    memory_write_count: int = 0
+    claim_card_count: int = 0
+    memory_view_count: int = 0
+    promotion_view_count: int = 0
+    audit_view_expansion_count: int = 0
+    context_pruned_retry_count: int = 0
+    format_retry_success_count: int = 0
+    unresolved_slot_count: int = 0
+    alias_mapping_hit_count: int = 0
+    vector_retrieval_count: int = 0
+    retrieval_backend: str = ""
     retrieved_memory_tokens: int = 0
     control_llm_tokens: int = 0
     retry_tokens: int = 0
@@ -135,6 +146,46 @@ class MetricsCollector:
         row = self._row(task_id, round_id, mode)
         row.memory_supported_output_count += count
 
+    def record_memory_write(
+        self,
+        *,
+        task_id: str,
+        round_id: int,
+        mode: Mode,
+        memory_write_count: int = 0,
+        claim_card_count: int = 0,
+        memory_view_count: int = 0,
+        promotion_view_count: int = 0,
+        alias_mapping_hit_count: int = 0,
+        unresolved_slot_count: int = 0,
+    ) -> None:
+        row = self._row(task_id, round_id, mode)
+        row.memory_write_count += memory_write_count
+        row.claim_card_count += claim_card_count
+        row.memory_view_count += memory_view_count
+        row.promotion_view_count += promotion_view_count
+        row.alias_mapping_hit_count += alias_mapping_hit_count
+        row.unresolved_slot_count += unresolved_slot_count
+
+    def record_memory_search_backend(
+        self,
+        *,
+        task_id: str,
+        round_id: int,
+        mode: Mode,
+        retrieval_backend: str,
+        vector_retrieval_count: int = 0,
+    ) -> None:
+        row = self._row(task_id, round_id, mode)
+        row.retrieval_backend = retrieval_backend
+        row.vector_retrieval_count += vector_retrieval_count
+
+    def record_audit_view_expansion(
+        self, *, task_id: str, round_id: int, mode: Mode, count: int = 1
+    ) -> None:
+        row = self._row(task_id, round_id, mode)
+        row.audit_view_expansion_count += count
+
     def record_prompt(
         self,
         task_id: str,
@@ -222,6 +273,17 @@ class MetricsCollector:
                 "useful_memory_hit_count": 0,
                 "wrong_memory_hit_count": 0,
                 "memory_supported_output_count": 0,
+                "memory_write_count": 0,
+                "claim_card_count": 0,
+                "memory_view_count": 0,
+                "promotion_view_count": 0,
+                "audit_view_expansion_count": 0,
+                "context_pruned_retry_count": 0,
+                "format_retry_success_count": 0,
+                "unresolved_slot_count": 0,
+                "alias_mapping_hit_count": 0,
+                "vector_retrieval_count": 0,
+                "retrieval_backend": "",
                 "hot_state_count": 0,
                 "warm_state_count": 0,
                 "cold_state_count": 0,
@@ -259,6 +321,18 @@ class MetricsCollector:
             bucket["useful_memory_hit_count"] += row.useful_memory_hit_count
             bucket["wrong_memory_hit_count"] += row.wrong_memory_hit_count
             bucket["memory_supported_output_count"] += row.memory_supported_output_count
+            bucket["memory_write_count"] += row.memory_write_count
+            bucket["claim_card_count"] += row.claim_card_count
+            bucket["memory_view_count"] += row.memory_view_count
+            bucket["promotion_view_count"] += row.promotion_view_count
+            bucket["audit_view_expansion_count"] += row.audit_view_expansion_count
+            bucket["context_pruned_retry_count"] += row.context_pruned_retry_count
+            bucket["format_retry_success_count"] += row.format_retry_success_count
+            bucket["unresolved_slot_count"] += row.unresolved_slot_count
+            bucket["alias_mapping_hit_count"] += row.alias_mapping_hit_count
+            bucket["vector_retrieval_count"] += row.vector_retrieval_count
+            if row.retrieval_backend:
+                bucket["retrieval_backend"] = row.retrieval_backend
             bucket["hot_state_count"] += row.hot_state_count
             bucket["warm_state_count"] += row.warm_state_count
             bucket["cold_state_count"] += row.cold_state_count

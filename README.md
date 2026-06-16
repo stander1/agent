@@ -2,7 +2,7 @@
 
 本仓库用于迭代实现一个面向多 Agent 协作的跨框架运行时工具层，目标是在多 Agent 任务中通过结构化通信、非文本状态传递和共享记忆复用降低协作开销。
 
-当前版本：`v2.3 tiered state pool`
+当前版本：`v3-lite memory reuse`
 
 实验结果记录见：
 
@@ -11,6 +11,7 @@
 - [docs/experiments/v2-longcontext-travel-results.md](docs/experiments/v2-longcontext-travel-results.md)
 - [docs/experiments/v2-longcontext-quality-judge.md](docs/experiments/v2-longcontext-quality-judge.md)
 - [docs/experiments/v2-security-b-results.md](docs/experiments/v2-security-b-results.md)
+- [docs/experiments/v3-lite-smoke-results.md](docs/experiments/v3-lite-smoke-results.md)
 
 版本切换与 GitHub 浏览方式见：[docs/versioning.md](docs/versioning.md)
 
@@ -123,3 +124,5 @@ B1-B10 合成安全审计:
 ```
 
 但两组 v2.3 的 MiMo 严格质量裁判都判定 `baseline_text` 的最终收束结果更完整，说明 v3 需要重点补 ClaimCard / MemoryView / Deliverable View / Reviewer 修复闭环，避免低开销压缩牺牲最终交付质量。
+
+v3-lite 已开始补齐这条质量链路：当前实现了 Promotion View、ClaimCard、MemoryView、Alias Mapping 和 Deliverable View，并在 A1-A2 / B1-B2 smoke 中验证了记忆写入、命中和 v3 指标落盘。完整 A1-A10 / B1-B10 质量重跑仍在后续进行。
