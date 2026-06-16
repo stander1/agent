@@ -4,6 +4,8 @@
 
 GitHub 默认打开的是 `main` 分支的最新状态，所以 v0、v1 的代码和文档会在最新目录中同时出现。这不是最终版本边界，而是当前开发主干的状态。真正的版本边界由 Git tag 和 `version/*` 分支固定。
 
+版本能力与创新方案的对照表见：[docs/planning/version-implementation-mapping.md](planning/version-implementation-mapping.md)。`v3.1`、`v3.2` 等小版本只表示主版本内部补强，不改变 `docs/planning/README.md` 中的 v0-v6 主路线。
+
 ## 分支与标签约定
 
 | 类型 | 用途 | 是否继续开发 |

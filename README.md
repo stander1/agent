@@ -18,6 +18,8 @@
 
 版本切换与 GitHub 浏览方式见：[docs/versioning.md](docs/versioning.md)
 
+版本路线与代码实现对照见：[docs/planning/version-implementation-mapping.md](docs/planning/version-implementation-mapping.md)。后续小版本必须先在该文档中校准归属主版本和对应创新方案模块。
+
 ## v0/v1 目标
 
 v0 是评测地基，先建立稳定、可复现的纯文本基线和指标系统。
