@@ -21,6 +21,7 @@ GitHub 默认打开的是 `main` 分支的最新状态，所以 v0、v1 的代�
 | `version/v3-final-schema` | v3.1 Final Deliverable Schema 与 Reviewer Guard 版本快照 | 否 |
 | `version/v3-reliability-guard` | v3.2 Runtime Output Reliability Guard 版本快照 | 否 |
 | `version/v3-memory-admission` | v3.3 Memory Candidate Admission Lite 版本快照 | 否 |
+| `version/v4-cost-lifecycle` | v4.0 Cost Governance and Lifecycle Lite 版本快照 | 否 |
 | `v0.0-baseline` | v0 不可变标签 | 否 |
 | `v1.0-runtime-lite` | v1 不可变标签 | 否 |
 | `v2.0-llm-eval` | v2 不可变标签 | 否 |
@@ -31,6 +32,7 @@ GitHub 默认打开的是 `main` 分支的最新状态，所以 v0、v1 的代�
 | `v3.1-final-schema` | v3.1 不可变标签 | 否 |
 | `v3.2-reliability-guard` | v3.2 不可变标签 | 否 |
 | `v3.3-memory-admission` | v3.3 不可变标签 | 否 |
+| `v4.0-cost-lifecycle` | v4.0 不可变标签 | 否 |
 
 ## 当前版本边界
 
@@ -46,6 +48,7 @@ GitHub 默认打开的是 `main` 分支的最新状态，所以 v0、v1 的代�
 | v3.1 | `v3.1-final-schema` / `version/v3-final-schema` | Final Deliverable Schema、中文字段覆盖、Reviewer 短上下文修复、A/B 最终交付质量记录 |
 | v3.2 | `v3.2-reliability-guard` / `version/v3-reliability-guard` | Provider Response Guard、Agent Output Contract Guard、规则修复、degraded fallback、输出可靠性指标 |
 | v3.3 | `v3.3-memory-admission` / `version/v3-memory-admission` | MemoryCandidate、ClaimCandidate、Admission Lite、admitted-only MemoryView 更新、准入状态指标 |
+| v4.0 | `v4.0-cost-lifecycle` / `version/v4-cost-lifecycle` | Retry Budget、Read Lease-lite、State GC-lite、tombstone、Memory lifecycle、Preflight Validation-lite |
 
 ## 如何在本地切换版本
 
@@ -118,6 +121,12 @@ git fetch --all --tags
 git switch version/v3-memory-admission
 ```
 
+查看 v4.0：
+```powershell
+git fetch --all --tags
+git switch version/v4-cost-lifecycle
+```
+
 回到最新开发主干：
 
 ```powershell
@@ -137,6 +146,7 @@ git checkout v3.0-memory-view-lite
 git checkout v3.1-final-schema
 git checkout v3.2-reliability-guard
 git checkout v3.3-memory-admission
+git checkout v4.0-cost-lifecycle
 ```
 
 注意：直接 checkout tag 会进入 detached HEAD 状态，只适合查看或复现实验，不适合继续开发。

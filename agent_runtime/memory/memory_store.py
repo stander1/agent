@@ -41,6 +41,15 @@ ALIAS_MAPPING = {
     "final_deliverable": "slot.system.deliverable_requirement",
 }
 
+PROMPT_VIEW_MEMORY_STATUSES = {"active", "provisional_active"}
+BLOCKED_MEMORY_STATUSES = {
+    "deprecated",
+    "deleted",
+    "superseded",
+    "unresolved_conflict",
+    "pending_lifecycle_update",
+}
+
 
 @dataclass(slots=True)
 class MemoryRef:
@@ -173,6 +182,25 @@ class MemoryAdmissionReport:
     promotion_view_count: int = 0
     alias_mapping_hit_count: int = 0
     unresolved_slot_count: int = 0
+
+
+@dataclass(slots=True)
+class PreflightValidationReport:
+    allowed: bool
+    checked_count: int = 0
+    blocked_count: int = 0
+    stale_read_detected_count: int = 0
+    missing_memory_count: int = 0
+    blocked_memory_ids: list[str] = field(default_factory=list)
+    valid_refs: list[MemoryRef] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class MemoryStatusTransitionReport:
+    memory_id: str
+    old_status: str
+    new_status: str
+    transitioned: bool
 
 
 @dataclass(slots=True)
@@ -426,7 +454,7 @@ class MemoryStoreLite:
         requested_tags = set(tags or [])
         scored: list[tuple[int, MemoryObject]] = []
         for memory in self._memories.values():
-            if memory.status != "active":
+            if memory.status not in PROMPT_VIEW_MEMORY_STATUSES:
                 continue
             claim = self._claims[memory.claim_id]
             view = self._views[memory.memory_view_id]
@@ -447,6 +475,62 @@ class MemoryStoreLite:
             memory.hit_count += 1
             refs.append(self.ref(memory))
         return MemorySearchReport(refs=refs)
+
+    def validate_read_set(self, refs: list[MemoryRef]) -> PreflightValidationReport:
+        valid_refs: list[MemoryRef] = []
+        blocked: list[str] = []
+        stale_count = 0
+        missing_count = 0
+        for ref in refs:
+            memory = self._memories.get(ref.memory_id)
+            if memory is None:
+                missing_count += 1
+                blocked.append(ref.memory_id)
+                continue
+            if memory.version_id != ref.version_id:
+                stale_count += 1
+                blocked.append(ref.memory_id)
+                continue
+            if memory.status in BLOCKED_MEMORY_STATUSES:
+                blocked.append(ref.memory_id)
+                continue
+            if memory.status not in PROMPT_VIEW_MEMORY_STATUSES:
+                blocked.append(ref.memory_id)
+                continue
+            valid_refs.append(ref)
+        return PreflightValidationReport(
+            allowed=not blocked,
+            checked_count=len(refs),
+            blocked_count=len(blocked),
+            stale_read_detected_count=stale_count + missing_count,
+            missing_memory_count=missing_count,
+            blocked_memory_ids=blocked,
+            valid_refs=valid_refs,
+        )
+
+    def transition_memory_status(
+        self, memory_ref: MemoryRef, new_status: str
+    ) -> MemoryStatusTransitionReport:
+        memory = self._memories[memory_ref.memory_id]
+        old_status = memory.status
+        if old_status == new_status:
+            return MemoryStatusTransitionReport(
+                memory_id=memory.memory_id,
+                old_status=old_status,
+                new_status=new_status,
+                transitioned=False,
+            )
+        memory.status = new_status
+        memory.version_id += 1
+        claim = self._claims.get(memory.claim_id)
+        if claim is not None:
+            claim.status = new_status
+        return MemoryStatusTransitionReport(
+            memory_id=memory.memory_id,
+            old_status=old_status,
+            new_status=new_status,
+            transitioned=True,
+        )
 
     def render_prompt_view(self, memory_ref: MemoryRef, budget_chars: int = 700) -> str:
         memory = self._memories[memory_ref.memory_id]

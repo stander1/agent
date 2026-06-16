@@ -77,6 +77,20 @@ class TaskMetricRow:
     contract_retry_count: int = 0
     contract_violation_count: int = 0
     fallback_count: int = 0
+    raw_access_count: int = 0
+    summary_access_count: int = 0
+    evidence_snippet_access_count: int = 0
+    access_escalation_count: int = 0
+    state_gc_count: int = 0
+    read_lease_acquire_count: int = 0
+    read_lease_blocked_gc_count: int = 0
+    state_tombstone_count: int = 0
+    memory_status_transition_count: int = 0
+    stale_read_detected_count: int = 0
+    preflight_validation_count: int = 0
+    preflight_block_count: int = 0
+    retry_input_tokens: int = 0
+    retry_budget_exhausted_count: int = 0
     retrieved_memory_tokens: int = 0
     control_llm_tokens: int = 0
     retry_tokens: int = 0
@@ -138,6 +152,40 @@ class MetricsCollector:
         elif tier == "cold":
             row.cold_state_count += 1
             row.cold_state_bytes += payload_bytes
+
+    def record_state_access(
+        self,
+        *,
+        task_id: str,
+        round_id: int,
+        mode: Mode,
+        raw_access_count: int = 0,
+        summary_access_count: int = 0,
+        evidence_snippet_access_count: int = 0,
+        access_escalation_count: int = 0,
+        read_lease_acquire_count: int = 0,
+    ) -> None:
+        row = self._row(task_id, round_id, mode)
+        row.raw_access_count += raw_access_count
+        row.summary_access_count += summary_access_count
+        row.evidence_snippet_access_count += evidence_snippet_access_count
+        row.access_escalation_count += access_escalation_count
+        row.read_lease_acquire_count += read_lease_acquire_count
+
+    def record_state_gc(
+        self,
+        *,
+        task_id: str,
+        round_id: int,
+        mode: Mode,
+        state_gc_count: int = 0,
+        read_lease_blocked_gc_count: int = 0,
+        state_tombstone_count: int = 0,
+    ) -> None:
+        row = self._row(task_id, round_id, mode)
+        row.state_gc_count += state_gc_count
+        row.read_lease_blocked_gc_count += read_lease_blocked_gc_count
+        row.state_tombstone_count += state_tombstone_count
 
     def record_memory_retrieval(
         self,
@@ -285,7 +333,21 @@ class MetricsCollector:
         prompt_count = token_counter.count(retry_prompt)
         output_count = token_counter.count(retry_output)
         row.retry_tokens += prompt_count.token_count + output_count.token_count
+        row.retry_input_tokens += prompt_count.token_count
         self._apply_token_meta(row, prompt_count)
+
+    def record_retry_budget(
+        self,
+        *,
+        task_id: str,
+        round_id: int,
+        mode: Mode,
+        retry_input_tokens: int,
+        budget_exhausted: bool,
+    ) -> None:
+        del retry_input_tokens
+        row = self._row(task_id, round_id, mode)
+        row.retry_budget_exhausted_count += int(budget_exhausted)
 
     def record_prompt(
         self,
@@ -361,9 +423,29 @@ class MetricsCollector:
             "retry_attempted"
         ):
             row.contract_retry_count += 1
+            row.context_pruned_retry_count += 1
+            if status == "repaired":
+                row.format_retry_success_count += 1
         if status == "degraded_fallback":
             row.contract_violation_count += 1
             row.fallback_count += 1
+
+    def record_preflight_validation(
+        self,
+        *,
+        task_id: str,
+        round_id: int,
+        mode: Mode,
+        validation_count: int = 1,
+        block_count: int = 0,
+        stale_read_detected_count: int = 0,
+        memory_status_transition_count: int = 0,
+    ) -> None:
+        row = self._row(task_id, round_id, mode)
+        row.preflight_validation_count += validation_count
+        row.preflight_block_count += block_count
+        row.stale_read_detected_count += stale_read_detected_count
+        row.memory_status_transition_count += memory_status_transition_count
 
     def finish_task(
         self,
@@ -456,6 +538,20 @@ class MetricsCollector:
                 "contract_retry_count": 0,
                 "contract_violation_count": 0,
                 "fallback_count": 0,
+                "raw_access_count": 0,
+                "summary_access_count": 0,
+                "evidence_snippet_access_count": 0,
+                "access_escalation_count": 0,
+                "state_gc_count": 0,
+                "read_lease_acquire_count": 0,
+                "read_lease_blocked_gc_count": 0,
+                "state_tombstone_count": 0,
+                "memory_status_transition_count": 0,
+                "stale_read_detected_count": 0,
+                "preflight_validation_count": 0,
+                "preflight_block_count": 0,
+                "retry_input_tokens": 0,
+                "retry_budget_exhausted_count": 0,
                 "hot_state_count": 0,
                 "warm_state_count": 0,
                 "cold_state_count": 0,
@@ -541,6 +637,22 @@ class MetricsCollector:
             bucket["contract_retry_count"] += row.contract_retry_count
             bucket["contract_violation_count"] += row.contract_violation_count
             bucket["fallback_count"] += row.fallback_count
+            bucket["raw_access_count"] += row.raw_access_count
+            bucket["summary_access_count"] += row.summary_access_count
+            bucket["evidence_snippet_access_count"] += row.evidence_snippet_access_count
+            bucket["access_escalation_count"] += row.access_escalation_count
+            bucket["state_gc_count"] += row.state_gc_count
+            bucket["read_lease_acquire_count"] += row.read_lease_acquire_count
+            bucket["read_lease_blocked_gc_count"] += row.read_lease_blocked_gc_count
+            bucket["state_tombstone_count"] += row.state_tombstone_count
+            bucket["memory_status_transition_count"] += (
+                row.memory_status_transition_count
+            )
+            bucket["stale_read_detected_count"] += row.stale_read_detected_count
+            bucket["preflight_validation_count"] += row.preflight_validation_count
+            bucket["preflight_block_count"] += row.preflight_block_count
+            bucket["retry_input_tokens"] += row.retry_input_tokens
+            bucket["retry_budget_exhausted_count"] += row.retry_budget_exhausted_count
             bucket["hot_state_count"] += row.hot_state_count
             bucket["warm_state_count"] += row.warm_state_count
             bucket["cold_state_count"] += row.cold_state_count

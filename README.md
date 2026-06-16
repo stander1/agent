@@ -2,7 +2,7 @@
 
 本仓库用于迭代实现一个面向多 Agent 协作的跨框架运行时工具层，目标是在多 Agent 任务中通过结构化通信、非文本状态传递和共享记忆复用降低协作开销。
 
-当前版本：`v3.3 memory candidate admission lite`
+当前版本：`v4.0 cost governance and lifecycle lite`
 
 实验结果记录见：
 
@@ -16,6 +16,7 @@
 - [docs/experiments/v3.1-final-schema-results.md](docs/experiments/v3.1-final-schema-results.md)
 - [docs/experiments/v3.2-reliability-guard-results.md](docs/experiments/v3.2-reliability-guard-results.md)
 - [docs/experiments/v3.3-memory-admission-results.md](docs/experiments/v3.3-memory-admission-results.md)
+- [docs/experiments/v4.0-cost-lifecycle-results.md](docs/experiments/v4.0-cost-lifecycle-results.md)
 
 版本切换与 GitHub 浏览方式见：[docs/versioning.md](docs/versioning.md)
 
@@ -200,3 +201,29 @@ schema_valid_rate: 1.0
 ```
 
 这一步确认 `memory_card` 不再被视为最终长期记忆，而是先进入候选池和准入门控；只有 admitted candidate 才更新 MemoryView。
+
+v4.0 进入联合成本治理与生命周期 lite：
+
+```text
+CMJCC: Retry Budget
+SHP-State: Read Lease-lite + GC-lite + tombstone
+TLC-Memory: lifecycle-aware retrieval + Preflight Validation-lite
+```
+
+A1-A2 runtime_lite smoke 显示：
+
+```text
+task_runs: 2
+success_rate: 1.0
+memory_hit_rate: 1.0
+preflight_validation_count: 2
+read_lease_acquire_count: 20
+summary_access_count: 14
+evidence_snippet_access_count: 6
+raw_access_count: 0
+context_pruned_retry_count: 3
+retry_input_tokens: 1393
+retry_budget_exhausted_count: 0
+```
+
+这一步重点不是提高最终质量分，而是防止成本转移和运行时竞态：默认读取 Prompt View，不读 full raw；Writer 生成前做 read-set preflight；GC 不删除正在读取或已晋升为记忆 lineage 的状态。

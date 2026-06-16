@@ -65,6 +65,35 @@ class StatePoolLiteTest(unittest.TestCase):
             self.assertIsNotNone(audit_payload)
             self.assertEqual(audit_payload["content"], raw_content)
 
+    def test_read_lease_blocks_gc_and_tombstone_after_release(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = StatePoolLite(Path(tmp))
+            state_ref, state = pool.write_state(
+                task_id="T1",
+                source_agent="writer",
+                state_type="artifact_state",
+                payload={"artifact_id": "artifact_T1_writer", "sha256": "abc"},
+                summary="可回收冷产物",
+                usage_hint="artifact_summary",
+                tier="cold",
+                audit_payload={"content": "raw artifact"},
+            )
+
+            with pool.leases.read_lease(state_ref.state_id):
+                blocked = pool.collect_garbage(max_deleted=1)
+                self.assertEqual(blocked.read_lease_blocked_gc_count, 1)
+                self.assertEqual(blocked.state_gc_count, 0)
+                self.assertEqual(state.lifecycle, "cooling")
+                self.assertTrue(Path(state.payload_ref).exists())
+
+            collected = pool.collect_garbage(max_deleted=1)
+            self.assertEqual(collected.state_gc_count, 1)
+            self.assertEqual(collected.state_tombstone_count, 1)
+            self.assertEqual(state.lifecycle, "deleted")
+            self.assertFalse(Path(state.payload_ref).exists())
+            view = pool.render_prompt_view(state_ref, "WriterAgent")
+            self.assertIn("state_tombstone", view)
+
 
 class MemoryStoreLiteTest(unittest.TestCase):
     def test_write_search_and_render_memory(self) -> None:
@@ -198,6 +227,33 @@ class MemoryStoreLiteTest(unittest.TestCase):
         self.assertEqual(report.memory_audit_only_count, 1)
         self.assertEqual(report.memory_write_count, 0)
         self.assertIsNone(report.memory_ref)
+
+    def test_memory_lifecycle_preflight_blocks_stale_and_deprecated_refs(self) -> None:
+        store = MemoryStoreLite()
+        ref = store.write_memory(
+            task_id="B4",
+            source_agent="writer",
+            task_topic="审计线索",
+            summary="弱口令线索已经被证据链确认。",
+            tags=["security_B", "B4", "writer"],
+            slot_hint="security_audit",
+        )
+
+        ok = store.validate_read_set([ref])
+        self.assertTrue(ok.allowed)
+        self.assertEqual(ok.checked_count, 1)
+
+        transition = store.transition_memory_status(ref, "deprecated")
+        self.assertTrue(transition.transitioned)
+        stale = store.validate_read_set([ref])
+        self.assertFalse(stale.allowed)
+        self.assertEqual(stale.stale_read_detected_count, 1)
+
+        current_ref = store.ref(store._memories[ref.memory_id])
+        deprecated = store.validate_read_set([current_ref])
+        self.assertFalse(deprecated.allowed)
+        self.assertEqual(deprecated.blocked_count, 1)
+        self.assertFalse(store.search_memory("弱口令 证据链", tags=["security_B"]))
 
 
 class DeliverableSchemaTest(unittest.TestCase):

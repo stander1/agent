@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,6 +43,51 @@ class StateObject:
     version: int = 1
 
 
+@dataclass(slots=True)
+class StateAccessReport:
+    state_id: str
+    access_level: str
+    read_lease_acquire_count: int = 1
+    raw_access_count: int = 0
+    summary_access_count: int = 0
+    evidence_snippet_access_count: int = 0
+    access_escalation_count: int = 0
+
+
+@dataclass(slots=True)
+class StateGCReport:
+    state_gc_count: int = 0
+    read_lease_blocked_gc_count: int = 0
+    state_tombstone_count: int = 0
+    cooling_state_count: int = 0
+
+
+class LeaseRegistry:
+    """In-memory read lease counters for the v4 hot path."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._active_readers: dict[str, int] = {}
+
+    @contextmanager
+    def read_lease(self, state_id: str):
+        with self._lock:
+            self._active_readers[state_id] = self._active_readers.get(state_id, 0) + 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                remaining = self._active_readers.get(state_id, 0) - 1
+                if remaining > 0:
+                    self._active_readers[state_id] = remaining
+                else:
+                    self._active_readers.pop(state_id, None)
+
+    def active_readers(self, state_id: str) -> int:
+        with self._lock:
+            return self._active_readers.get(state_id, 0)
+
+
 class StatePoolLite:
     """File-backed state pool with SHP-State Hot/Warm/Cold tiers.
 
@@ -54,9 +101,19 @@ class StatePoolLite:
         self.hot_dir = self.root_dir / "state_hot"
         self.warm_dir = self.root_dir / "state_warm"
         self.cold_dir = self.root_dir / "state_cold"
-        for path in (self.payload_dir, self.hot_dir, self.warm_dir, self.cold_dir):
+        self.tombstone_dir = self.root_dir / "state_tombstones"
+        for path in (
+            self.payload_dir,
+            self.hot_dir,
+            self.warm_dir,
+            self.cold_dir,
+            self.tombstone_dir,
+        ):
             path.mkdir(parents=True, exist_ok=True)
         self._states: dict[str, StateObject] = {}
+        self._tombstones: dict[str, dict[str, Any]] = {}
+        self._lineage_state_ids: set[str] = set()
+        self.leases = LeaseRegistry()
 
     def write_state(
         self,
@@ -131,63 +188,156 @@ class StatePoolLite:
     def render_prompt_view(
         self, state_ref: StateRef, agent_role: str, budget_chars: int = 900
     ) -> str:
+        return self.render_prompt_view_with_report(
+            state_ref, agent_role, budget_chars=budget_chars
+        )[0]
+
+    def render_prompt_view_with_report(
+        self, state_ref: StateRef, agent_role: str, budget_chars: int = 900
+    ) -> tuple[str, StateAccessReport]:
         state = self._states[state_ref.state_id]
-        payload = json.loads(Path(state.payload_ref).read_text(encoding="utf-8"))
+        if state.lifecycle in {"deleted", "tombstoned"}:
+            rendered = (
+                f"[state_tombstone:{state.state_id}] state no longer has prompt payload; "
+                f"lifecycle={state.lifecycle}"
+            )
+            report = StateAccessReport(
+                state_id=state.state_id,
+                access_level="summary",
+                summary_access_count=1,
+            )
+            return rendered[:budget_chars], report
 
-        if state.state_type == "retrieval_state":
-            ranked = payload.get("evidence_rank", [])
-            score_map = payload.get("score_map", {})
-            snippets = []
-            limit = 3 if agent_role in {"WriterAgent", "PlannerAgent"} else 5
-            for chunk_id in ranked[:limit]:
-                item = payload.get("chunks", {}).get(chunk_id, {})
-                snippets.append(
-                    f"- {chunk_id} score={score_map.get(chunk_id, 0):.2f}: "
-                    f"{item.get('text', '')[:180]}"
+        with self.leases.read_lease(state.state_id):
+            payload = json.loads(Path(state.payload_ref).read_text(encoding="utf-8"))
+
+            if state.state_type == "retrieval_state":
+                ranked = payload.get("evidence_rank", [])
+                score_map = payload.get("score_map", {})
+                snippets = []
+                limit = 3 if agent_role in {"WriterAgent", "PlannerAgent"} else 5
+                for chunk_id in ranked[:limit]:
+                    item = payload.get("chunks", {}).get(chunk_id, {})
+                    snippets.append(
+                        f"- {chunk_id} score={score_map.get(chunk_id, 0):.2f}: "
+                        f"{item.get('text', '')[:180]}"
+                    )
+                rendered = (
+                    f"[retrieval_state:{state.state_id}] {state.summary}; tier={state.tier}\n"
+                    + "\n".join(snippets)
                 )
-            rendered = (
-                f"[retrieval_state:{state.state_id}] {state.summary}; tier={state.tier}\n"
-                + "\n".join(snippets)
-            )
-        elif state.state_type == "artifact_state":
-            rendered = (
-                f"[artifact_state:{state.state_id}] {state.summary}; "
-                f"artifact={payload.get('code_artifact_id', payload.get('artifact_id', 'n/a'))}; "
-                f"sha256={payload.get('sha256', 'n/a')[:12]}; "
-                f"tier={state.tier}; raw_content=cold_audit_only"
-            )
-        elif state.state_type == "failure_state":
-            rendered = (
-                f"[failure_state:{state.state_id}] {state.summary}; "
-                f"error={payload.get('error_type', 'unknown')}; tier={state.tier}"
-            )
-        else:
-            rendered = f"[{state.state_type}:{state.state_id}] {state.summary}; tier={state.tier}"
+                report = StateAccessReport(
+                    state_id=state.state_id,
+                    access_level="evidence_snippets",
+                    evidence_snippet_access_count=1,
+                )
+            elif state.state_type == "artifact_state":
+                rendered = (
+                    f"[artifact_state:{state.state_id}] {state.summary}; "
+                    f"artifact={payload.get('code_artifact_id', payload.get('artifact_id', 'n/a'))}; "
+                    f"sha256={payload.get('sha256', 'n/a')[:12]}; "
+                    f"tier={state.tier}; raw_content=cold_audit_only"
+                )
+                report = StateAccessReport(
+                    state_id=state.state_id,
+                    access_level="summary",
+                    summary_access_count=1,
+                )
+            elif state.state_type == "failure_state":
+                rendered = (
+                    f"[failure_state:{state.state_id}] {state.summary}; "
+                    f"error={payload.get('error_type', 'unknown')}; tier={state.tier}"
+                )
+                report = StateAccessReport(
+                    state_id=state.state_id,
+                    access_level="summary",
+                    summary_access_count=1,
+                )
+            else:
+                rendered = f"[{state.state_type}:{state.state_id}] {state.summary}; tier={state.tier}"
+                report = StateAccessReport(
+                    state_id=state.state_id,
+                    access_level="summary",
+                    summary_access_count=1,
+                )
 
-        return rendered[:budget_chars]
+        return rendered[:budget_chars], report
 
     def render_audit_view(self, state_ref: StateRef, budget_chars: int = 4000) -> str:
         state = self._states[state_ref.state_id]
-        payload = json.loads(Path(state.payload_ref).read_text(encoding="utf-8"))
-        rendered = {
-            "state_id": state.state_id,
-            "state_type": state.state_type,
-            "tier": state.tier,
-            "lifecycle": state.lifecycle,
-            "summary": state.summary,
-            "payload": payload,
-            "audit_payload": self.load_audit_payload(state_ref) or {},
-        }
+        with self.leases.read_lease(state.state_id):
+            payload = json.loads(Path(state.payload_ref).read_text(encoding="utf-8"))
+            rendered = {
+                "state_id": state.state_id,
+                "state_type": state.state_type,
+                "tier": state.tier,
+                "lifecycle": state.lifecycle,
+                "summary": state.summary,
+                "payload": payload,
+                "audit_payload": self.load_audit_payload(state_ref) or {},
+            }
         return json.dumps(rendered, ensure_ascii=False, indent=2)[:budget_chars]
 
     def load_audit_payload(self, state_ref: StateRef) -> dict[str, Any] | None:
         state = self._states[state_ref.state_id]
         if not state.audit_payload_ref:
             return None
-        return json.loads(Path(state.audit_payload_ref).read_text(encoding="utf-8"))
+        with self.leases.read_lease(state.state_id):
+            return json.loads(Path(state.audit_payload_ref).read_text(encoding="utf-8"))
+
+    def collect_garbage(
+        self,
+        *,
+        protected_state_ids: set[str] | None = None,
+        max_deleted: int = 4,
+    ) -> StateGCReport:
+        protected = protected_state_ids or set()
+        report = StateGCReport()
+        candidates = [
+            state
+            for state in self._states.values()
+            if state.state_id not in protected
+            and state.state_id not in self._lineage_state_ids
+            and state.lifecycle in {"active", "cooling", "evict_pending"}
+            and state.tier == "cold"
+        ]
+        candidates.sort(key=lambda item: item.created_at)
+        for state in candidates[:max_deleted]:
+            if self.leases.active_readers(state.state_id) > 0:
+                state.lifecycle = "cooling"
+                report.read_lease_blocked_gc_count += 1
+                report.cooling_state_count += 1
+                continue
+            self._tombstone_state(state, reason="v4_gc")
+            report.state_gc_count += 1
+            report.state_tombstone_count += 1
+        return report
 
     def ref_to_dict(self, state_ref: StateRef) -> dict[str, Any]:
         return asdict(state_ref)
+
+    def mark_lineage(self, state_ids: list[str]) -> None:
+        self._lineage_state_ids.update(state_ids)
+
+    def _tombstone_state(self, state: StateObject, *, reason: str) -> None:
+        tombstone = {
+            "state_id": state.state_id,
+            "state_type": state.state_type,
+            "task_id": state.task_id,
+            "source_agent": state.source_agent,
+            "deleted_at": datetime.now(timezone.utc).isoformat(),
+            "reason": reason,
+            "payload_ref": state.payload_ref,
+            "audit_payload_ref": state.audit_payload_ref,
+            "content_hash": state.content_hash,
+        }
+        path = self.tombstone_dir / f"{state.state_id}.tombstone.json"
+        path.write_text(json.dumps(tombstone, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._tombstones[state.state_id] = tombstone
+        state.lifecycle = "deleted"
+        for payload_ref in [state.payload_ref, state.audit_payload_ref]:
+            if payload_ref and Path(payload_ref).exists():
+                Path(payload_ref).unlink()
 
     def _tier_dir(self, tier: StateTier) -> Path:
         if tier == "hot":

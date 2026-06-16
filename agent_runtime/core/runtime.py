@@ -30,6 +30,8 @@ from agent_runtime.state.state_pool import StatePoolLite, StateRef
 class V0Runtime:
     """Deterministic v0 runtime for baseline measurement."""
 
+    MAX_FORMAT_RETRY_INPUT_TOKENS = 800
+
     def __init__(
         self,
         agents: Iterable[DeterministicAgent],
@@ -112,8 +114,36 @@ class V0Runtime:
                 memory_refs_used.extend(task_memory_refs)
 
         for agent in self.agents:
+            agent_memory_refs = task_memory_refs
+            agent_memory_prompt_views = task_memory_prompt_views
+            agent_deliverable_view = deliverable_view
+            if mode == "runtime_lite" and agent.agent_id == "writer":
+                preflight_report = self.memory_store.validate_read_set(task_memory_refs)
+                self.metrics.record_preflight_validation(
+                    task_id=task.task_id,
+                    round_id=round_id,
+                    mode=mode,
+                    validation_count=1,
+                    block_count=int(not preflight_report.allowed),
+                    stale_read_detected_count=(
+                        preflight_report.stale_read_detected_count
+                    ),
+                )
+                if not preflight_report.allowed:
+                    agent_memory_refs = preflight_report.valid_refs
+                    agent_memory_prompt_views = [
+                        self.memory_store.render_prompt_view(ref)
+                        for ref in agent_memory_refs
+                    ]
+                    if self._is_final_task(task):
+                        agent_deliverable_view = self.memory_store.render_deliverable_view(
+                            agent_memory_refs,
+                            task_title=task.title,
+                            budget_chars=2200,
+                        )
+
             memory_prompt_views = (
-                task_memory_prompt_views
+                agent_memory_prompt_views
                 if mode == "runtime_lite" and agent.agent_id in {"planner", "writer"}
                 else []
             )
@@ -122,9 +152,10 @@ class V0Runtime:
                 task,
                 context,
                 mode,
+                round_id=round_id,
                 state_refs=state_refs,
                 memory_prompt_views=memory_prompt_views,
-                deliverable_view=deliverable_view
+                deliverable_view=agent_deliverable_view
                 if mode == "runtime_lite" and agent.agent_id in {"writer", "reviewer", "memory_manager"}
                 else "",
                 deliverable_schema_prompt=deliverable_schema_prompt
@@ -348,6 +379,19 @@ class V0Runtime:
             )
         if mode == "baseline_text":
             self._baseline_full_history[history_key] = full_history + current_task_outputs
+        if mode == "runtime_lite":
+            gc_report = self.state_pool.collect_garbage(
+                protected_state_ids={ref.state_id for ref in state_refs[-6:]},
+                max_deleted=2,
+            )
+            self.metrics.record_state_gc(
+                task_id=task.task_id,
+                round_id=round_id,
+                mode=mode,
+                state_gc_count=gc_report.state_gc_count,
+                read_lease_blocked_gc_count=gc_report.read_lease_blocked_gc_count,
+                state_tombstone_count=gc_report.state_tombstone_count,
+            )
 
         elapsed_ms = (time.perf_counter() - started) * 1000
         self.metrics.finish_task(
@@ -429,6 +473,8 @@ class V0Runtime:
                 alias_mapping_hit_count=admission_report.alias_mapping_hit_count,
                 unresolved_slot_count=admission_report.unresolved_slot_count,
             )
+            if admission_report.memory_ref is not None:
+                self.state_pool.mark_lineage(source_state_ids + evidence_refs)
             return (
                 [admission_report.memory_ref]
                 if admission_report.memory_ref is not None
@@ -457,7 +503,54 @@ class V0Runtime:
             alias_mapping_hit_count=write_report.alias_mapping_hit_count,
             unresolved_slot_count=write_report.unresolved_slot_count,
         )
+        self.state_pool.mark_lineage(source_state_ids + evidence_refs)
         return [write_report.memory_ref]
+
+    def _apply_retry_budget(
+        self,
+        *,
+        task: TaskSpec,
+        round_id: int,
+        mode: Mode,
+        retry_prompt: str,
+    ) -> str:
+        token_count = self.token_counter.count(retry_prompt)
+        budget_exhausted = token_count.token_count > self.MAX_FORMAT_RETRY_INPUT_TOKENS
+        if not budget_exhausted:
+            self.metrics.record_retry_budget(
+                task_id=task.task_id,
+                round_id=round_id,
+                mode=mode,
+                retry_input_tokens=token_count.token_count,
+                budget_exhausted=False,
+            )
+            return retry_prompt
+
+        ratio = self.MAX_FORMAT_RETRY_INPUT_TOKENS / max(1, token_count.token_count)
+        keep_chars = max(400, int(len(retry_prompt) * ratio * 0.9))
+        trimmed = (
+            retry_prompt[:keep_chars]
+            + "\n\n[retry_budget_truncated: full artifact and overflow fields omitted]"
+        )
+        self.metrics.record_retry_budget(
+            task_id=task.task_id,
+            round_id=round_id,
+            mode=mode,
+            retry_input_tokens=token_count.token_count,
+            budget_exhausted=True,
+        )
+        self.trace.write(
+            "retry_budget_applied",
+            {
+                "task_id": task.task_id,
+                "round_id": round_id,
+                "mode": mode,
+                "input_tokens": token_count.token_count,
+                "max_tokens": self.MAX_FORMAT_RETRY_INPUT_TOKENS,
+                "trimmed_chars": len(trimmed),
+            },
+        )
+        return trimmed
 
     def _apply_contract_guard(
         self,
@@ -493,6 +586,12 @@ class V0Runtime:
         if result.retry_required:
             result.retry_attempted = True
             retry_prompt = render_contract_retry_prompt(context=context, result=result)
+            retry_prompt = self._apply_retry_budget(
+                task=task,
+                round_id=round_id,
+                mode=mode,
+                retry_prompt=retry_prompt,
+            )
             retry_output = agent.run(
                 task,
                 [AgentOutput(agent_id="runtime_prompt", content=retry_prompt)],
@@ -569,6 +668,7 @@ class V0Runtime:
         task: TaskSpec,
         context: list[AgentOutput],
         mode: Mode,
+        round_id: int,
         state_refs: list[StateRef] | None = None,
         memory_prompt_views: list[str] | None = None,
         deliverable_view: str = "",
@@ -582,12 +682,25 @@ class V0Runtime:
         if mode == "runtime_lite":
             state_views = []
             for ref in (state_refs or [])[-5:]:
-                state_views.append(
-                    self.state_pool.render_prompt_view(
-                        ref,
-                        agent_role=agent_role,
-                        budget_chars=700,
-                    )
+                state_view, access_report = self.state_pool.render_prompt_view_with_report(
+                    ref,
+                    agent_role=agent_role,
+                    budget_chars=700,
+                )
+                state_views.append(state_view)
+                self.metrics.record_state_access(
+                    task_id=task.task_id,
+                    round_id=round_id,
+                    mode=mode,
+                    raw_access_count=access_report.raw_access_count,
+                    summary_access_count=access_report.summary_access_count,
+                    evidence_snippet_access_count=(
+                        access_report.evidence_snippet_access_count
+                    ),
+                    access_escalation_count=access_report.access_escalation_count,
+                    read_lease_acquire_count=(
+                        access_report.read_lease_acquire_count
+                    ),
                 )
             memory_block = "\n".join(memory_prompt_views or [])
             state_block = "\n\n".join(state_views)
