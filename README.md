@@ -17,6 +17,7 @@
 - [docs/experiments/v3.2-reliability-guard-results.md](docs/experiments/v3.2-reliability-guard-results.md)
 - [docs/experiments/v3.3-memory-admission-results.md](docs/experiments/v3.3-memory-admission-results.md)
 - [docs/experiments/v4.0-cost-lifecycle-results.md](docs/experiments/v4.0-cost-lifecycle-results.md)
+- [docs/experiments/v4.0-full-ab-results.md](docs/experiments/v4.0-full-ab-results.md)
 
 版本切换与 GitHub 浏览方式见：[docs/versioning.md](docs/versioning.md)
 
