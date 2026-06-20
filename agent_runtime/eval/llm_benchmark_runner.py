@@ -68,6 +68,7 @@ def run_llm_benchmark(
             for task in tasks:
                 runtime.run_task(task=task, round_id=round_id, mode=mode)
 
+    runtime.flush_background_tasks()
     metrics.export(output_dir)
     summary = metrics.summary()
     summary["llm_config"] = llm_config.without_secret()

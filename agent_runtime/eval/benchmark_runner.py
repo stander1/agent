@@ -56,6 +56,7 @@ def run_v0_benchmark(
             for task in tasks:
                 runtime.run_task(task=task, round_id=round_id, mode=mode)
 
+    runtime.flush_background_tasks()
     metrics.export(output_dir)
     summary = metrics.summary()
     with (output_dir / "summary.json").open("w", encoding="utf-8") as fh:

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 import hashlib
 import json
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
 
@@ -18,13 +19,41 @@ from agent_runtime.core.models import AgentOutput, Mode, RuntimeMessage, TaskSpe
 from agent_runtime.eval.metrics import MetricsCollector
 from agent_runtime.eval.token_counter import TokenCounter
 from agent_runtime.eval.trace_logger import TraceLogger
-from agent_runtime.memory.memory_store import MemoryRef, MemoryStoreLite
+from agent_runtime.memory.memory_store import (
+    MemoryAdmissionReport,
+    MemoryRef,
+    MemoryStoreLite,
+    MemoryWriteReport,
+)
 from agent_runtime.reliability.contract_guard import (
     ContractContext,
     guard_agent_output,
     render_contract_retry_prompt,
 )
 from agent_runtime.state.state_pool import StatePoolLite, StateRef
+
+
+@dataclass(slots=True)
+class RuntimeMemoryWriteResult:
+    task_id: str
+    round_id: int
+    mode: Mode
+    agent_id: str
+    memory_refs: list[MemoryRef]
+    source_state_ids: list[str]
+    evidence_refs: list[str]
+    admission_report: MemoryAdmissionReport | None = None
+    write_report: MemoryWriteReport | None = None
+
+
+@dataclass(slots=True)
+class BackgroundMemoryJob:
+    task_id: str
+    round_id: int
+    mode: Mode
+    agent_id: str
+    future: Future[RuntimeMemoryWriteResult]
+    scheduled_at: float
 
 
 class V0Runtime:
@@ -49,6 +78,11 @@ class V0Runtime:
         self.state_pool = state_pool or StatePoolLite(Path("runs") / "state")
         self.memory_store = memory_store or MemoryStoreLite()
         self._baseline_full_history: dict[tuple[int, str], list[AgentOutput]] = {}
+        self._background_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="cmjcc-memory",
+        )
+        self._background_memory_jobs: list[BackgroundMemoryJob] = []
 
     def run_task(self, task: TaskSpec, round_id: int, mode: Mode) -> AgentOutput:
         started = time.perf_counter()
@@ -80,6 +114,7 @@ class V0Runtime:
         deliverable_schema = schema_for_task(task)
         deliverable_schema_prompt = render_schema_prompt(deliverable_schema)
         if mode == "runtime_lite":
+            self._drain_background_memory_jobs(reason="before_memory_search")
             search_report = self.memory_store.search_memory_with_report(
                 task.prompt,
                 tags=[task.group_id],
@@ -308,16 +343,14 @@ class V0Runtime:
                 state_refs.append(state_ref)
 
                 if agent.agent_id in {"writer", "reviewer", "memory_manager"}:
-                    output_memory_refs.extend(
-                        self._write_runtime_memory(
-                            task=task,
-                            round_id=round_id,
-                            mode=mode,
-                            agent=agent,
-                            output=output,
-                            state_refs=state_refs,
-                            output_state_refs=output_state_refs,
-                        )
+                    self._schedule_runtime_memory_write(
+                        task=task,
+                        round_id=round_id,
+                        mode=mode,
+                        agent=agent,
+                        output=output,
+                        state_refs=state_refs,
+                        output_state_refs=output_state_refs,
                     )
 
                 message_content = self._build_shp_message(
@@ -432,7 +465,10 @@ class V0Runtime:
             )
         return final_deliverable_output or context[-1]
 
-    def _write_runtime_memory(
+    def flush_background_tasks(self) -> None:
+        self._drain_background_memory_jobs(reason="benchmark_finished")
+
+    def _schedule_runtime_memory_write(
         self,
         *,
         task: TaskSpec,
@@ -442,10 +478,172 @@ class V0Runtime:
         output: AgentOutput,
         state_refs: list[StateRef],
         output_state_refs: list[StateRef],
-    ) -> list[MemoryRef]:
-        tags = [task.group_id, task.task_id, agent.agent_id]
+    ) -> None:
         source_state_ids = [ref.state_id for ref in state_refs[-4:]]
         evidence_refs = [ref.state_id for ref in output_state_refs]
+        self.state_pool.mark_lineage(source_state_ids + evidence_refs)
+        future = self._background_executor.submit(
+            self._write_runtime_memory,
+            task=task,
+            round_id=round_id,
+            mode=mode,
+            agent=agent,
+            output=output,
+            source_state_ids=source_state_ids,
+            evidence_refs=evidence_refs,
+        )
+        self._background_memory_jobs.append(
+            BackgroundMemoryJob(
+                task_id=task.task_id,
+                round_id=round_id,
+                mode=mode,
+                agent_id=agent.agent_id,
+                future=future,
+                scheduled_at=time.perf_counter(),
+            )
+        )
+        self.metrics.record_background_memory_job(
+            task_id=task.task_id,
+            round_id=round_id,
+            mode=mode,
+            scheduled_count=1,
+            completed_count=0,
+            error_count=0,
+            wait_ms=0.0,
+        )
+        self.trace.write(
+            "background_memory_scheduled",
+            {
+                "task_id": task.task_id,
+                "round_id": round_id,
+                "mode": mode,
+                "agent_id": agent.agent_id,
+                "source_state_ids": source_state_ids,
+                "evidence_refs": evidence_refs,
+            },
+        )
+
+    def _drain_background_memory_jobs(self, *, reason: str) -> None:
+        if not self._background_memory_jobs:
+            return
+        jobs = self._background_memory_jobs
+        self._background_memory_jobs = []
+        self.trace.write(
+            "background_memory_flush_started",
+            {
+                "reason": reason,
+                "job_count": len(jobs),
+            },
+        )
+        for job in jobs:
+            wait_started = time.perf_counter()
+            try:
+                result = job.future.result()
+            except Exception as exc:
+                wait_ms = (time.perf_counter() - wait_started) * 1000
+                self.metrics.record_background_memory_job(
+                    task_id=job.task_id,
+                    round_id=job.round_id,
+                    mode=job.mode,
+                    scheduled_count=0,
+                    completed_count=0,
+                    error_count=1,
+                    wait_ms=wait_ms,
+                )
+                self.trace.write(
+                    "background_memory_failed",
+                    {
+                        "task_id": job.task_id,
+                        "round_id": job.round_id,
+                        "mode": job.mode,
+                        "agent_id": job.agent_id,
+                        "reason": reason,
+                        "error": repr(exc),
+                        "wait_ms": wait_ms,
+                    },
+                )
+                continue
+            wait_ms = (time.perf_counter() - wait_started) * 1000
+            self._record_runtime_memory_result(result)
+            self.metrics.record_background_memory_job(
+                task_id=job.task_id,
+                round_id=job.round_id,
+                mode=job.mode,
+                scheduled_count=0,
+                completed_count=1,
+                error_count=0,
+                wait_ms=wait_ms,
+            )
+            self.trace.write(
+                "background_memory_committed",
+                {
+                    "task_id": job.task_id,
+                    "round_id": job.round_id,
+                    "mode": job.mode,
+                    "agent_id": job.agent_id,
+                    "reason": reason,
+                    "memory_refs": [ref.memory_id for ref in result.memory_refs],
+                    "wait_ms": wait_ms,
+                },
+            )
+
+    def _record_runtime_memory_result(self, result: RuntimeMemoryWriteResult) -> None:
+        if result.admission_report is not None:
+            admission_report = result.admission_report
+            self.metrics.record_memory_admission(
+                task_id=result.task_id,
+                round_id=result.round_id,
+                mode=result.mode,
+                memory_candidate_count=admission_report.memory_candidate_count,
+                claim_candidate_count=admission_report.claim_candidate_count,
+                memory_admitted_count=admission_report.memory_admitted_count,
+                memory_rejected_count=admission_report.memory_rejected_count,
+                memory_pending_count=admission_report.memory_pending_count,
+                memory_audit_only_count=admission_report.memory_audit_only_count,
+                admission_unresolved_slot_count=(
+                    admission_report.admission_unresolved_slot_count
+                ),
+                claim_to_memoryview_count=admission_report.claim_to_memoryview_count,
+            )
+            self.metrics.record_memory_write(
+                task_id=result.task_id,
+                round_id=result.round_id,
+                mode=result.mode,
+                memory_write_count=admission_report.memory_write_count,
+                claim_card_count=admission_report.claim_card_count,
+                memory_view_count=admission_report.memory_view_count,
+                promotion_view_count=admission_report.promotion_view_count,
+                alias_mapping_hit_count=admission_report.alias_mapping_hit_count,
+                unresolved_slot_count=admission_report.unresolved_slot_count,
+            )
+            return
+
+        if result.write_report is not None:
+            write_report = result.write_report
+            self.metrics.record_memory_write(
+                task_id=result.task_id,
+                round_id=result.round_id,
+                mode=result.mode,
+                memory_write_count=write_report.memory_write_count,
+                claim_card_count=write_report.claim_card_count,
+                memory_view_count=write_report.memory_view_count,
+                promotion_view_count=write_report.promotion_view_count,
+                alias_mapping_hit_count=write_report.alias_mapping_hit_count,
+                unresolved_slot_count=write_report.unresolved_slot_count,
+            )
+
+    def _write_runtime_memory(
+        self,
+        *,
+        task: TaskSpec,
+        round_id: int,
+        mode: Mode,
+        agent: DeterministicAgent,
+        output: AgentOutput,
+        source_state_ids: list[str],
+        evidence_refs: list[str],
+    ) -> RuntimeMemoryWriteResult:
+        tags = [task.group_id, task.task_id, agent.agent_id]
         reuse_intent = f"供 {task.group_id} 后续连续任务复用"
         contract_guard = output.metadata.get("contract_guard")
 
@@ -466,38 +664,19 @@ class V0Runtime:
                 reuse_intent=reuse_intent,
                 fallback_summary=self._summary(output.content, 180),
             )
-            self.metrics.record_memory_admission(
+            return RuntimeMemoryWriteResult(
                 task_id=task.task_id,
                 round_id=round_id,
                 mode=mode,
-                memory_candidate_count=admission_report.memory_candidate_count,
-                claim_candidate_count=admission_report.claim_candidate_count,
-                memory_admitted_count=admission_report.memory_admitted_count,
-                memory_rejected_count=admission_report.memory_rejected_count,
-                memory_pending_count=admission_report.memory_pending_count,
-                memory_audit_only_count=admission_report.memory_audit_only_count,
-                admission_unresolved_slot_count=(
-                    admission_report.admission_unresolved_slot_count
+                agent_id=agent.agent_id,
+                memory_refs=(
+                    [admission_report.memory_ref]
+                    if admission_report.memory_ref is not None
+                    else []
                 ),
-                claim_to_memoryview_count=admission_report.claim_to_memoryview_count,
-            )
-            self.metrics.record_memory_write(
-                task_id=task.task_id,
-                round_id=round_id,
-                mode=mode,
-                memory_write_count=admission_report.memory_write_count,
-                claim_card_count=admission_report.claim_card_count,
-                memory_view_count=admission_report.memory_view_count,
-                promotion_view_count=admission_report.promotion_view_count,
-                alias_mapping_hit_count=admission_report.alias_mapping_hit_count,
-                unresolved_slot_count=admission_report.unresolved_slot_count,
-            )
-            if admission_report.memory_ref is not None:
-                self.state_pool.mark_lineage(source_state_ids + evidence_refs)
-            return (
-                [admission_report.memory_ref]
-                if admission_report.memory_ref is not None
-                else []
+                source_state_ids=source_state_ids,
+                evidence_refs=evidence_refs,
+                admission_report=admission_report,
             )
 
         write_report = self.memory_store.write_memory_with_report(
@@ -511,19 +690,16 @@ class V0Runtime:
             evidence_refs=evidence_refs,
             reuse_intent=reuse_intent,
         )
-        self.metrics.record_memory_write(
+        return RuntimeMemoryWriteResult(
             task_id=task.task_id,
             round_id=round_id,
             mode=mode,
-            memory_write_count=write_report.memory_write_count,
-            claim_card_count=write_report.claim_card_count,
-            memory_view_count=write_report.memory_view_count,
-            promotion_view_count=write_report.promotion_view_count,
-            alias_mapping_hit_count=write_report.alias_mapping_hit_count,
-            unresolved_slot_count=write_report.unresolved_slot_count,
+            agent_id=agent.agent_id,
+            memory_refs=[write_report.memory_ref],
+            source_state_ids=source_state_ids,
+            evidence_refs=evidence_refs,
+            write_report=write_report,
         )
-        self.state_pool.mark_lineage(source_state_ids + evidence_refs)
-        return [write_report.memory_ref]
 
     def _apply_retry_budget(
         self,

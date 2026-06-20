@@ -86,6 +86,10 @@ class TaskMetricRow:
     read_lease_blocked_gc_count: int = 0
     state_tombstone_count: int = 0
     memory_status_transition_count: int = 0
+    background_memory_job_count: int = 0
+    background_memory_completed_count: int = 0
+    background_memory_error_count: int = 0
+    background_memory_wait_ms: float = 0.0
     stale_read_detected_count: int = 0
     preflight_validation_count: int = 0
     preflight_block_count: int = 0
@@ -447,6 +451,23 @@ class MetricsCollector:
         row.stale_read_detected_count += stale_read_detected_count
         row.memory_status_transition_count += memory_status_transition_count
 
+    def record_background_memory_job(
+        self,
+        *,
+        task_id: str,
+        round_id: int,
+        mode: Mode,
+        scheduled_count: int = 0,
+        completed_count: int = 0,
+        error_count: int = 0,
+        wait_ms: float = 0.0,
+    ) -> None:
+        row = self._row(task_id, round_id, mode)
+        row.background_memory_job_count += scheduled_count
+        row.background_memory_completed_count += completed_count
+        row.background_memory_error_count += error_count
+        row.background_memory_wait_ms += wait_ms
+
     def finish_task(
         self,
         task_id: str,
@@ -547,6 +568,10 @@ class MetricsCollector:
                 "read_lease_blocked_gc_count": 0,
                 "state_tombstone_count": 0,
                 "memory_status_transition_count": 0,
+                "background_memory_job_count": 0,
+                "background_memory_completed_count": 0,
+                "background_memory_error_count": 0,
+                "background_memory_wait_ms": 0.0,
                 "stale_read_detected_count": 0,
                 "preflight_validation_count": 0,
                 "preflight_block_count": 0,
@@ -648,6 +673,12 @@ class MetricsCollector:
             bucket["memory_status_transition_count"] += (
                 row.memory_status_transition_count
             )
+            bucket["background_memory_job_count"] += row.background_memory_job_count
+            bucket["background_memory_completed_count"] += (
+                row.background_memory_completed_count
+            )
+            bucket["background_memory_error_count"] += row.background_memory_error_count
+            bucket["background_memory_wait_ms"] += row.background_memory_wait_ms
             bucket["stale_read_detected_count"] += row.stale_read_detected_count
             bucket["preflight_validation_count"] += row.preflight_validation_count
             bucket["preflight_block_count"] += row.preflight_block_count
