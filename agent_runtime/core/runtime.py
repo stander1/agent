@@ -31,6 +31,7 @@ class V0Runtime:
     """Deterministic v0 runtime for baseline measurement."""
 
     MAX_FORMAT_RETRY_INPUT_TOKENS = 800
+    FINAL_DELIVERABLE_AGENTS = {"writer", "reviewer"}
 
     def __init__(
         self,
@@ -72,6 +73,7 @@ class V0Runtime:
         state_refs: list[StateRef] = []
         memory_refs_used: list[MemoryRef] = []
         lite_context: list[AgentOutput] = []
+        final_deliverable_output: AgentOutput | None = None
         task_memory_refs: list[MemoryRef] = []
         task_memory_prompt_views: list[str] = []
         deliverable_view = ""
@@ -156,10 +158,10 @@ class V0Runtime:
                 state_refs=state_refs,
                 memory_prompt_views=memory_prompt_views,
                 deliverable_view=agent_deliverable_view
-                if mode == "runtime_lite" and agent.agent_id in {"writer", "reviewer", "memory_manager"}
+                if mode == "runtime_lite" and agent.agent_id in self.FINAL_DELIVERABLE_AGENTS
                 else "",
                 deliverable_schema_prompt=deliverable_schema_prompt
-                if mode == "runtime_lite" and agent.agent_id in {"writer", "reviewer", "memory_manager"}
+                if mode == "runtime_lite" and agent.agent_id in self.FINAL_DELIVERABLE_AGENTS
                 else "",
                 agent_role=agent.role,
             )
@@ -205,7 +207,6 @@ class V0Runtime:
             if mode == "runtime_lite" and deliverable_schema and agent.agent_id in {
                 "writer",
                 "reviewer",
-                "memory_manager",
             }:
                 hit_count, required_count, missing_fields = schema_field_coverage(
                     deliverable_schema, output.content
@@ -278,6 +279,8 @@ class V0Runtime:
                         hit_count=hit_count,
                         required_count=required_count,
                     )
+            if agent.agent_id in self.FINAL_DELIVERABLE_AGENTS:
+                final_deliverable_output = output
             llm_meta = output.metadata.get("llm", {})
             if llm_meta:
                 self.metrics.record_llm_call(
@@ -409,9 +412,25 @@ class V0Runtime:
                 "mode": mode,
                 "latency_ms": elapsed_ms,
                 "success": True,
+                "final_deliverable_agent": (
+                    final_deliverable_output.agent_id
+                    if final_deliverable_output is not None
+                    else context[-1].agent_id
+                ),
             },
         )
-        return context[-1]
+        if final_deliverable_output is not None:
+            self.trace.write(
+                "final_deliverable_selected",
+                {
+                    "task_id": task.task_id,
+                    "round_id": round_id,
+                    "mode": mode,
+                    "agent_id": final_deliverable_output.agent_id,
+                    "content_chars": len(final_deliverable_output.content),
+                },
+            )
+        return final_deliverable_output or context[-1]
 
     def _write_runtime_memory(
         self,

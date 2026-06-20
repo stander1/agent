@@ -31,6 +31,13 @@ class LlmConfigTest(unittest.TestCase):
             config = load_llm_config(path, model="new-model")
             self.assertEqual(config.model, "new-model")
 
+    def test_ignores_legacy_completion_token_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "llm.local.json"
+            path.write_text('{"max_completion_tokens":300}', encoding="utf-8")
+            config = load_llm_config(path)
+            self.assertNotIn("max_completion_tokens", config.without_secret())
+
 
 if __name__ == "__main__":
     unittest.main()

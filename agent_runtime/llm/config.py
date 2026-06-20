@@ -17,7 +17,6 @@ class LlmConfig:
     timeout_seconds: float = 120.0
     max_retries: int = 2
     retry_backoff_seconds: float = 2.0
-    max_completion_tokens: int = 300
     temperature: float = 0.2
     top_p: float = 0.9
 
@@ -39,7 +38,6 @@ class LlmConfig:
             "timeout_seconds": self.timeout_seconds,
             "max_retries": self.max_retries,
             "retry_backoff_seconds": self.retry_backoff_seconds,
-            "max_completion_tokens": self.max_completion_tokens,
             "temperature": self.temperature,
             "top_p": self.top_p,
         }
@@ -54,13 +52,13 @@ def load_llm_config(
     timeout_seconds: float | None = None,
     max_retries: int | None = None,
     retry_backoff_seconds: float | None = None,
-    max_completion_tokens: int | None = None,
     temperature: float | None = None,
     top_p: float | None = None,
 ) -> LlmConfig:
     config = LlmConfig()
     if path is not None:
         payload = json.loads(path.read_text(encoding="utf-8"))
+        payload.pop("max_completion_tokens", None)
         config = LlmConfig(**{**asdict(config), **payload})
 
     updates: dict[str, Any] = {}
@@ -71,7 +69,6 @@ def load_llm_config(
         "timeout_seconds": timeout_seconds,
         "max_retries": max_retries,
         "retry_backoff_seconds": retry_backoff_seconds,
-        "max_completion_tokens": max_completion_tokens,
         "temperature": temperature,
         "top_p": top_p,
     }.items():

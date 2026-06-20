@@ -41,7 +41,6 @@ class OpenAICompatibleChatClient:
             ],
             "temperature": self.config.temperature,
             "top_p": self.config.top_p,
-            "max_completion_tokens": self.config.max_completion_tokens,
             "stream": False,
             "thinking": {"type": "disabled"},
         }

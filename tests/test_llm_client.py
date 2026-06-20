@@ -1,0 +1,40 @@
+from __future__ import annotations
+
+import json
+import unittest
+
+from agent_runtime.llm.client import OpenAICompatibleChatClient
+from agent_runtime.llm.config import LlmConfig
+from agent_runtime.reliability.provider_guard import (
+    NormalizedProviderResponse,
+    ProviderGuardReport,
+)
+
+
+class CapturingClient(OpenAICompatibleChatClient):
+    def __init__(self, config: LlmConfig) -> None:
+        super().__init__(config)
+        self.payload: dict | None = None
+
+    def _post_with_retries(self, url: str, data: bytes) -> NormalizedProviderResponse:
+        del url
+        self.payload = json.loads(data.decode("utf-8"))
+        return NormalizedProviderResponse(
+            content="ok",
+            model=self.config.model,
+            usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            finish_reason="stop",
+            report=ProviderGuardReport(status="valid"),
+        )
+
+
+class LlmClientTest(unittest.TestCase):
+    def test_default_request_has_no_completion_token_cap(self) -> None:
+        client = CapturingClient(LlmConfig(api_key="test-key"))
+        client.complete(system_prompt="sys", user_prompt="user")
+        self.assertIsNotNone(client.payload)
+        self.assertNotIn("max_completion_tokens", client.payload or {})
+
+
+if __name__ == "__main__":
+    unittest.main()

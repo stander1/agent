@@ -25,7 +25,8 @@ class LlmAgent:
         is_runtime_lite = "runtime_lite 控制字段" in runtime_prompt
         final_task_instruction = ""
         length_instruction = (
-            "5. 输出控制在 180 到 260 个中文字符，MemoryManagerAgent 可控制在 120 到 180 个中文字符。"
+            "5. 不设置人工输出长度上限；请根据当前职责完整回答。"
+            "低开销协同由运行时通过 state_ref 和 Prompt View 控制，而不是压缩正文。\n"
         )
         contract_instruction = ""
         if is_runtime_lite:
@@ -60,7 +61,8 @@ class LlmAgent:
                 "并在小标题或表格字段中显式保留关键 schema 字段名或中文字段标签。"
             )
             length_instruction = (
-                "5. 最终收束任务可输出 550 到 850 个中文字符；MemoryManagerAgent 控制在 200 到 320 个中文字符。"
+                "5. 最终收束任务必须完整输出可交付结果，不设置人工长度上限；"
+                "如果内容较长，也必须优先保证字段完整、证据链完整和决策日志完整。\n"
             )
         system_prompt = (
             f"你是 {self.role}，正在参与一个多 Agent 连续协作任务。\n"
