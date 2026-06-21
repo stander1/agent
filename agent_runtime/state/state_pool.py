@@ -223,13 +223,31 @@ class StatePoolLite:
                         f"{item.get('text', '')[:180]}"
                     )
                 rendered = (
-                    f"[retrieval_state:{state.state_id}] {state.summary}; tier={state.tier}\n"
+                    f"[retrieval_state:{state.state_id}] {state.summary}; "
+                    f"query_embedding={payload.get('query_embedding_id', 'n/a')}; "
+                    f"vector_dim={payload.get('vector_dim', 'n/a')}; "
+                    f"embedding_state={payload.get('embedding_state_id', 'n/a')}; "
+                    f"tier={state.tier}\n"
                     + "\n".join(snippets)
                 )
                 report = StateAccessReport(
                     state_id=state.state_id,
                     access_level="evidence_snippets",
                     evidence_snippet_access_count=1,
+                )
+            elif state.state_type == "embedding_state":
+                rendered = (
+                    f"[embedding_state:{state.state_id}] {state.summary}; "
+                    f"query_embedding={payload.get('query_embedding_id', 'n/a')}; "
+                    f"chunks={len(payload.get('chunk_embedding_ids', []))}; "
+                    f"vector_dim={payload.get('vector_dim', 'n/a')}; "
+                    f"vector_store={payload.get('vector_store_ref', 'n/a')}; "
+                    f"tier={state.tier}"
+                )
+                report = StateAccessReport(
+                    state_id=state.state_id,
+                    access_level="metadata",
+                    summary_access_count=1,
                 )
             elif state.state_type == "artifact_state":
                 rendered = (

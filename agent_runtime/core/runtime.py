@@ -32,6 +32,10 @@ from agent_runtime.reliability.contract_guard import (
     guard_agent_output,
     render_contract_retry_prompt,
 )
+from agent_runtime.state.non_text import (
+    build_embedding_state_payload,
+    build_retrieval_state_payload,
+)
 from agent_runtime.state.state_pool import StatePoolLite, StateRef
 
 
@@ -341,9 +345,11 @@ class V0Runtime:
             output_memory_refs: list[MemoryRef] = []
             message_content = output.content
             if mode == "runtime_lite":
-                state_ref = self._write_agent_state(task, round_id, mode, agent, output)
-                output_state_refs.append(state_ref)
-                state_refs.append(state_ref)
+                written_state_refs = self._write_agent_state(
+                    task, round_id, mode, agent, output
+                )
+                output_state_refs.extend(written_state_refs)
+                state_refs.extend(written_state_refs)
 
                 if agent.agent_id in {"writer", "reviewer", "memory_manager"}:
                     self._schedule_runtime_memory_write(
@@ -962,7 +968,49 @@ class V0Runtime:
         mode: Mode,
         agent: DeterministicAgent,
         output: AgentOutput,
-    ) -> StateRef:
+    ) -> list[StateRef]:
+        def commit_state(
+            *,
+            state_type: str,
+            payload: dict,
+            summary: str,
+            usage_hint: str,
+            contains_embedding_refs: bool,
+            tier: str,
+            access_policy: str,
+            audit_payload: dict | None = None,
+        ) -> StateRef:
+            state_ref, state = self.state_pool.write_state(
+                task_id=task.task_id,
+                source_agent=agent.agent_id,
+                state_type=state_type,
+                payload=payload,
+                summary=summary,
+                usage_hint=usage_hint,
+                contains_embedding_refs=contains_embedding_refs,
+                tier=tier,
+                access_policy=access_policy,
+                audit_payload=audit_payload,
+            )
+            self.metrics.record_state_write(
+                task_id=task.task_id,
+                round_id=round_id,
+                mode=mode,
+                state_type=state_type,
+                payload_bytes=state.size_bytes,
+                tier=state.tier,
+            )
+            self.trace.write(
+                "state_written",
+                {
+                    "task_id": task.task_id,
+                    "round_id": round_id,
+                    "mode": mode,
+                    "state": asdict(state),
+                },
+            )
+            return state_ref
+
         contract_guard = output.metadata.get("contract_guard", {})
         if contract_guard.get("contract_status") == "degraded_fallback":
             payload = {
@@ -985,14 +1033,45 @@ class V0Runtime:
                 "contract_guard": contract_guard,
                 "content_chars": len(output.content),
             }
+            return [
+                commit_state(
+                    state_type=state_type,
+                    payload=payload,
+                    summary=summary,
+                    usage_hint=usage_hint,
+                    contains_embedding_refs=False,
+                    tier=tier,
+                    access_policy=access_policy,
+                    audit_payload=audit_payload,
+                )
+            ]
         elif agent.agent_id == "retriever":
-            payload = self._build_retrieval_payload(task)
-            state_type = "retrieval_state"
-            summary = f"{task.title} 的检索状态，包含 {len(task.documents)} 条证据和排序分数。"
-            usage_hint = "summary_context_selection"
-            tier = "hot"
-            access_policy = "prompt_view_only"
-            audit_payload = None
+            embedding_payload = build_embedding_state_payload(task)
+            embedding_ref = commit_state(
+                state_type="embedding_state",
+                payload=embedding_payload,
+                summary=(
+                    f"{task.title} 的向量引用状态，包含 "
+                    f"{len(embedding_payload['chunk_embedding_ids'])} 个 chunk embedding。"
+                ),
+                usage_hint="vector_similarity_scoring",
+                contains_embedding_refs=True,
+                tier="hot",
+                access_policy="metadata_view_only",
+            )
+            payload = build_retrieval_state_payload(
+                task, embedding_state_id=embedding_ref.state_id
+            )
+            retrieval_ref = commit_state(
+                state_type="retrieval_state",
+                payload=payload,
+                summary=f"{task.title} 的检索状态，包含 {len(task.documents)} 条证据和排序分数。",
+                usage_hint="summary_context_selection",
+                contains_embedding_refs=True,
+                tier="hot",
+                access_policy="prompt_view_only",
+            )
+            return [embedding_ref, retrieval_ref]
         else:
             artifact_id = f"artifact_{task.task_id}_{round_id}_{agent.agent_id}"
             sha256 = hashlib.sha256(output.content.encode("utf-8")).hexdigest()
@@ -1016,59 +1095,21 @@ class V0Runtime:
                 "content": output.content,
                 "content_chars": len(output.content),
             }
-
-        state_ref, state = self.state_pool.write_state(
-            task_id=task.task_id,
-            source_agent=agent.agent_id,
-            state_type=state_type,
-            payload=payload,
-            summary=summary,
-            usage_hint=usage_hint,
-            contains_embedding_refs=False,
-            tier=tier,
-            access_policy=access_policy,
-            audit_payload=audit_payload,
-        )
-        self.metrics.record_state_write(
-            task_id=task.task_id,
-            round_id=round_id,
-            mode=mode,
-            state_type=state_type,
-            payload_bytes=state.size_bytes,
-            tier=state.tier,
-        )
-        self.trace.write(
-            "state_written",
-            {
-                "task_id": task.task_id,
-                "round_id": round_id,
-                "mode": mode,
-                "state": asdict(state),
-            },
-        )
-        return state_ref
+        return [
+            commit_state(
+                state_type=state_type,
+                payload=payload,
+                summary=summary,
+                usage_hint=usage_hint,
+                contains_embedding_refs=False,
+                tier=tier,
+                access_policy=access_policy,
+                audit_payload=audit_payload,
+            )
+        ]
 
     def _build_retrieval_payload(self, task: TaskSpec) -> dict:
-        chunks = {}
-        score_map = {}
-        evidence_rank = []
-        for idx, doc in enumerate(task.documents or [task.prompt], start=1):
-            chunk_id = f"{task.task_id}_chunk_{idx}"
-            chunks[chunk_id] = {
-                "chunk_id": chunk_id,
-                "source_id": f"{task.task_id}_source_{idx}",
-                "text": doc,
-            }
-            score = max(0.1, 1.0 - (idx - 1) * 0.12)
-            score_map[chunk_id] = score
-            evidence_rank.append(chunk_id)
-        return {
-            "chunk_ids": evidence_rank,
-            "source_ids": [chunks[item]["source_id"] for item in evidence_rank],
-            "score_map": score_map,
-            "evidence_rank": evidence_rank,
-            "chunks": chunks,
-        }
+        return build_retrieval_state_payload(task)
 
     def _build_shp_message(
         self,

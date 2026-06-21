@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import ast
-import hashlib
 import json
 import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
+
+from agent_runtime.reliability.artifact_digest import build_typed_artifact_digest
 
 
 CONTROL_OPEN = "<CMJCC_CONTROL>"
@@ -283,16 +284,7 @@ def build_degraded_fallback(
 
 
 def build_artifact_digest(artifact: str) -> dict[str, Any]:
-    compact = " ".join(artifact.split())
-    headings = re.findall(r"^\s{0,3}#{1,4}\s+(.+)$", artifact, re.M)
-    artifact_type = "json" if _looks_like_json(artifact) else "natural_language"
-    return {
-        "artifact_type": artifact_type,
-        "detected_headings": headings[:6],
-        "summary": compact[:240],
-        "content_hash": hashlib.sha256(artifact.encode("utf-8")).hexdigest(),
-        "content_chars": len(artifact),
-    }
+    return build_typed_artifact_digest(artifact)
 
 
 def render_contract_retry_prompt(
