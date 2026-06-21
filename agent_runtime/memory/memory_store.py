@@ -6,6 +6,10 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from agent_runtime.memory.references import (
+    MemoryReferenceManagerLite,
+    MemoryReferenceRecord,
+)
 from agent_runtime.memory.schema_registry import SchemaRegistryLite
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+|[\u3400-\u4dbf\u4e00-\u9fff]")
@@ -139,6 +143,7 @@ class MemoryWriteReport:
     unresolved_slot_count: int = 0
     superseded_claim_count: int = 0
     conflict_resolved_count: int = 0
+    memory_reference_count: int = 0
 
 
 @dataclass(slots=True)
@@ -257,6 +262,7 @@ class MemoryStoreLite:
         self._memory_candidates: dict[str, MemoryCandidate] = {}
         self._claim_candidates: dict[str, ClaimCandidate] = {}
         self._compaction_log: list[dict[str, Any]] = []
+        self.reference_manager = MemoryReferenceManagerLite()
 
     def write_memory(
         self,
@@ -365,6 +371,13 @@ class MemoryStoreLite:
             status=claim.status,
         )
         self._memories[memory_id] = memory
+        memory_reference_count = self._create_memory_references(
+            memory=memory,
+            claim_id=claim_id,
+            source_state_ids=source_state_ids,
+            evidence_refs=evidence_refs,
+            promotion_view_id=promotion_view_id,
+        )
         return MemoryWriteReport(
             memory_ref=self.ref(memory),
             promotion_view_count=promotion_count,
@@ -372,6 +385,7 @@ class MemoryStoreLite:
             unresolved_slot_count=int(resolved.unresolved),
             superseded_claim_count=superseded_count,
             conflict_resolved_count=conflict_count,
+            memory_reference_count=memory_reference_count,
         )
 
     def write_memory_candidate_with_report(
@@ -570,12 +584,35 @@ class MemoryStoreLite:
         claim = self._claims.get(memory.claim_id)
         if claim is not None:
             claim.status = new_status
+        if new_status in BLOCKED_MEMORY_STATUSES:
+            self.reference_manager.tombstone_memory(
+                memory.memory_id, reason=f"memory_status:{new_status}"
+            )
         return MemoryStatusTransitionReport(
             memory_id=memory.memory_id,
             old_status=old_status,
             new_status=new_status,
             transitioned=True,
         )
+
+    def memory_references(
+        self, memory_ref: MemoryRef, ref_type: str | None = None
+    ) -> list[MemoryReferenceRecord]:
+        return self.reference_manager.active_refs(memory_ref.memory_id, ref_type)  # type: ignore[arg-type]
+
+    def replace_memory(
+        self, old_ref: MemoryRef, new_ref: MemoryRef, *, reason: str = ""
+    ) -> int:
+        active_before = len(self.reference_manager.active_refs(old_ref.memory_id))
+        transition = self.transition_memory_status(old_ref, "superseded")
+        if not transition.transitioned:
+            return 0
+        replaced_count = self.reference_manager.replace_memory(
+            old_ref.memory_id,
+            new_ref.memory_id,
+            reason=reason or "memory_replaced_by_newer_claim",
+        )
+        return max(active_before, replaced_count)
 
     def render_prompt_view(self, memory_ref: MemoryRef, budget_chars: int = 700) -> str:
         memory = self._memories[memory_ref.memory_id]
@@ -744,6 +781,65 @@ class MemoryStoreLite:
             if memory.claim_id == claim_id:
                 memory.status = status
                 memory.version_id += 1
+                if status in BLOCKED_MEMORY_STATUSES:
+                    self.reference_manager.tombstone_memory(
+                        memory.memory_id, reason=f"claim_status:{status}"
+                    )
+
+    def _create_memory_references(
+        self,
+        *,
+        memory: MemoryObject,
+        claim_id: str,
+        source_state_ids: list[str],
+        evidence_refs: list[str],
+        promotion_view_id: str | None,
+    ) -> int:
+        count = 0
+        self.reference_manager.create(
+            memory_id=memory.memory_id,
+            target_kind="claim",
+            target_id=claim_id,
+            ref_type="strong",
+            reason="memory_claim_anchor",
+        )
+        count += 1
+        self.reference_manager.create(
+            memory_id=memory.memory_id,
+            target_kind="memory_view",
+            target_id=memory.memory_view_id,
+            ref_type="strong",
+            reason="memory_view_anchor",
+        )
+        count += 1
+        if promotion_view_id:
+            self.reference_manager.create(
+                memory_id=memory.memory_id,
+                target_kind="promotion_view",
+                target_id=promotion_view_id,
+                ref_type="weak",
+                reason="promotion_view_trace",
+            )
+            count += 1
+        for state_id in source_state_ids:
+            self.reference_manager.create(
+                memory_id=memory.memory_id,
+                target_kind="state",
+                target_id=state_id,
+                ref_type="lineage",
+                reason="source_state_lineage",
+            )
+            count += 1
+        for evidence_id in evidence_refs:
+            self.reference_manager.create(
+                memory_id=memory.memory_id,
+                target_kind="evidence",
+                target_id=evidence_id,
+                ref_type="evidence",
+                reason="evidence_support",
+            )
+            count += 1
+        return count
 
     def _compact_claims(self, claim_ids: list[str]) -> str:
         summaries = [self._claims[item].summary for item in claim_ids[-4:]]
@@ -806,15 +902,12 @@ class MemoryStoreLite:
         return "admitted", ["rules_admitted"]
 
     def _resolve_slot(self, slot_hint: str) -> SlotResolution:
-        normalized = self._normalize_slot(slot_hint)
-        if normalized in CANONICAL_SLOTS:
-            return SlotResolution(slot_id=normalized)
-        if normalized in ALIAS_MAPPING:
-            return SlotResolution(slot_id=ALIAS_MAPPING[normalized], alias_hit=True)
-        for slot in CANONICAL_SLOTS:
-            if normalized == self._normalize_slot(slot.split(".")[-1]):
-                return SlotResolution(slot_id=slot)
-        return SlotResolution(slot_id="unresolved_slot", unresolved=True)
+        resolved = self.schema_registry.resolve(slot_hint)
+        return SlotResolution(
+            slot_id=resolved.slot_id,
+            alias_hit=resolved.alias_hit,
+            unresolved=resolved.unresolved,
+        )
 
     def _infer_slot_hint(self, tags: list[str], task_topic: str) -> str:
         joined = " ".join(tags + [task_topic]).lower()

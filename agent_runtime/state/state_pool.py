@@ -60,6 +60,8 @@ class StateObject:
     fallback_summary: str = ""
     replacement_state_id: str | None = None
     evicted_at: str | None = None
+    admission_score: float = 1.0
+    admission_status: str = "admitted"
 
 
 @dataclass(slots=True)
@@ -92,6 +94,27 @@ class StateQuotaConfig:
     max_task_states: int = 24
     max_task_bytes: int = 256_000
     max_hot_states: int = 12
+
+
+@dataclass(slots=True)
+class StateAdmissionPolicy:
+    downstream_need_weight: float = 0.45
+    confidence_weight: float = 0.35
+    novelty_weight: float = 0.20
+    size_penalty_weight: float = 0.15
+    admit_threshold: float = 0.45
+
+
+@dataclass(slots=True)
+class StateAdmissionReport:
+    admitted: bool
+    score: float
+    status: str
+    reasons: list[str]
+    downstream_need: float
+    confidence: float
+    novelty: float
+    size_penalty: float
 
 
 @dataclass(slots=True)
@@ -243,6 +266,7 @@ class StatePoolLite:
         root_dir: Path,
         quota_config: StateQuotaConfig | None = None,
         cold_access_budget: ColdAccessBudget | None = None,
+        admission_policy: StateAdmissionPolicy | None = None,
     ) -> None:
         self.root_dir = root_dir
         self.payload_dir = self.root_dir / "state_payloads"
@@ -263,6 +287,7 @@ class StatePoolLite:
         self._lineage_state_ids: set[str] = set()
         self.quota_config = quota_config or StateQuotaConfig()
         self.cold_access_budget = cold_access_budget or ColdAccessBudget()
+        self.admission_policy = admission_policy or StateAdmissionPolicy()
         self._cold_read_counts: dict[str, int] = {}
         self._cold_read_bytes: dict[str, int] = {}
         self.leases = LeaseRegistry()
@@ -285,6 +310,9 @@ class StatePoolLite:
         dependency_ref_count: int = 0,
         retry_ref_count: int = 0,
         gc_policy: str = "quota_or_lifecycle",
+        downstream_need: float | None = None,
+        confidence: float | None = None,
+        novelty: float | None = None,
     ) -> tuple[StateRef, StateObject]:
         if lifecycle not in STATE_LIFECYCLE_STATES:
             raise ValueError(f"Unknown state lifecycle: {lifecycle}")
@@ -306,6 +334,13 @@ class StatePoolLite:
             ).hexdigest()
 
         encoded = json.dumps(payload_to_store, ensure_ascii=False, indent=2)
+        admission = self.assess_state_admission(
+            state_type=state_type,
+            payload_bytes=len(encoded.encode("utf-8")) + audit_size_bytes,
+            downstream_need=downstream_need,
+            confidence=confidence,
+            novelty=novelty,
+        )
         path = self._tier_dir(tier) / f"{state_id}.json"
         path.write_text(encoded, encoding="utf-8")
         content_hash = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -331,6 +366,8 @@ class StatePoolLite:
             retry_ref_count=retry_ref_count,
             gc_policy=gc_policy,
             fallback_summary=summary[:280],
+            admission_score=admission.score,
+            admission_status=admission.status,
         )
         self._states[state_id] = state
         return (
@@ -344,6 +381,55 @@ class StatePoolLite:
                 tier=state.tier,
             ),
             state,
+        )
+
+    def assess_state_admission(
+        self,
+        *,
+        state_type: str,
+        payload_bytes: int,
+        downstream_need: float | None = None,
+        confidence: float | None = None,
+        novelty: float | None = None,
+    ) -> StateAdmissionReport:
+        defaults = {
+            "retrieval_state": (0.95, 0.82, 0.78),
+            "embedding_state": (0.75, 0.8, 0.62),
+            "artifact_state": (0.72, 0.76, 0.58),
+            "failure_state": (1.0, 0.95, 0.7),
+            "retry_loop_summary": (0.88, 0.8, 0.55),
+        }
+        fallback = defaults.get(state_type, (0.6, 0.65, 0.5))
+        need = self._clamp01(downstream_need if downstream_need is not None else fallback[0])
+        conf = self._clamp01(confidence if confidence is not None else fallback[1])
+        nov = self._clamp01(novelty if novelty is not None else fallback[2])
+        size_penalty = min(1.0, payload_bytes / max(1, self.quota_config.max_task_bytes))
+        policy = self.admission_policy
+        score = (
+            policy.downstream_need_weight * need
+            + policy.confidence_weight * conf
+            + policy.novelty_weight * nov
+            - policy.size_penalty_weight * size_penalty
+        )
+        reasons: list[str] = []
+        if need < 0.35:
+            reasons.append("low_downstream_need")
+        if conf < 0.35:
+            reasons.append("low_confidence")
+        if nov < 0.2:
+            reasons.append("low_novelty")
+        if score < policy.admit_threshold:
+            reasons.append("score_below_admit_threshold")
+        admitted = score >= policy.admit_threshold
+        return StateAdmissionReport(
+            admitted=admitted,
+            score=round(score, 4),
+            status="admitted" if admitted else "audit_only",
+            reasons=reasons or ["rules_admitted"],
+            downstream_need=need,
+            confidence=conf,
+            novelty=nov,
+            size_penalty=round(size_penalty, 4),
         )
 
     def render_prompt_view(
@@ -775,6 +861,9 @@ class StatePoolLite:
             self.cold_access_budget.max_cold_reads_per_task
             - self._cold_read_counts.get(task_id, 0),
         )
+
+    def _clamp01(self, value: float) -> float:
+        return max(0.0, min(1.0, float(value)))
 
     def _tier_dir(self, tier: StateTier) -> Path:
         if tier == "hot":

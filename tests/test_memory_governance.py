@@ -94,6 +94,49 @@ class MemoryGovernanceTest(unittest.TestCase):
         self.assertNotIn("风险较低", view.prompt_summary)
         self.assertEqual(len(store._compaction_log), 1)
 
+    def test_memory_reference_manager_tracks_lineage_evidence_and_replacement(self) -> None:
+        store = MemoryStoreLite()
+        first = store.write_memory_with_report(
+            task_id="C1",
+            source_agent="writer",
+            task_topic="runtime evidence v1",
+            summary="第一版运行时证据。",
+            tags=["runtime_C"],
+            slot_hint="reuse_strategy",
+            source_state_ids=["state_a", "state_b"],
+            evidence_refs=["evidence_a"],
+            confidence=0.7,
+        )
+        second = store.write_memory_with_report(
+            task_id="C2",
+            source_agent="reviewer",
+            task_topic="runtime evidence v2",
+            summary="第二版运行时证据替换第一版。",
+            tags=["runtime_C"],
+            slot_hint="reuse_strategy",
+            source_state_ids=["state_c"],
+            evidence_refs=["evidence_c"],
+            confidence=0.92,
+        )
+
+        refs = store.memory_references(first.memory_ref)
+        ref_types = {item.ref_type for item in refs}
+        self.assertIn("strong", ref_types)
+        self.assertIn("weak", ref_types)
+        self.assertIn("lineage", ref_types)
+        self.assertIn("evidence", ref_types)
+        self.assertGreaterEqual(first.memory_reference_count, 5)
+
+        tombstoned = store.replace_memory(
+            first.memory_ref,
+            second.memory_ref,
+            reason="higher_confidence_replacement",
+        )
+        self.assertGreater(tombstoned, 0)
+        self.assertFalse(store.memory_references(first.memory_ref))
+        chain = store.reference_manager.replacement_chain(first.memory_ref.memory_id)
+        self.assertEqual(chain, [first.memory_ref.memory_id, second.memory_ref.memory_id])
+
 
 if __name__ == "__main__":
     unittest.main()

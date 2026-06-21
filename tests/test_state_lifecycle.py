@@ -7,6 +7,7 @@ from agent_runtime.state.state_pool import (
     AccessEscalationReport,
     ColdAccessBudget,
     LeaseRegistry,
+    StateAdmissionPolicy,
     StateRef,
     StatePoolLite,
     StateQuotaConfig,
@@ -138,6 +139,37 @@ class StateLifecycleTest(unittest.TestCase):
             self.assertEqual(pool._states[retry_ref.state_id].lifecycle, "retry_carried")
             view = pool.render_prompt_view(retry_ref, "ReviewerAgent")
             self.assertIn("retry loop summary", view)
+
+    def test_state_admission_scores_low_value_states_as_audit_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = StatePoolLite(
+                Path(tmp),
+                admission_policy=StateAdmissionPolicy(admit_threshold=0.5),
+            )
+            rejected = pool.assess_state_admission(
+                state_type="artifact_state",
+                payload_bytes=1024,
+                downstream_need=0.1,
+                confidence=0.2,
+                novelty=0.1,
+            )
+            state_ref, state = pool.write_state(
+                task_id="T1",
+                source_agent="writer",
+                state_type="artifact_state",
+                payload={"artifact_id": "low_value"},
+                summary="low value artifact",
+                usage_hint="artifact_summary",
+                downstream_need=0.1,
+                confidence=0.2,
+                novelty=0.1,
+            )
+
+            self.assertFalse(rejected.admitted)
+            self.assertEqual(rejected.status, "audit_only")
+            self.assertEqual(state_ref.state_type, "artifact_state")
+            self.assertEqual(state.admission_status, "audit_only")
+            self.assertLess(state.admission_score, 0.5)
 
 
 class ReadinessBarrierTest(unittest.TestCase):
