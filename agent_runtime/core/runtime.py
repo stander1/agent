@@ -19,12 +19,14 @@ from agent_runtime.core.models import AgentOutput, Mode, RuntimeMessage, TaskSpe
 from agent_runtime.eval.metrics import MetricsCollector
 from agent_runtime.eval.token_counter import TokenCounter
 from agent_runtime.eval.trace_logger import TraceLogger
+from agent_runtime.bridge.state_memory_bridge import StateToMemoryBridgeLite
 from agent_runtime.memory.memory_store import (
     MemoryAdmissionReport,
     MemoryRef,
     MemoryStoreLite,
     MemoryWriteReport,
 )
+from agent_runtime.protocol.shp import build_handoff_envelope
 from agent_runtime.reliability.contract_guard import (
     ContractContext,
     guard_agent_output,
@@ -77,6 +79,7 @@ class V0Runtime:
         self.trace = trace
         self.state_pool = state_pool or StatePoolLite(Path("runs") / "state")
         self.memory_store = memory_store or MemoryStoreLite()
+        self.state_memory_bridge = StateToMemoryBridgeLite(self.memory_store)
         self._baseline_full_history: dict[tuple[int, str], list[AgentOutput]] = {}
         self._background_executor = ThreadPoolExecutor(
             max_workers=1,
@@ -646,59 +649,63 @@ class V0Runtime:
         tags = [task.group_id, task.task_id, agent.agent_id]
         reuse_intent = f"供 {task.group_id} 后续连续任务复用"
         contract_guard = output.metadata.get("contract_guard")
+        control: dict | None = None
+        degraded = False
 
         if isinstance(contract_guard, dict):
             control = contract_guard.get("control", {})
-            if not contract_guard.get("schema_valid") or not isinstance(control, dict):
+            degraded = contract_guard.get("contract_status") == "degraded_fallback"
+            if (
+                not contract_guard.get("schema_valid")
+                or degraded
+                or not isinstance(control, dict)
+            ):
                 control = {}
-            admission_report = self.memory_store.write_memory_candidate_with_report(
-                task_id=task.task_id,
-                source_agent=agent.agent_id,
-                task_topic=task.title,
-                memory_card=control.get("memory_card"),
-                claim_cards=control.get("claim_cards"),
-                tags=tags,
-                slot_hint=self._slot_hint_for_task(task, agent.agent_id),
-                source_state_ids=source_state_ids,
-                evidence_refs=evidence_refs,
-                reuse_intent=reuse_intent,
-                fallback_summary=self._summary(output.content, 180),
-            )
-            return RuntimeMemoryWriteResult(
-                task_id=task.task_id,
-                round_id=round_id,
-                mode=mode,
-                agent_id=agent.agent_id,
-                memory_refs=(
-                    [admission_report.memory_ref]
-                    if admission_report.memory_ref is not None
-                    else []
-                ),
-                source_state_ids=source_state_ids,
-                evidence_refs=evidence_refs,
-                admission_report=admission_report,
-            )
 
-        write_report = self.memory_store.write_memory_with_report(
+        admission_report, validation = self.state_memory_bridge.promote(
             task_id=task.task_id,
             source_agent=agent.agent_id,
             task_topic=task.title,
-            summary=self._summary(output.content, 180),
+            fallback_summary=self._summary(output.content, 180),
             tags=tags,
             slot_hint=self._slot_hint_for_task(task, agent.agent_id),
             source_state_ids=source_state_ids,
             evidence_refs=evidence_refs,
             reuse_intent=reuse_intent,
+            control=control,
+            degraded=degraded,
+        )
+        self.trace.write(
+            "state_memory_bridge",
+            {
+                "task_id": task.task_id,
+                "round_id": round_id,
+                "mode": mode,
+                "agent_id": agent.agent_id,
+                "validation_allowed": validation.allowed,
+                "validation_reasons": validation.reasons,
+                "admission_status": admission_report.admission_status,
+                "candidate_id": admission_report.candidate_id,
+                "memory_ref": (
+                    admission_report.memory_ref.memory_id
+                    if admission_report.memory_ref is not None
+                    else None
+                ),
+            },
         )
         return RuntimeMemoryWriteResult(
             task_id=task.task_id,
             round_id=round_id,
             mode=mode,
             agent_id=agent.agent_id,
-            memory_refs=[write_report.memory_ref],
+            memory_refs=(
+                [admission_report.memory_ref]
+                if admission_report.memory_ref is not None
+                else []
+            ),
             source_state_ids=source_state_ids,
             evidence_refs=evidence_refs,
-            write_report=write_report,
+            admission_report=admission_report,
         )
 
     def _apply_retry_budget(
@@ -1074,19 +1081,22 @@ class V0Runtime:
         state_refs: list[StateRef],
         memory_refs: list[MemoryRef],
     ) -> str:
-        packet = {
-            "shp_id": f"shp_{task.task_id}_{round_id}_{from_agent}",
-            "protocol_version": "v1-lite",
-            "from": from_agent,
-            "to": next_receiver,
-            "task_id": task.task_id,
-            "action": f"{from_agent}_completed",
-            "summary": summary,
-            "parameters": {},
-            "state_refs": [self.state_pool.ref_to_dict(ref) for ref in state_refs],
-            "memory_refs": [self.memory_store.ref_to_dict(ref) for ref in memory_refs],
-        }
-        return json.dumps(packet, ensure_ascii=False, separators=(",", ":"))
+        envelope = build_handoff_envelope(
+            task_id=task.task_id,
+            round_id=round_id,
+            sender=from_agent,
+            receiver=next_receiver,
+            summary=summary,
+            action=f"{from_agent}_completed",
+            state_refs=state_refs,
+            memory_refs=memory_refs,
+            metrics={
+                "state_ref_count": len(state_refs),
+                "memory_ref_count": len(memory_refs),
+            },
+            capability_hint=[next_receiver] if next_receiver != "runtime" else [],
+        )
+        return envelope.to_json()
 
     def _next_agent_id(self, agent_id: str) -> str:
         ids = [agent.agent_id for agent in self.agents]
