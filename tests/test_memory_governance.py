@@ -1,4 +1,6 @@
 import unittest
+import tempfile
+from pathlib import Path
 
 from agent_runtime.memory.memory_store import MemoryStoreLite
 from agent_runtime.memory.schema_registry import SchemaRegistryLite
@@ -136,6 +138,27 @@ class MemoryGovernanceTest(unittest.TestCase):
         self.assertFalse(store.memory_references(first.memory_ref))
         chain = store.reference_manager.replacement_chain(first.memory_ref.memory_id)
         self.assertEqual(chain, [first.memory_ref.memory_id, second.memory_ref.memory_id])
+
+    def test_memory_store_persists_warm_snapshot_when_storage_dir_is_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MemoryStoreLite(storage_dir=Path(tmp))
+            report = store.write_memory_with_report(
+                task_id="D1",
+                source_agent="writer",
+                task_topic="persistent memory",
+                summary="持久化快照记录记忆、视图和引用。",
+                tags=["persist_D"],
+                slot_hint="reuse_strategy",
+                source_state_ids=["state_d"],
+                evidence_refs=["evidence_d"],
+                confidence=0.8,
+            )
+
+            snapshot_path = Path(tmp) / "memory_store_snapshot.json"
+            self.assertTrue(snapshot_path.exists())
+            snapshot = snapshot_path.read_text(encoding="utf-8")
+            self.assertIn(report.memory_ref.memory_id, snapshot)
+            self.assertIn("memory_references", snapshot)
 
 
 if __name__ == "__main__":

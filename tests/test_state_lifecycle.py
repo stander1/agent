@@ -76,6 +76,31 @@ class StateLifecycleTest(unittest.TestCase):
             self.assertFalse(second.allowed)
             self.assertEqual(second.reason, "cold_read_count_budget_exceeded")
 
+    def test_cold_access_uses_raw_view_cache_after_first_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = StatePoolLite(
+                Path(tmp),
+                cold_access_budget=ColdAccessBudget(max_cold_reads_per_task=2),
+            )
+            state_ref, _ = pool.write_state(
+                task_id="T1",
+                source_agent="writer",
+                state_type="artifact_state",
+                payload={"artifact_id": "a1"},
+                summary="cold artifact",
+                usage_hint="artifact_summary",
+                tier="cold",
+                audit_payload={"content": "raw artifact"},
+            )
+
+            first = pool.request_cold_access(state_ref, reason="review_raw")
+            second = pool.request_cold_access(state_ref, reason="review_raw_again")
+
+            self.assertTrue(first.allowed)
+            self.assertFalse(first.cache_hit)
+            self.assertTrue(second.allowed)
+            self.assertTrue(second.cache_hit)
+
     def test_progressive_access_escalates_only_when_raw_is_needed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             pool = StatePoolLite(

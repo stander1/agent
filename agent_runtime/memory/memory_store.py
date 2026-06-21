@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from agent_runtime.memory.references import (
@@ -253,8 +255,11 @@ class SlotResolution:
 class MemoryStoreLite:
     """In-memory v3-lite ClaimCard and MemoryView store."""
 
-    def __init__(self) -> None:
+    def __init__(self, storage_dir: Path | None = None) -> None:
         self.schema_registry = SchemaRegistryLite(CANONICAL_SLOTS, ALIAS_MAPPING)
+        self.storage_dir = storage_dir
+        if self.storage_dir is not None:
+            self.storage_dir.mkdir(parents=True, exist_ok=True)
         self._memories: dict[str, MemoryObject] = {}
         self._claims: dict[str, ClaimCard] = {}
         self._views: dict[str, MemoryView] = {}
@@ -378,7 +383,7 @@ class MemoryStoreLite:
             evidence_refs=evidence_refs,
             promotion_view_id=promotion_view_id,
         )
-        return MemoryWriteReport(
+        report = MemoryWriteReport(
             memory_ref=self.ref(memory),
             promotion_view_count=promotion_count,
             alias_mapping_hit_count=int(resolved.alias_hit),
@@ -387,6 +392,8 @@ class MemoryStoreLite:
             conflict_resolved_count=conflict_count,
             memory_reference_count=memory_reference_count,
         )
+        self._persist_snapshot()
+        return report
 
     def write_memory_candidate_with_report(
         self,
@@ -588,12 +595,14 @@ class MemoryStoreLite:
             self.reference_manager.tombstone_memory(
                 memory.memory_id, reason=f"memory_status:{new_status}"
             )
-        return MemoryStatusTransitionReport(
+        report = MemoryStatusTransitionReport(
             memory_id=memory.memory_id,
             old_status=old_status,
             new_status=new_status,
             transitioned=True,
         )
+        self._persist_snapshot()
+        return report
 
     def memory_references(
         self, memory_ref: MemoryRef, ref_type: str | None = None
@@ -612,6 +621,7 @@ class MemoryStoreLite:
             new_ref.memory_id,
             reason=reason or "memory_replaced_by_newer_claim",
         )
+        self._persist_snapshot()
         return max(active_before, replaced_count)
 
     def render_prompt_view(self, memory_ref: MemoryRef, budget_chars: int = 700) -> str:
@@ -693,6 +703,7 @@ class MemoryStoreLite:
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
         )
+        self._persist_snapshot()
         return report
 
     def ref_to_dict(self, memory_ref: MemoryRef) -> dict:
@@ -785,6 +796,7 @@ class MemoryStoreLite:
                     self.reference_manager.tombstone_memory(
                         memory.memory_id, reason=f"claim_status:{status}"
                     )
+        self._persist_snapshot()
 
     def _create_memory_references(
         self,
@@ -840,6 +852,34 @@ class MemoryStoreLite:
             )
             count += 1
         return count
+
+    def _persist_snapshot(self) -> None:
+        if self.storage_dir is None:
+            return
+        payload = self._snapshot_payload()
+        path = self.storage_dir / "memory_store_snapshot.json"
+        tmp_path = path.with_suffix(".json.tmp")
+        tmp_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        tmp_path.replace(path)
+
+    def _snapshot_payload(self) -> dict[str, Any]:
+        return {
+            "memories": [asdict(item) for item in self._memories.values()],
+            "claim_cards": [asdict(item) for item in self._claims.values()],
+            "memory_views": [asdict(item) for item in self._views.values()],
+            "promotion_views": [asdict(item) for item in self._promotion_views.values()],
+            "memory_candidates": [
+                asdict(item) for item in self._memory_candidates.values()
+            ],
+            "claim_candidates": [
+                asdict(item) for item in self._claim_candidates.values()
+            ],
+            "memory_references": self.reference_manager.snapshot(),
+            "compaction_log": list(self._compaction_log),
+        }
 
     def _compact_claims(self, claim_ids: list[str]) -> str:
         summaries = [self._claims[item].summary for item in claim_ids[-4:]]

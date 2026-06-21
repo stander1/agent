@@ -131,6 +131,7 @@ class ColdAccessReport:
     bytes_read: int = 0
     cold_read_count: int = 0
     budget_remaining: int = 0
+    cache_hit: bool = False
     payload: dict[str, Any] | None = None
 
 
@@ -290,6 +291,7 @@ class StatePoolLite:
         self.admission_policy = admission_policy or StateAdmissionPolicy()
         self._cold_read_counts: dict[str, int] = {}
         self._cold_read_bytes: dict[str, int] = {}
+        self._raw_view_cache: dict[str, tuple[int, dict[str, Any]]] = {}
         self.leases = LeaseRegistry()
 
     def write_state(
@@ -595,7 +597,11 @@ class StatePoolLite:
                 budget_remaining=0,
             )
 
-        payload_bytes = Path(state.audit_payload_ref).stat().st_size
+        cached = self._raw_view_cache.get(state.state_id)
+        if cached is None:
+            payload_bytes = Path(state.audit_payload_ref).stat().st_size
+        else:
+            payload_bytes = cached[0]
         byte_limit = min(
             max_bytes or self.cold_access_budget.max_cold_bytes_per_phase,
             self.cold_access_budget.max_cold_bytes_per_phase,
@@ -611,8 +617,15 @@ class StatePoolLite:
                 budget_remaining=max(0, byte_limit - already_read),
             )
 
-        with self.leases.read_lease(state.state_id, owner="cold_access"):
-            payload = json.loads(Path(state.audit_payload_ref).read_text(encoding="utf-8"))
+        cache_hit = cached is not None
+        if cached is None:
+            with self.leases.read_lease(state.state_id, owner="cold_access"):
+                payload = json.loads(
+                    Path(state.audit_payload_ref).read_text(encoding="utf-8")
+                )
+            self._raw_view_cache[state.state_id] = (payload_bytes, payload)
+        else:
+            payload = cached[1]
         self._cold_read_counts[state.task_id] = read_count + 1
         self._cold_read_bytes[state.task_id] = already_read + payload_bytes
         return ColdAccessReport(
@@ -622,6 +635,7 @@ class StatePoolLite:
             bytes_read=payload_bytes,
             cold_read_count=read_count + 1,
             budget_remaining=max(0, byte_limit - already_read - payload_bytes),
+            cache_hit=cache_hit,
             payload=payload,
         )
 
