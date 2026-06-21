@@ -9,6 +9,12 @@ from pathlib import Path
 from typing import Iterable
 
 from agent_runtime.core.agents import DeterministicAgent
+from agent_runtime.core.communication import (
+    CapabilityProfileManagerLite,
+    CapabilityRouterLite,
+    CommunicationGateLite,
+    ControlBudgetLite,
+)
 from agent_runtime.core.deliverable_schema import (
     render_schema_prompt,
     schema_field_coverage,
@@ -86,6 +92,10 @@ class V0Runtime:
         self.memory_store = memory_store or MemoryStoreLite()
         self.state_memory_bridge = StateToMemoryBridgeLite(self.memory_store)
         self.readiness_barrier = ReadinessBarrierLite()
+        self.capability_profiles = CapabilityProfileManagerLite(self.agents)
+        self.capability_router = CapabilityRouterLite(self.capability_profiles)
+        self.communication_gate = CommunicationGateLite()
+        self.control_budget = ControlBudgetLite()
         self._baseline_full_history: dict[tuple[int, str], list[AgentOutput]] = {}
         self._background_executor = ThreadPoolExecutor(
             max_workers=1,
@@ -367,6 +377,7 @@ class V0Runtime:
                 message_content = self._build_shp_message(
                     task=task,
                     round_id=round_id,
+                    mode=mode,
                     from_agent=agent.agent_id,
                     next_receiver=self._next_agent_id(agent.agent_id),
                     summary=self._summary(output.content, 160),
@@ -1118,6 +1129,7 @@ class V0Runtime:
         *,
         task: TaskSpec,
         round_id: int,
+        mode: Mode,
         from_agent: str,
         next_receiver: str,
         summary: str,
@@ -1128,11 +1140,34 @@ class V0Runtime:
             state_refs=state_refs,
             degraded=any(ref.state_type == "failure_state" for ref in state_refs),
         )
+        route_decision = self.capability_router.route(
+            sender=from_agent,
+            declared_receiver=next_receiver,
+            state_refs=state_refs,
+            readiness=readiness_report.readiness,
+        )
+        budget_report = self.control_budget.record_decision(
+            task_id=task.task_id,
+            estimated_control_tokens=12 + len(state_refs) * 3 + len(memory_refs) * 2,
+        )
+        gate_report = self.communication_gate.assess(
+            readiness=readiness_report.readiness,
+            route_decision=route_decision,
+            budget_report=budget_report,
+        )
+        self.metrics.record_control_decision(
+            task_id=task.task_id,
+            round_id=round_id,
+            mode=mode,
+            route_changed=route_decision.route_changed,
+            gate_status=gate_report.status,
+            budget_allowed=budget_report.allowed,
+        )
         envelope = build_handoff_envelope(
             task_id=task.task_id,
             round_id=round_id,
             sender=from_agent,
-            receiver=next_receiver,
+            receiver=route_decision.receiver,
             summary=summary,
             action=f"{from_agent}_completed",
             state_refs=state_refs,
@@ -1140,8 +1175,15 @@ class V0Runtime:
             metrics={
                 "state_ref_count": len(state_refs),
                 "memory_ref_count": len(memory_refs),
+                "readiness_reasons": readiness_report.reasons,
+                "route_decision": route_decision.to_dict(),
+                "communication_gate": gate_report.to_dict(),
+                "control_budget": budget_report.to_dict(),
             },
-            capability_hint=[next_receiver] if next_receiver != "runtime" else [],
+            readiness=gate_report.status,
+            allowed_next_step=gate_report.allowed_next_step,
+            capability_hint=route_decision.capability_hint,
+            msg_type=route_decision.msg_type,
         )
         return envelope.to_json()
 

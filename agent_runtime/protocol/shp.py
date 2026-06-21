@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from agent_runtime.protocol.message_types import validate_message_type
+
 
 PROTOCOL_VERSION = "shp.v1-lite"
 
@@ -65,6 +67,7 @@ def build_handoff_envelope(
     parameters: dict[str, Any] | None = None,
     msg_type: str = "agent_output",
 ) -> SHPEnvelope:
+    validated_msg_type = validate_message_type(msg_type)
     header = SHPHeader(
         shp_id=f"shp_{task_id}_{round_id}_{sender}_{receiver}",
         protocol_version=PROTOCOL_VERSION,
@@ -72,7 +75,7 @@ def build_handoff_envelope(
         round_id=round_id,
         sender=sender,
         receiver=receiver,
-        msg_type=msg_type,
+        msg_type=validated_msg_type,
         created_at=datetime.now(timezone.utc).isoformat(),
     )
     control = SHPControl(
@@ -99,4 +102,3 @@ def _ref_to_dict(ref: Any) -> dict[str, Any]:
     if isinstance(ref, dict):
         return dict(ref)
     raise TypeError(f"Unsupported SHP ref type: {type(ref)!r}")
-

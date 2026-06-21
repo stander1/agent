@@ -1,6 +1,7 @@
 import json
 import unittest
 
+from agent_runtime.protocol.message_types import MESSAGE_TYPES
 from agent_runtime.protocol.shp import PROTOCOL_VERSION, build_handoff_envelope
 from agent_runtime.state.state_pool import StateRef
 
@@ -39,7 +40,23 @@ class SHPProtocolTest(unittest.TestCase):
         self.assertTrue(payload["state_refs"][0]["contains_embedding_refs"])
         self.assertEqual(payload["metrics"]["state_ref_count"], 1)
 
+    def test_protocol_declares_sixteen_message_types(self) -> None:
+        self.assertEqual(len(MESSAGE_TYPES), 16)
+        self.assertIn("cold_read_request", MESSAGE_TYPES)
+        self.assertIn("capability_advertisement", MESSAGE_TYPES)
+
+    def test_unknown_message_type_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            build_handoff_envelope(
+                task_id="A1",
+                round_id=1,
+                sender="planner",
+                receiver="writer",
+                summary="bad",
+                action="bad",
+                msg_type="unknown_message",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
-

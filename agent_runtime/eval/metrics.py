@@ -93,6 +93,11 @@ class TaskMetricRow:
     stale_read_detected_count: int = 0
     preflight_validation_count: int = 0
     preflight_block_count: int = 0
+    control_decision_count: int = 0
+    route_override_count: int = 0
+    communication_gate_block_count: int = 0
+    communication_gate_degraded_count: int = 0
+    control_budget_exhausted_count: int = 0
     retry_input_tokens: int = 0
     retry_budget_exhausted_count: int = 0
     retrieved_memory_tokens: int = 0
@@ -451,6 +456,23 @@ class MetricsCollector:
         row.stale_read_detected_count += stale_read_detected_count
         row.memory_status_transition_count += memory_status_transition_count
 
+    def record_control_decision(
+        self,
+        *,
+        task_id: str,
+        round_id: int,
+        mode: Mode,
+        route_changed: bool = False,
+        gate_status: str = "ready",
+        budget_allowed: bool = True,
+    ) -> None:
+        row = self._row(task_id, round_id, mode)
+        row.control_decision_count += 1
+        row.route_override_count += int(route_changed)
+        row.communication_gate_block_count += int(gate_status == "blocked")
+        row.communication_gate_degraded_count += int(gate_status == "degraded")
+        row.control_budget_exhausted_count += int(not budget_allowed)
+
     def record_background_memory_job(
         self,
         *,
@@ -575,6 +597,11 @@ class MetricsCollector:
                 "stale_read_detected_count": 0,
                 "preflight_validation_count": 0,
                 "preflight_block_count": 0,
+                "control_decision_count": 0,
+                "route_override_count": 0,
+                "communication_gate_block_count": 0,
+                "communication_gate_degraded_count": 0,
+                "control_budget_exhausted_count": 0,
                 "retry_input_tokens": 0,
                 "retry_budget_exhausted_count": 0,
                 "hot_state_count": 0,
@@ -682,6 +709,15 @@ class MetricsCollector:
             bucket["stale_read_detected_count"] += row.stale_read_detected_count
             bucket["preflight_validation_count"] += row.preflight_validation_count
             bucket["preflight_block_count"] += row.preflight_block_count
+            bucket["control_decision_count"] += row.control_decision_count
+            bucket["route_override_count"] += row.route_override_count
+            bucket["communication_gate_block_count"] += row.communication_gate_block_count
+            bucket["communication_gate_degraded_count"] += (
+                row.communication_gate_degraded_count
+            )
+            bucket["control_budget_exhausted_count"] += (
+                row.control_budget_exhausted_count
+            )
             bucket["retry_input_tokens"] += row.retry_input_tokens
             bucket["retry_budget_exhausted_count"] += row.retry_budget_exhausted_count
             bucket["hot_state_count"] += row.hot_state_count
