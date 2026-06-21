@@ -11,6 +11,18 @@ from typing import Any
 
 StateTier = str
 
+STATE_LIFECYCLE_STATES = {
+    "active",
+    "retry_carried",
+    "superseded",
+    "compressed",
+    "archived",
+    "evicted",
+    "deleted",
+    "cooling",
+    "evict_pending",
+}
+
 
 @dataclass(slots=True)
 class StateRef:
@@ -41,6 +53,13 @@ class StateObject:
     access_policy: str
     audit_payload_ref: str | None = None
     version: int = 1
+    dependency_ref_count: int = 0
+    retry_ref_count: int = 0
+    superseded_by: str | None = None
+    gc_policy: str = "quota_or_lifecycle"
+    fallback_summary: str = ""
+    replacement_state_id: str | None = None
+    evicted_at: str | None = None
 
 
 @dataclass(slots=True)
@@ -60,6 +79,42 @@ class StateGCReport:
     read_lease_blocked_gc_count: int = 0
     state_tombstone_count: int = 0
     cooling_state_count: int = 0
+    quota_evicted_count: int = 0
+    physical_delete_count: int = 0
+    retry_summary_state_count: int = 0
+    lifecycle_transition_count: int = 0
+
+
+@dataclass(slots=True)
+class StateQuotaConfig:
+    max_task_states: int = 24
+    max_task_bytes: int = 256_000
+    max_hot_states: int = 12
+
+
+@dataclass(slots=True)
+class ColdAccessBudget:
+    max_cold_reads_per_task: int = 4
+    max_cold_bytes_per_phase: int = 64_000
+
+
+@dataclass(slots=True)
+class ColdAccessReport:
+    state_id: str
+    allowed: bool
+    reason: str
+    bytes_read: int = 0
+    cold_read_count: int = 0
+    budget_remaining: int = 0
+    payload: dict[str, Any] | None = None
+
+
+@dataclass(slots=True)
+class StateLifecycleTransitionReport:
+    state_id: str
+    old_lifecycle: str
+    new_lifecycle: str
+    transitioned: bool
 
 
 class LeaseRegistry:
@@ -95,7 +150,12 @@ class StatePoolLite:
     cold audit payload and is not returned by render_prompt_view().
     """
 
-    def __init__(self, root_dir: Path) -> None:
+    def __init__(
+        self,
+        root_dir: Path,
+        quota_config: StateQuotaConfig | None = None,
+        cold_access_budget: ColdAccessBudget | None = None,
+    ) -> None:
         self.root_dir = root_dir
         self.payload_dir = self.root_dir / "state_payloads"
         self.hot_dir = self.root_dir / "state_hot"
@@ -113,6 +173,10 @@ class StatePoolLite:
         self._states: dict[str, StateObject] = {}
         self._tombstones: dict[str, dict[str, Any]] = {}
         self._lineage_state_ids: set[str] = set()
+        self.quota_config = quota_config or StateQuotaConfig()
+        self.cold_access_budget = cold_access_budget or ColdAccessBudget()
+        self._cold_read_counts: dict[str, int] = {}
+        self._cold_read_bytes: dict[str, int] = {}
         self.leases = LeaseRegistry()
 
     def write_state(
@@ -130,7 +194,12 @@ class StatePoolLite:
         lifecycle: str = "active",
         access_policy: str = "prompt_view_only",
         audit_payload: dict[str, Any] | None = None,
+        dependency_ref_count: int = 0,
+        retry_ref_count: int = 0,
+        gc_policy: str = "quota_or_lifecycle",
     ) -> tuple[StateRef, StateObject]:
+        if lifecycle not in STATE_LIFECYCLE_STATES:
+            raise ValueError(f"Unknown state lifecycle: {lifecycle}")
         state_id = self._next_state_id(task_id, source_agent, state_type, payload)
         tier = tier or self._default_tier(state_type, payload)
         payload_to_store = dict(payload)
@@ -170,6 +239,10 @@ class StatePoolLite:
             content_hash=content_hash,
             access_policy=access_policy,
             audit_payload_ref=audit_payload_ref,
+            dependency_ref_count=dependency_ref_count,
+            retry_ref_count=retry_ref_count,
+            gc_policy=gc_policy,
+            fallback_summary=summary[:280],
         )
         self._states[state_id] = state
         return (
@@ -196,10 +269,12 @@ class StatePoolLite:
         self, state_ref: StateRef, agent_role: str, budget_chars: int = 900
     ) -> tuple[str, StateAccessReport]:
         state = self._states[state_ref.state_id]
-        if state.lifecycle in {"deleted", "tombstoned"}:
+        if state.lifecycle in {"deleted", "tombstoned", "evicted"}:
+            tombstone = self._tombstones.get(state.state_id, {})
+            fallback_summary = tombstone.get("fallback_summary") or state.fallback_summary
             rendered = (
                 f"[state_tombstone:{state.state_id}] state no longer has prompt payload; "
-                f"lifecycle={state.lifecycle}"
+                f"lifecycle={state.lifecycle}; fallback_summary={fallback_summary}"
             )
             report = StateAccessReport(
                 state_id=state.state_id,
@@ -303,6 +378,69 @@ class StatePoolLite:
         with self.leases.read_lease(state.state_id):
             return json.loads(Path(state.audit_payload_ref).read_text(encoding="utf-8"))
 
+    def request_cold_access(
+        self,
+        state_ref: StateRef,
+        *,
+        reason: str,
+        max_bytes: int | None = None,
+    ) -> ColdAccessReport:
+        state = self._states[state_ref.state_id]
+        if state.lifecycle in {"deleted"}:
+            return ColdAccessReport(
+                state_id=state.state_id,
+                allowed=False,
+                reason="state_deleted",
+                budget_remaining=0,
+            )
+        if not state.audit_payload_ref or not Path(state.audit_payload_ref).exists():
+            return ColdAccessReport(
+                state_id=state.state_id,
+                allowed=False,
+                reason="audit_payload_missing",
+                budget_remaining=self._cold_budget_remaining(state.task_id),
+            )
+
+        read_count = self._cold_read_counts.get(state.task_id, 0)
+        if read_count >= self.cold_access_budget.max_cold_reads_per_task:
+            return ColdAccessReport(
+                state_id=state.state_id,
+                allowed=False,
+                reason="cold_read_count_budget_exceeded",
+                cold_read_count=read_count,
+                budget_remaining=0,
+            )
+
+        payload_bytes = Path(state.audit_payload_ref).stat().st_size
+        byte_limit = min(
+            max_bytes or self.cold_access_budget.max_cold_bytes_per_phase,
+            self.cold_access_budget.max_cold_bytes_per_phase,
+        )
+        already_read = self._cold_read_bytes.get(state.task_id, 0)
+        if already_read + payload_bytes > byte_limit:
+            return ColdAccessReport(
+                state_id=state.state_id,
+                allowed=False,
+                reason="cold_read_byte_budget_exceeded",
+                bytes_read=already_read,
+                cold_read_count=read_count,
+                budget_remaining=max(0, byte_limit - already_read),
+            )
+
+        with self.leases.read_lease(state.state_id):
+            payload = json.loads(Path(state.audit_payload_ref).read_text(encoding="utf-8"))
+        self._cold_read_counts[state.task_id] = read_count + 1
+        self._cold_read_bytes[state.task_id] = already_read + payload_bytes
+        return ColdAccessReport(
+            state_id=state.state_id,
+            allowed=True,
+            reason=reason,
+            bytes_read=payload_bytes,
+            cold_read_count=read_count + 1,
+            budget_remaining=max(0, byte_limit - already_read - payload_bytes),
+            payload=payload,
+        )
+
     def collect_garbage(
         self,
         *,
@@ -319,6 +457,12 @@ class StatePoolLite:
             and state.lifecycle in {"active", "cooling", "evict_pending"}
             and state.tier == "cold"
         ]
+        quota_candidates = self._quota_eviction_candidates(protected)
+        candidates.extend(
+            state
+            for state in quota_candidates
+            if state.state_id not in {item.state_id for item in candidates}
+        )
         candidates.sort(key=lambda item: item.created_at)
         for state in candidates[:max_deleted]:
             if self.leases.active_readers(state.state_id) > 0:
@@ -326,10 +470,92 @@ class StatePoolLite:
                 report.read_lease_blocked_gc_count += 1
                 report.cooling_state_count += 1
                 continue
-            self._tombstone_state(state, reason="v4_gc")
+            self._tombstone_state(state, reason="v5_4_gc")
             report.state_gc_count += 1
             report.state_tombstone_count += 1
+            if state in quota_candidates:
+                report.quota_evicted_count += 1
         return report
+
+    def sweep_tombstones(self, *, max_swept: int = 8) -> StateGCReport:
+        report = StateGCReport()
+        evicted = [
+            state
+            for state in self._states.values()
+            if state.lifecycle == "evicted" and self.leases.active_readers(state.state_id) == 0
+        ]
+        evicted.sort(key=lambda item: item.evicted_at or item.created_at)
+        for state in evicted[:max_swept]:
+            for payload_ref in [state.payload_ref, state.audit_payload_ref]:
+                if payload_ref and Path(payload_ref).exists():
+                    Path(payload_ref).unlink()
+            old = state.lifecycle
+            state.lifecycle = "deleted"
+            state.version += 1
+            report.physical_delete_count += 1
+            report.lifecycle_transition_count += int(old != state.lifecycle)
+        return report
+
+    def transition_state(
+        self, state_ref: StateRef, new_lifecycle: str, *, superseded_by: str | None = None
+    ) -> StateLifecycleTransitionReport:
+        if new_lifecycle not in STATE_LIFECYCLE_STATES:
+            raise ValueError(f"Unknown state lifecycle: {new_lifecycle}")
+        state = self._states[state_ref.state_id]
+        old = state.lifecycle
+        if old == new_lifecycle:
+            return StateLifecycleTransitionReport(
+                state_id=state.state_id,
+                old_lifecycle=old,
+                new_lifecycle=new_lifecycle,
+                transitioned=False,
+            )
+        state.lifecycle = new_lifecycle
+        state.version += 1
+        if superseded_by:
+            state.superseded_by = superseded_by
+        return StateLifecycleTransitionReport(
+            state_id=state.state_id,
+            old_lifecycle=old,
+            new_lifecycle=new_lifecycle,
+            transitioned=True,
+        )
+
+    def write_retry_loop_summary(
+        self,
+        *,
+        task_id: str,
+        source_agent: str,
+        attempts: list[dict[str, Any]],
+        carried_state_refs: list[StateRef],
+        max_attempts: int = 8,
+    ) -> StateRef:
+        compact_attempts = attempts[-max_attempts:]
+        payload = {
+            "attempt_count": len(attempts),
+            "compressed_attempt_count": len(compact_attempts),
+            "carried_state_ids": [ref.state_id for ref in carried_state_refs],
+            "attempt_summaries": [
+                {
+                    "attempt_id": item.get("attempt_id", index + 1),
+                    "status": item.get("status", "unknown"),
+                    "summary": str(item.get("summary", ""))[:240],
+                }
+                for index, item in enumerate(compact_attempts)
+            ],
+        }
+        ref, _ = self.write_state(
+            task_id=task_id,
+            source_agent=source_agent,
+            state_type="retry_loop_summary",
+            payload=payload,
+            summary=f"{task_id} retry loop summary: {len(attempts)} attempts",
+            usage_hint="retry_history_compaction",
+            lifecycle="retry_carried",
+            tier="warm",
+            retry_ref_count=len(carried_state_refs),
+        )
+        return ref
 
     def ref_to_dict(self, state_ref: StateRef) -> dict[str, Any]:
         return asdict(state_ref)
@@ -338,24 +564,60 @@ class StatePoolLite:
         self._lineage_state_ids.update(state_ids)
 
     def _tombstone_state(self, state: StateObject, *, reason: str) -> None:
+        if state.lifecycle == "evicted":
+            return
         tombstone = {
             "state_id": state.state_id,
             "state_type": state.state_type,
             "task_id": state.task_id,
             "source_agent": state.source_agent,
-            "deleted_at": datetime.now(timezone.utc).isoformat(),
+            "evicted_at": datetime.now(timezone.utc).isoformat(),
             "reason": reason,
             "payload_ref": state.payload_ref,
             "audit_payload_ref": state.audit_payload_ref,
             "content_hash": state.content_hash,
+            "fallback_summary": state.fallback_summary or state.summary[:280],
+            "replacement_state_id": state.replacement_state_id,
+            "stage": "logical_eviction",
         }
         path = self.tombstone_dir / f"{state.state_id}.tombstone.json"
         path.write_text(json.dumps(tombstone, ensure_ascii=False, indent=2), encoding="utf-8")
         self._tombstones[state.state_id] = tombstone
-        state.lifecycle = "deleted"
-        for payload_ref in [state.payload_ref, state.audit_payload_ref]:
-            if payload_ref and Path(payload_ref).exists():
-                Path(payload_ref).unlink()
+        state.lifecycle = "evicted"
+        state.evicted_at = tombstone["evicted_at"]
+        state.version += 1
+
+    def _quota_eviction_candidates(self, protected: set[str]) -> list[StateObject]:
+        candidates: list[StateObject] = []
+        by_task: dict[str, list[StateObject]] = {}
+        for state in self._states.values():
+            if (
+                state.state_id in protected
+                or state.state_id in self._lineage_state_ids
+                or state.lifecycle not in {"active", "cooling", "evict_pending", "archived"}
+            ):
+                continue
+            by_task.setdefault(state.task_id, []).append(state)
+        for states in by_task.values():
+            states.sort(key=lambda item: item.created_at)
+            total_bytes = sum(item.size_bytes for item in states)
+            if len(states) > self.quota_config.max_task_states:
+                candidates.extend(states[: len(states) - self.quota_config.max_task_states])
+            while total_bytes > self.quota_config.max_task_bytes and states:
+                candidate = states.pop(0)
+                candidates.append(candidate)
+                total_bytes -= candidate.size_bytes
+            hot_states = [item for item in states if item.tier == "hot"]
+            if len(hot_states) > self.quota_config.max_hot_states:
+                candidates.extend(hot_states[: len(hot_states) - self.quota_config.max_hot_states])
+        return candidates
+
+    def _cold_budget_remaining(self, task_id: str) -> int:
+        return max(
+            0,
+            self.cold_access_budget.max_cold_reads_per_task
+            - self._cold_read_counts.get(task_id, 0),
+        )
 
     def _tier_dir(self, tier: StateTier) -> Path:
         if tier == "hot":

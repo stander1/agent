@@ -16,6 +16,7 @@ from agent_runtime.core.deliverable_schema import (
     schema_for_task,
 )
 from agent_runtime.core.models import AgentOutput, Mode, RuntimeMessage, TaskSpec
+from agent_runtime.core.readiness import ReadinessBarrierLite
 from agent_runtime.eval.metrics import MetricsCollector
 from agent_runtime.eval.token_counter import TokenCounter
 from agent_runtime.eval.trace_logger import TraceLogger
@@ -84,6 +85,7 @@ class V0Runtime:
         self.state_pool = state_pool or StatePoolLite(Path("runs") / "state")
         self.memory_store = memory_store or MemoryStoreLite()
         self.state_memory_bridge = StateToMemoryBridgeLite(self.memory_store)
+        self.readiness_barrier = ReadinessBarrierLite()
         self._baseline_full_history: dict[tuple[int, str], list[AgentOutput]] = {}
         self._background_executor = ThreadPoolExecutor(
             max_workers=1,
@@ -1122,6 +1124,10 @@ class V0Runtime:
         state_refs: list[StateRef],
         memory_refs: list[MemoryRef],
     ) -> str:
+        readiness_report = self.readiness_barrier.assess(
+            state_refs=state_refs,
+            degraded=any(ref.state_type == "failure_state" for ref in state_refs),
+        )
         envelope = build_handoff_envelope(
             task_id=task.task_id,
             round_id=round_id,

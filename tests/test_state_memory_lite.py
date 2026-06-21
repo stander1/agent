@@ -89,10 +89,15 @@ class StatePoolLiteTest(unittest.TestCase):
             collected = pool.collect_garbage(max_deleted=1)
             self.assertEqual(collected.state_gc_count, 1)
             self.assertEqual(collected.state_tombstone_count, 1)
-            self.assertEqual(state.lifecycle, "deleted")
-            self.assertFalse(Path(state.payload_ref).exists())
+            self.assertEqual(state.lifecycle, "evicted")
+            self.assertTrue(Path(state.payload_ref).exists())
             view = pool.render_prompt_view(state_ref, "WriterAgent")
             self.assertIn("state_tombstone", view)
+
+            swept = pool.sweep_tombstones(max_swept=1)
+            self.assertEqual(swept.physical_delete_count, 1)
+            self.assertEqual(state.lifecycle, "deleted")
+            self.assertFalse(Path(state.payload_ref).exists())
 
 
 class MemoryStoreLiteTest(unittest.TestCase):
