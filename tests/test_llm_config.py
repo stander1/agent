@@ -38,6 +38,13 @@ class LlmConfigTest(unittest.TestCase):
             config = load_llm_config(path)
             self.assertNotIn("max_completion_tokens", config.without_secret())
 
+    def test_loads_auth_scheme(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "llm.local.json"
+            path.write_text('{"auth_scheme":"authorization_bearer"}', encoding="utf-8")
+            config = load_llm_config(path)
+            self.assertEqual(config.auth_scheme, "authorization_bearer")
+
 
 if __name__ == "__main__":
     unittest.main()

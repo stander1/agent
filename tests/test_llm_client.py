@@ -35,6 +35,12 @@ class LlmClientTest(unittest.TestCase):
         self.assertIsNotNone(client.payload)
         self.assertNotIn("max_completion_tokens", client.payload or {})
 
+    def test_deepseek_can_use_bearer_auth_header(self) -> None:
+        client = CapturingClient(
+            LlmConfig(api_key="test-key", auth_scheme="authorization_bearer")
+        )
+        self.assertEqual(client.auth_headers(), {"Authorization": "Bearer test-key"})
+
 
 if __name__ == "__main__":
     unittest.main()

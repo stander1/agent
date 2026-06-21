@@ -1,0 +1,12 @@
+{
+  "provider": "deepseek",
+  "base_url": "https://api.deepseek.com",
+  "model": "deepseek-v4-pro",
+  "api_key_env": "DEEPSEEK_API_KEY",
+  "auth_scheme": "authorization_bearer",
+  "timeout_seconds": 120,
+  "max_retries": 2,
+  "retry_backoff_seconds": 2.0,
+  "temperature": 0.2,
+  "top_p": 0.9
+}

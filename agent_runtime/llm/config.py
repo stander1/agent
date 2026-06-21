@@ -14,6 +14,7 @@ class LlmConfig:
     model: str = "mimo-v2.5"
     api_key_env: str = "MIMO_API_KEY"
     api_key: str | None = None
+    auth_scheme: str = "api_key"
     timeout_seconds: float = 120.0
     max_retries: int = 2
     retry_backoff_seconds: float = 2.0
@@ -35,6 +36,7 @@ class LlmConfig:
             "base_url": self.base_url,
             "model": self.model,
             "api_key_env": self.api_key_env,
+            "auth_scheme": self.auth_scheme,
             "timeout_seconds": self.timeout_seconds,
             "max_retries": self.max_retries,
             "retry_backoff_seconds": self.retry_backoff_seconds,

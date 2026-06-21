@@ -32,6 +32,14 @@ class OpenAICompatibleChatClient:
     def __init__(self, config: LlmConfig) -> None:
         self.config = config
 
+    def auth_headers(self) -> dict[str, str]:
+        key = self.config.resolved_api_key
+        if self.config.auth_scheme == "authorization_bearer":
+            return {"Authorization": f"Bearer {key}"}
+        if self.config.auth_scheme == "api_key":
+            return {"api-key": key}
+        raise ValueError(f"Unsupported auth_scheme: {self.config.auth_scheme}")
+
     def complete(self, *, system_prompt: str, user_prompt: str) -> ChatCompletionResult:
         payload = {
             "model": self.config.model,
@@ -68,7 +76,7 @@ class OpenAICompatibleChatClient:
                 data=data,
                 headers={
                     "Content-Type": "application/json",
-                    "api-key": self.config.resolved_api_key,
+                    **self.auth_headers(),
                 },
                 method="POST",
             )
