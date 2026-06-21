@@ -4,7 +4,9 @@ from pathlib import Path
 
 from agent_runtime.core.readiness import ReadinessBarrierLite
 from agent_runtime.state.state_pool import (
+    AccessEscalationReport,
     ColdAccessBudget,
+    LeaseRegistry,
     StateRef,
     StatePoolLite,
     StateQuotaConfig,
@@ -73,6 +75,43 @@ class StateLifecycleTest(unittest.TestCase):
             self.assertFalse(second.allowed)
             self.assertEqual(second.reason, "cold_read_count_budget_exceeded")
 
+    def test_progressive_access_escalates_only_when_raw_is_needed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = StatePoolLite(
+                Path(tmp),
+                cold_access_budget=ColdAccessBudget(max_cold_reads_per_task=1),
+            )
+            state_ref, _ = pool.write_state(
+                task_id="T1",
+                source_agent="writer",
+                state_type="artifact_state",
+                payload={"artifact_id": "a1"},
+                summary="cold artifact",
+                usage_hint="artifact_summary",
+                tier="cold",
+                audit_payload={"content": "raw artifact"},
+            )
+
+            summary_first = pool.request_progressive_access(
+                state_ref,
+                agent_role="ReviewerAgent",
+                reason="inspect_summary",
+                need_raw=False,
+            )
+            full_read = pool.request_progressive_access(
+                state_ref,
+                agent_role="ReviewerAgent",
+                reason="inspect_raw",
+                need_raw=True,
+            )
+
+            self.assertIsInstance(summary_first, AccessEscalationReport)
+            self.assertEqual(summary_first.selected_level, "summary")
+            self.assertEqual(summary_first.reason, "prompt_view_sufficient")
+            self.assertEqual(full_read.selected_level, "full_cold_read")
+            self.assertTrue(full_read.cold_access.allowed)
+            self.assertEqual(full_read.cold_access.payload["content"], "raw artifact")
+
     def test_retry_loop_summary_is_compacted_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             pool = StatePoolLite(Path(tmp))
@@ -123,6 +162,22 @@ class ReadinessBarrierTest(unittest.TestCase):
         self.assertEqual(blocked.readiness, "blocked")
         self.assertEqual(degraded.readiness, "degraded")
         self.assertEqual(degraded.allowed_next_step, "review_or_retry_only")
+
+
+class ReadLeaseProtocolTest(unittest.TestCase):
+    def test_read_lease_heartbeat_release_and_ttl_recovery(self) -> None:
+        leases = LeaseRegistry(default_ttl_seconds=0.01)
+        record = leases.acquire_read_lease("state_1", owner="reader")
+
+        self.assertEqual(leases.active_readers("state_1"), 1)
+        self.assertTrue(leases.heartbeat(record.fencing_token))
+        self.assertIn(record.fencing_token, leases.active_fencing_tokens("state_1"))
+        self.assertTrue(leases.release_read_lease(record.fencing_token))
+        self.assertEqual(leases.active_readers("state_1"), 0)
+
+        expired = leases.acquire_read_lease("state_1", owner="reader", ttl_seconds=0.0)
+        self.assertEqual(leases.active_readers("state_1"), 0)
+        self.assertFalse(leases.heartbeat(expired.fencing_token))
 
 
 if __name__ == "__main__":

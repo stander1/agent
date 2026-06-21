@@ -903,25 +903,34 @@ class V0Runtime:
         if mode == "runtime_lite":
             state_views = []
             for ref in (state_refs or [])[-5:]:
-                state_view, access_report = self.state_pool.render_prompt_view_with_report(
+                escalation_report = self.state_pool.request_progressive_access(
                     ref,
                     agent_role=agent_role,
+                    reason="runtime_prompt_view",
+                    need_raw=False,
                     budget_chars=700,
                 )
-                state_views.append(state_view)
+                state_views.append(escalation_report.prompt_view)
+                raw_access_count = int(
+                    escalation_report.cold_access is not None
+                    and escalation_report.cold_access.allowed
+                )
                 self.metrics.record_state_access(
                     task_id=task.task_id,
                     round_id=round_id,
                     mode=mode,
-                    raw_access_count=access_report.raw_access_count,
-                    summary_access_count=access_report.summary_access_count,
+                    raw_access_count=raw_access_count,
+                    summary_access_count=int(
+                        escalation_report.selected_level
+                        in {"summary", "summary_only", "metadata"}
+                    ),
                     evidence_snippet_access_count=(
-                        access_report.evidence_snippet_access_count
+                        int(escalation_report.selected_level == "evidence_snippets")
                     ),
-                    access_escalation_count=access_report.access_escalation_count,
-                    read_lease_acquire_count=(
-                        access_report.read_lease_acquire_count
+                    access_escalation_count=(
+                        escalation_report.access_escalation_count
                     ),
+                    read_lease_acquire_count=1 + raw_access_count,
                 )
             memory_block = "\n".join(memory_prompt_views or [])
             state_block = "\n\n".join(state_views)

@@ -5,7 +5,7 @@ import json
 import threading
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +66,8 @@ class StateObject:
 class StateAccessReport:
     state_id: str
     access_level: str
+    fencing_token: str = ""
+    lease_ttl_seconds: float = 0.0
     read_lease_acquire_count: int = 1
     raw_access_count: int = 0
     summary_access_count: int = 0
@@ -110,6 +112,19 @@ class ColdAccessReport:
 
 
 @dataclass(slots=True)
+class AccessEscalationReport:
+    state_id: str
+    selected_level: str
+    allowed: bool
+    reason: str
+    expected_summary_tokens: int
+    expected_raw_tokens: int
+    access_escalation_count: int = 0
+    prompt_view: str = ""
+    cold_access: ColdAccessReport | None = None
+
+
+@dataclass(slots=True)
 class StateLifecycleTransitionReport:
     state_id: str
     old_lifecycle: str
@@ -117,30 +132,103 @@ class StateLifecycleTransitionReport:
     transitioned: bool
 
 
-class LeaseRegistry:
-    """In-memory read lease counters for the v4 hot path."""
+@dataclass(slots=True)
+class ReadLeaseRecord:
+    state_id: str
+    fencing_token: str
+    owner: str
+    acquired_at: datetime
+    last_heartbeat_at: datetime
+    ttl_seconds: float
 
-    def __init__(self) -> None:
+
+class LeaseRegistry:
+    """In-memory read leases with TTL, heartbeat, and fencing tokens."""
+
+    def __init__(self, default_ttl_seconds: float = 30.0) -> None:
         self._lock = threading.RLock()
-        self._active_readers: dict[str, int] = {}
+        self.default_ttl_seconds = default_ttl_seconds
+        self._records: dict[str, ReadLeaseRecord] = {}
+        self._counter = 0
 
     @contextmanager
-    def read_lease(self, state_id: str):
-        with self._lock:
-            self._active_readers[state_id] = self._active_readers.get(state_id, 0) + 1
+    def read_lease(
+        self, state_id: str, *, owner: str = "runtime", ttl_seconds: float | None = None
+    ):
+        record = self.acquire_read_lease(
+            state_id, owner=owner, ttl_seconds=ttl_seconds
+        )
         try:
-            yield
+            yield record
         finally:
-            with self._lock:
-                remaining = self._active_readers.get(state_id, 0) - 1
-                if remaining > 0:
-                    self._active_readers[state_id] = remaining
-                else:
-                    self._active_readers.pop(state_id, None)
+            self.release_read_lease(record.fencing_token)
+
+    def acquire_read_lease(
+        self, state_id: str, *, owner: str = "runtime", ttl_seconds: float | None = None
+    ) -> ReadLeaseRecord:
+        with self._lock:
+            self.recover_expired_locked()
+            self._counter += 1
+            now = datetime.now(timezone.utc)
+            token = f"lease_{state_id}_{self._counter}"
+            record = ReadLeaseRecord(
+                state_id=state_id,
+                fencing_token=token,
+                owner=owner,
+                acquired_at=now,
+                last_heartbeat_at=now,
+                ttl_seconds=(
+                    ttl_seconds
+                    if ttl_seconds is not None
+                    else self.default_ttl_seconds
+                ),
+            )
+            self._records[token] = record
+            return record
+
+    def heartbeat(self, fencing_token: str) -> bool:
+        with self._lock:
+            self.recover_expired_locked()
+            record = self._records.get(fencing_token)
+            if record is None:
+                return False
+            record.last_heartbeat_at = datetime.now(timezone.utc)
+            return True
+
+    def release_read_lease(self, fencing_token: str) -> bool:
+        with self._lock:
+            return self._records.pop(fencing_token, None) is not None
+
+    def recover_expired(self) -> int:
+        with self._lock:
+            return self.recover_expired_locked()
+
+    def recover_expired_locked(self) -> int:
+        now = datetime.now(timezone.utc)
+        expired = [
+            token
+            for token, record in self._records.items()
+            if record.last_heartbeat_at
+            + timedelta(seconds=record.ttl_seconds)
+            <= now
+        ]
+        for token in expired:
+            self._records.pop(token, None)
+        return len(expired)
 
     def active_readers(self, state_id: str) -> int:
         with self._lock:
-            return self._active_readers.get(state_id, 0)
+            self.recover_expired_locked()
+            return sum(1 for record in self._records.values() if record.state_id == state_id)
+
+    def active_fencing_tokens(self, state_id: str) -> list[str]:
+        with self._lock:
+            self.recover_expired_locked()
+            return [
+                record.fencing_token
+                for record in self._records.values()
+                if record.state_id == state_id
+            ]
 
 
 class StatePoolLite:
@@ -283,7 +371,7 @@ class StatePoolLite:
             )
             return rendered[:budget_chars], report
 
-        with self.leases.read_lease(state.state_id):
+        with self.leases.read_lease(state.state_id, owner=agent_role) as lease:
             payload = json.loads(Path(state.payload_ref).read_text(encoding="utf-8"))
 
             if state.state_type == "retrieval_state":
@@ -308,6 +396,8 @@ class StatePoolLite:
                 report = StateAccessReport(
                     state_id=state.state_id,
                     access_level="evidence_snippets",
+                    fencing_token=lease.fencing_token,
+                    lease_ttl_seconds=lease.ttl_seconds,
                     evidence_snippet_access_count=1,
                 )
             elif state.state_type == "embedding_state":
@@ -322,6 +412,8 @@ class StatePoolLite:
                 report = StateAccessReport(
                     state_id=state.state_id,
                     access_level="metadata",
+                    fencing_token=lease.fencing_token,
+                    lease_ttl_seconds=lease.ttl_seconds,
                     summary_access_count=1,
                 )
             elif state.state_type == "artifact_state":
@@ -334,6 +426,8 @@ class StatePoolLite:
                 report = StateAccessReport(
                     state_id=state.state_id,
                     access_level="summary",
+                    fencing_token=lease.fencing_token,
+                    lease_ttl_seconds=lease.ttl_seconds,
                     summary_access_count=1,
                 )
             elif state.state_type == "failure_state":
@@ -344,6 +438,8 @@ class StatePoolLite:
                 report = StateAccessReport(
                     state_id=state.state_id,
                     access_level="summary",
+                    fencing_token=lease.fencing_token,
+                    lease_ttl_seconds=lease.ttl_seconds,
                     summary_access_count=1,
                 )
             else:
@@ -351,6 +447,8 @@ class StatePoolLite:
                 report = StateAccessReport(
                     state_id=state.state_id,
                     access_level="summary",
+                    fencing_token=lease.fencing_token,
+                    lease_ttl_seconds=lease.ttl_seconds,
                     summary_access_count=1,
                 )
 
@@ -358,7 +456,7 @@ class StatePoolLite:
 
     def render_audit_view(self, state_ref: StateRef, budget_chars: int = 4000) -> str:
         state = self._states[state_ref.state_id]
-        with self.leases.read_lease(state.state_id):
+        with self.leases.read_lease(state.state_id, owner="audit_view"):
             payload = json.loads(Path(state.payload_ref).read_text(encoding="utf-8"))
             rendered = {
                 "state_id": state.state_id,
@@ -375,7 +473,7 @@ class StatePoolLite:
         state = self._states[state_ref.state_id]
         if not state.audit_payload_ref:
             return None
-        with self.leases.read_lease(state.state_id):
+        with self.leases.read_lease(state.state_id, owner="audit_payload"):
             return json.loads(Path(state.audit_payload_ref).read_text(encoding="utf-8"))
 
     def request_cold_access(
@@ -427,7 +525,7 @@ class StatePoolLite:
                 budget_remaining=max(0, byte_limit - already_read),
             )
 
-        with self.leases.read_lease(state.state_id):
+        with self.leases.read_lease(state.state_id, owner="cold_access"):
             payload = json.loads(Path(state.audit_payload_ref).read_text(encoding="utf-8"))
         self._cold_read_counts[state.task_id] = read_count + 1
         self._cold_read_bytes[state.task_id] = already_read + payload_bytes
@@ -439,6 +537,65 @@ class StatePoolLite:
             cold_read_count=read_count + 1,
             budget_remaining=max(0, byte_limit - already_read - payload_bytes),
             payload=payload,
+        )
+
+    def request_progressive_access(
+        self,
+        state_ref: StateRef,
+        *,
+        agent_role: str,
+        reason: str,
+        need_raw: bool = False,
+        expected_summary_tokens: int = 96,
+        expected_raw_tokens: int = 900,
+        budget_chars: int = 900,
+    ) -> AccessEscalationReport:
+        state = self._states[state_ref.state_id]
+        prompt_view, prompt_report = self.render_prompt_view_with_report(
+            state_ref, agent_role=agent_role, budget_chars=budget_chars
+        )
+        if state.lifecycle in {"deleted", "evicted"}:
+            return AccessEscalationReport(
+                state_id=state.state_id,
+                selected_level="summary_only",
+                allowed=True,
+                reason="state_unavailable_uses_fallback_summary",
+                expected_summary_tokens=expected_summary_tokens,
+                expected_raw_tokens=expected_raw_tokens,
+                prompt_view=prompt_view,
+            )
+        if not need_raw:
+            return AccessEscalationReport(
+                state_id=state.state_id,
+                selected_level=prompt_report.access_level,
+                allowed=True,
+                reason="prompt_view_sufficient",
+                expected_summary_tokens=expected_summary_tokens,
+                expected_raw_tokens=expected_raw_tokens,
+                prompt_view=prompt_view,
+            )
+        if state.tier != "cold" or not state.audit_payload_ref:
+            return AccessEscalationReport(
+                state_id=state.state_id,
+                selected_level=prompt_report.access_level,
+                allowed=True,
+                reason="raw_access_not_available_or_not_needed_for_tier",
+                expected_summary_tokens=expected_summary_tokens,
+                expected_raw_tokens=expected_raw_tokens,
+                prompt_view=prompt_view,
+            )
+
+        cold_access = self.request_cold_access(state_ref, reason=reason)
+        return AccessEscalationReport(
+            state_id=state.state_id,
+            selected_level="full_cold_read" if cold_access.allowed else "summary_only",
+            allowed=cold_access.allowed,
+            reason=cold_access.reason,
+            expected_summary_tokens=expected_summary_tokens,
+            expected_raw_tokens=expected_raw_tokens,
+            access_escalation_count=1,
+            prompt_view=prompt_view,
+            cold_access=cold_access,
         )
 
     def collect_garbage(
