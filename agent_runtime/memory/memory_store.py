@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from agent_runtime.memory.schema_registry import SchemaRegistryLite
+
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+|[\u3400-\u4dbf\u4e00-\u9fff]")
 
 CANONICAL_SLOTS = {
@@ -83,6 +85,13 @@ class ClaimCard:
     status: str
     tags: list[str]
     created_at: str
+    claim_type: str = "fact"
+    value: str = ""
+    polarity: str = "positive"
+    modality: str = "asserted"
+    temporal_scope: str = "current_task"
+    schema_version: str = "ccf.v1-lite"
+    conflict_policy: str = "highest_confidence_then_latest"
 
 
 @dataclass(slots=True)
@@ -94,6 +103,10 @@ class MemoryView:
     audit_claim_ids: list[str]
     created_at: str
     status: str = "active"
+    historical_claim_ids: list[str] = field(default_factory=list)
+    conflicting_claim_ids: list[str] = field(default_factory=list)
+    resolution_status: str = "resolved"
+    downstream_policy: str = "use_active_claims_only"
 
 
 @dataclass(slots=True)
@@ -124,6 +137,8 @@ class MemoryWriteReport:
     promotion_view_count: int = 0
     alias_mapping_hit_count: int = 0
     unresolved_slot_count: int = 0
+    superseded_claim_count: int = 0
+    conflict_resolved_count: int = 0
 
 
 @dataclass(slots=True)
@@ -213,6 +228,17 @@ class MemorySearchReport:
 
 
 @dataclass(slots=True)
+class MemoryCompactionReport:
+    compaction_id: str
+    memory_view_count: int = 0
+    new_claim_count: int = 0
+    merged_claim_count: int = 0
+    superseded_claim_count: int = 0
+    unresolved_conflict_count: int = 0
+    compaction_log_count: int = 1
+
+
+@dataclass(slots=True)
 class SlotResolution:
     slot_id: str
     alias_hit: bool = False
@@ -223,12 +249,14 @@ class MemoryStoreLite:
     """In-memory v3-lite ClaimCard and MemoryView store."""
 
     def __init__(self) -> None:
+        self.schema_registry = SchemaRegistryLite(CANONICAL_SLOTS, ALIAS_MAPPING)
         self._memories: dict[str, MemoryObject] = {}
         self._claims: dict[str, ClaimCard] = {}
         self._views: dict[str, MemoryView] = {}
         self._promotion_views: dict[str, PromotionView] = {}
         self._memory_candidates: dict[str, MemoryCandidate] = {}
         self._claim_candidates: dict[str, ClaimCandidate] = {}
+        self._compaction_log: list[dict[str, Any]] = []
 
     def write_memory(
         self,
@@ -289,22 +317,37 @@ class MemoryStoreLite:
 
         claim_id = self._next_id("claim", task_id, source_agent, summary)
         now = datetime.now(timezone.utc).isoformat()
-        claim = ClaimCard(
-            claim_id=claim_id,
+        canonical_claim = self.schema_registry.canonicalize_claim(
             subject=task_topic,
             slot_id=resolved.slot_id,
+            value=summary,
+            source_agent=source_agent,
+            confidence=confidence,
+        )
+        slot_policy = self.schema_registry.policy_for(resolved.slot_id)
+        claim = ClaimCard(
+            claim_id=claim_id,
+            subject=canonical_claim.subject,
+            slot_id=canonical_claim.slot_id,
             summary=summary,
             source_agent=source_agent,
             source_task_id=task_id,
             promotion_view_id=promotion_view_id,
-            confidence=confidence,
+            confidence=canonical_claim.confidence,
             status="active" if not resolved.unresolved else "unresolved_slot",
             tags=tags,
             created_at=now,
+            claim_type=canonical_claim.claim_type,
+            value=canonical_claim.value,
+            polarity=canonical_claim.polarity,
+            modality=canonical_claim.modality,
+            temporal_scope=canonical_claim.temporal_scope,
+            schema_version=canonical_claim.schema_version,
+            conflict_policy=slot_policy.conflict_policy,
         )
         self._claims[claim_id] = claim
 
-        memory_view = self._upsert_memory_view(claim)
+        memory_view, superseded_count, conflict_count = self._upsert_memory_view(claim)
         memory_id = self._next_memory_id(task_id, source_agent, summary)
         memory = MemoryObject(
             memory_id=memory_id,
@@ -327,6 +370,8 @@ class MemoryStoreLite:
             promotion_view_count=promotion_count,
             alias_mapping_hit_count=int(resolved.alias_hit),
             unresolved_slot_count=int(resolved.unresolved),
+            superseded_claim_count=superseded_count,
+            conflict_resolved_count=conflict_count,
         )
 
     def write_memory_candidate_with_report(
@@ -577,6 +622,42 @@ class MemoryStoreLite:
             )
         return "\n".join(lines)[:budget_chars]
 
+    def run_compaction(self, *, slot_id: str | None = None) -> MemoryCompactionReport:
+        compaction_id = f"compact_{len(self._compaction_log) + 1:04d}"
+        views = [
+            view
+            for view in self._views.values()
+            if slot_id is None or view.slot_id == slot_id
+        ]
+        report = MemoryCompactionReport(compaction_id=compaction_id)
+        for view in views:
+            active_claim_ids = [
+                claim_id
+                for claim_id in view.active_claim_ids
+                if self._claims[claim_id].status == "active"
+            ]
+            view.active_claim_ids = active_claim_ids
+            view.prompt_summary = self._compact_claims(active_claim_ids)
+            view.resolution_status = (
+                "unresolved_conflict" if view.conflicting_claim_ids else "resolved"
+            )
+            report.memory_view_count += 1
+            report.new_claim_count += len(view.audit_claim_ids)
+            report.merged_claim_count += max(0, len(view.audit_claim_ids) - len(active_claim_ids))
+            report.superseded_claim_count += len(view.historical_claim_ids)
+            report.unresolved_conflict_count += len(view.conflicting_claim_ids)
+        self._compaction_log.append(
+            {
+                "compaction_id": compaction_id,
+                "slot_id": slot_id,
+                "memory_view_count": report.memory_view_count,
+                "new_claim_count": report.new_claim_count,
+                "merged_claim_count": report.merged_claim_count,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        return report
+
     def ref_to_dict(self, memory_ref: MemoryRef) -> dict:
         return asdict(memory_ref)
 
@@ -590,15 +671,22 @@ class MemoryStoreLite:
             slot_id=memory.slot_id,
         )
 
-    def _upsert_memory_view(self, claim: ClaimCard) -> MemoryView:
+    def _upsert_memory_view(self, claim: ClaimCard) -> tuple[MemoryView, int, int]:
         view_id = f"view_{hashlib.sha256(claim.slot_id.encode('utf-8')).hexdigest()[:10]}"
         if view_id in self._views:
             view = self._views[view_id]
-            if claim.claim_id not in view.active_claim_ids and claim.status == "active":
-                view.active_claim_ids.append(claim.claim_id)
+            superseded_count = 0
+            conflict_count = 0
             view.audit_claim_ids.append(claim.claim_id)
+            if claim.status == "active":
+                superseded_count, conflict_count = self._resolve_claim_conflict(
+                    view, claim
+                )
             view.prompt_summary = self._compact_claims(view.active_claim_ids)
-            return view
+            view.resolution_status = (
+                "unresolved_conflict" if view.conflicting_claim_ids else "resolved"
+            )
+            return view, superseded_count, conflict_count
 
         view = MemoryView(
             memory_view_id=view_id,
@@ -609,7 +697,53 @@ class MemoryStoreLite:
             created_at=datetime.now(timezone.utc).isoformat(),
         )
         self._views[view_id] = view
-        return view
+        return view, 0, 0
+
+    def _resolve_claim_conflict(
+        self, view: MemoryView, new_claim: ClaimCard
+    ) -> tuple[int, int]:
+        same_subject_claim_ids = [
+            claim_id
+            for claim_id in view.active_claim_ids
+            if self._claims[claim_id].subject == new_claim.subject
+        ]
+        if not same_subject_claim_ids:
+            if new_claim.claim_id not in view.active_claim_ids:
+                view.active_claim_ids.append(new_claim.claim_id)
+            return 0, 0
+
+        candidates = [self._claims[item] for item in same_subject_claim_ids] + [new_claim]
+        best = max(candidates, key=lambda claim: (claim.confidence, claim.created_at))
+        superseded_count = 0
+        conflict_count = 0
+        if best.claim_id == new_claim.claim_id:
+            for old_id in same_subject_claim_ids:
+                old_claim = self._claims[old_id]
+                if old_claim.summary != new_claim.summary:
+                    conflict_count += 1
+                old_claim.status = "superseded"
+                self._sync_memory_status_for_claim(old_id, "superseded")
+                if old_id in view.active_claim_ids:
+                    view.active_claim_ids.remove(old_id)
+                if old_id not in view.historical_claim_ids:
+                    view.historical_claim_ids.append(old_id)
+                superseded_count += 1
+            if new_claim.claim_id not in view.active_claim_ids:
+                view.active_claim_ids.append(new_claim.claim_id)
+            return superseded_count, conflict_count
+
+        new_claim.status = "superseded"
+        if new_claim.claim_id not in view.historical_claim_ids:
+            view.historical_claim_ids.append(new_claim.claim_id)
+        if best.summary != new_claim.summary:
+            conflict_count = 1
+        return 1, conflict_count
+
+    def _sync_memory_status_for_claim(self, claim_id: str, status: str) -> None:
+        for memory in self._memories.values():
+            if memory.claim_id == claim_id:
+                memory.status = status
+                memory.version_id += 1
 
     def _compact_claims(self, claim_ids: list[str]) -> str:
         summaries = [self._claims[item].summary for item in claim_ids[-4:]]
