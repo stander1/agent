@@ -113,6 +113,8 @@ def main() -> int:
         "suites": suites,
         "shared_runtime": True,
         "output_dir": str(output_dir),
+        "deliverables_json": str(output_dir / "deliverables.json"),
+        "deliverables_jsonl": str(output_dir / "deliverables.jsonl"),
         "cross_task_report_json": str(report_json),
         "cross_task_report_markdown": str(report_md),
         "summary": summary,
@@ -188,16 +190,21 @@ def summarize_rows(rows: list[dict]) -> dict:
         "baseline_text": {metric: 0 for metric in REPORT_METRICS},
         "runtime_lite": {metric: 0 for metric in REPORT_METRICS},
     }
+    row_counts: dict[str, int] = {"baseline_text": 0, "runtime_lite": 0}
     task_ids: set[str] = set()
     for row in rows:
         mode = str(row.get("mode", ""))
         if mode not in totals:
             continue
+        row_counts[mode] += 1
         task_ids.add(str(row.get("task_id", "")))
         for metric in REPORT_METRICS:
             value = row.get(metric, 0)
             if isinstance(value, (int, float)):
                 totals[mode][metric] += value
+    for mode, count in row_counts.items():
+        totals[mode]["task_runs"] = count
+        totals[mode]["success_count"] = count
     comparison = {}
     for metric in REPORT_METRICS:
         base = totals["baseline_text"][metric]

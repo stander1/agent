@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from examples.run_cross_task_eval import build_cross_task_report, render_markdown_report
+from examples.run_cross_task_local_eval import build_bounded_suite
 
 
 class CrossTaskEvalReportTest(unittest.TestCase):
@@ -55,10 +56,36 @@ class CrossTaskEvalReportTest(unittest.TestCase):
         self.assertTrue(report["shared_runtime"])
         self.assertEqual(report["by_suite"]["A"]["task_count"], 1)
         self.assertEqual(report["by_suite"]["B"]["task_count"], 1)
+        self.assertEqual(
+            report["by_suite"]["A"]["metrics"]["task_runs"]["runtime_lite"], 1
+        )
+        self.assertEqual(
+            report["by_suite"]["B"]["metrics"]["success_count"]["baseline_text"], 1
+        )
         self.assertTrue(report["audit_focus"]["checks"]["runtime_has_memory_hits"])
         self.assertTrue(report["audit_focus"]["checks"]["raw_access_low"])
         self.assertIn("v5.9", markdown)
         self.assertIn("llm_total_tokens", markdown)
+
+    def test_build_bounded_suite_limits_local_smoke_size(self) -> None:
+        payload = {
+            "tasks": [
+                {"task_id": "A1", "group_id": "A", "title": "one", "prompt": "p1"},
+                {"task_id": "A2", "group_id": "A", "title": "two", "prompt": "p2"},
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "suite.json"
+            source.write_text(json.dumps(payload), encoding="utf-8")
+            target = build_bounded_suite(
+                source_path=source,
+                output_dir=Path(tmp) / "bounded",
+                max_tasks=1,
+            )
+            bounded = json.loads(target.read_text(encoding="utf-8"))
+
+        self.assertEqual(len(bounded["tasks"]), 1)
+        self.assertEqual(bounded["tasks"][0]["task_id"], "A1")
 
 
 if __name__ == "__main__":
