@@ -47,7 +47,9 @@ class CommunicationGovernanceTest(unittest.TestCase):
         first = budget.record_decision(task_id="A1", estimated_control_tokens=1)
         second = budget.record_decision(task_id="A1", estimated_control_tokens=1)
         self.assertTrue(first.allowed)
+        self.assertEqual(first.control_path, "rules_first")
         self.assertFalse(second.allowed)
+        self.assertEqual(second.control_path, "blocked")
 
         profiles = CapabilityProfileManagerLite(build_default_agents())
         route = CapabilityRouterLite(profiles).route(
@@ -65,6 +67,38 @@ class CommunicationGovernanceTest(unittest.TestCase):
         self.assertFalse(gate.allowed)
         self.assertEqual(gate.status, "blocked")
         self.assertEqual(gate.allowed_next_step, "control_budget_review")
+
+    def test_control_budget_has_scoring_and_llm_fallback_paths(self) -> None:
+        budget = ControlBudgetLite(max_decisions_per_task=4, max_control_tokens_per_task=512)
+
+        scoring = budget.record_decision(
+            task_id="A2",
+            estimated_control_tokens=12,
+            scoring_confidence=0.4,
+        )
+        fallback = budget.record_decision(
+            task_id="A2",
+            estimated_control_tokens=64,
+            requires_llm_fallback=True,
+        )
+
+        self.assertEqual(scoring.control_path, "scoring_assist")
+        self.assertTrue(scoring.scoring_assist_allowed)
+        self.assertEqual(fallback.control_path, "llm_fallback")
+        self.assertTrue(fallback.llm_fallback_allowed)
+
+    def test_router_resolves_cold_start_tie_explicitly(self) -> None:
+        profiles = CapabilityProfileManagerLite(build_default_agents())
+        router = CapabilityRouterLite(profiles)
+
+        decision = router.resolve_tie(
+            ["reviewer", "writer"],
+            required_state_type="artifact_state",
+            preferred_capability="validation",
+        )
+
+        self.assertEqual(decision.receiver, "reviewer")
+        self.assertIn("cold_start_tie_resolved", decision.reasons)
 
     def test_runtime_shp_contains_route_gate_and_budget_metrics(self) -> None:
         trace = TraceLogger(Path("runs/test_communication_governance"))

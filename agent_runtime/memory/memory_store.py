@@ -1,10 +1,11 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import json
 import re
+import sqlite3
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -50,13 +51,16 @@ ALIAS_MAPPING = {
 }
 
 PROMPT_VIEW_MEMORY_STATUSES = {"active", "provisional_active"}
+DORMANT_MEMORY_STATUSES = {"dormant"}
 BLOCKED_MEMORY_STATUSES = {
     "deprecated",
     "deleted",
     "superseded",
+    "outdated",
     "unresolved_conflict",
     "pending_lifecycle_update",
 }
+MEMORY_LIFECYCLE_STATUSES = PROMPT_VIEW_MEMORY_STATUSES | DORMANT_MEMORY_STATUSES | BLOCKED_MEMORY_STATUSES
 
 
 @dataclass(slots=True)
@@ -132,6 +136,8 @@ class MemoryObject:
     status: str = "active"
     hit_count: int = 0
     useful_hit_count: int = 0
+    last_accessed_at: str | None = None
+    status_updated_at: str | None = None
 
 
 @dataclass(slots=True)
@@ -226,6 +232,60 @@ class MemoryStatusTransitionReport:
 
 
 @dataclass(slots=True)
+class MemoryLifecycleSweepReport:
+    checked_count: int = 0
+    dormant_transition_count: int = 0
+    outdated_transition_count: int = 0
+    skipped_count: int = 0
+
+
+@dataclass(slots=True)
+class CompensatingEvent:
+    event_id: str
+    event_type: str
+    target_memory_id: str
+    target_view_id: str
+    reason: str
+    replacement_memory_id: str | None
+    created_at: str
+    created_by: str
+    downstream_policy: str = "do_not_use_without_refresh"
+
+
+@dataclass(slots=True)
+class WriteIntentFence:
+    fence_id: str
+    task_id: str
+    section_id: str
+    locked_by: str
+    memory_ids: list[str]
+    expected_versions: dict[str, int]
+    estimated_cost_tokens: int
+    created_at: str
+    expires_at: str
+    allowed: bool
+    blocked_memory_ids: list[str] = field(default_factory=list)
+    transition_flag: str = "pending_lifecycle_update"
+
+
+@dataclass(slots=True)
+class PatchRegenerationReport:
+    section_id: str
+    regenerated: bool
+    stale_memory_ids: list[str]
+    patch_summary: str
+    estimated_saved_tokens: int = 0
+
+
+@dataclass(slots=True)
+class MemoryLayerReport:
+    warm_db_path: str
+    cold_dir: str
+    warm_record_count: int
+    cold_record_count: int
+
+
+@dataclass(slots=True)
 class MemorySearchReport:
     refs: list[MemoryRef]
     retrieval_backend: str = "keyword_overlap_v3_lite"
@@ -267,7 +327,14 @@ class MemoryStoreLite:
         self._memory_candidates: dict[str, MemoryCandidate] = {}
         self._claim_candidates: dict[str, ClaimCandidate] = {}
         self._compaction_log: list[dict[str, Any]] = []
+        self._compensating_events: list[CompensatingEvent] = []
+        self._write_intents: dict[str, WriteIntentFence] = {}
+        self._patch_regeneration_log: list[PatchRegenerationReport] = []
+        self._section_dependency_map: dict[str, list[str]] = {}
         self.reference_manager = MemoryReferenceManagerLite()
+        self.warm_db_path = self.storage_dir / "memory_warm.sqlite" if self.storage_dir else None
+        self.cold_memory_dir = self.storage_dir / "memory_cold" if self.storage_dir else None
+        self._init_layered_storage()
 
     def write_memory(
         self,
@@ -374,6 +441,7 @@ class MemoryStoreLite:
             memory_view_id=memory_view.memory_view_id,
             promotion_view_id=promotion_view_id,
             status=claim.status,
+            status_updated_at=now,
         )
         self._memories[memory_id] = memory
         memory_reference_count = self._create_memory_references(
@@ -516,11 +584,12 @@ class MemoryStoreLite:
     def search_memory_with_report(
         self, query: str, tags: list[str] | None = None, top_k: int = 3
     ) -> MemorySearchReport:
+        self.apply_lifecycle_transitions()
         query_terms = set(self._terms(query))
         requested_tags = set(tags or [])
         scored: list[tuple[int, MemoryObject]] = []
         for memory in self._memories.values():
-            if memory.status not in PROMPT_VIEW_MEMORY_STATUSES:
+            if memory.status not in PROMPT_VIEW_MEMORY_STATUSES | DORMANT_MEMORY_STATUSES:
                 continue
             claim = self._claims[memory.claim_id]
             view = self._views[memory.memory_view_id]
@@ -532,17 +601,26 @@ class MemoryStoreLite:
             tag_overlap = len(requested_tags & set(memory.tags))
             group_overlap = self._group_overlap(requested_tags, set(memory.tags))
             score = overlap + tag_overlap * 3 + group_overlap * 5
+            if memory.status in DORMANT_MEMORY_STATUSES:
+                score = max(0, score - 2)
             if score > 0:
                 scored.append((score, memory))
 
         scored.sort(key=lambda item: (-item[0], item[1].created_at))
         refs: list[MemoryRef] = []
+        now = datetime.now(timezone.utc).isoformat()
         for _, memory in scored[:top_k]:
             memory.hit_count += 1
+            memory.last_accessed_at = now
             refs.append(self.ref(memory))
+        if refs:
+            self._persist_snapshot()
         return MemorySearchReport(refs=refs)
 
-    def validate_read_set(self, refs: list[MemoryRef]) -> PreflightValidationReport:
+    def validate_read_set(
+        self, refs: list[MemoryRef], *, requester: str = ""
+    ) -> PreflightValidationReport:
+        self._expire_write_intents()
         valid_refs: list[MemoryRef] = []
         blocked: list[str] = []
         stale_count = 0
@@ -560,7 +638,10 @@ class MemoryStoreLite:
             if memory.status in BLOCKED_MEMORY_STATUSES:
                 blocked.append(ref.memory_id)
                 continue
-            if memory.status not in PROMPT_VIEW_MEMORY_STATUSES:
+            if memory.status not in PROMPT_VIEW_MEMORY_STATUSES | DORMANT_MEMORY_STATUSES:
+                blocked.append(ref.memory_id)
+                continue
+            if self._blocked_by_write_intent(ref.memory_id, requester=requester):
                 blocked.append(ref.memory_id)
                 continue
             valid_refs.append(ref)
@@ -577,6 +658,8 @@ class MemoryStoreLite:
     def transition_memory_status(
         self, memory_ref: MemoryRef, new_status: str
     ) -> MemoryStatusTransitionReport:
+        if new_status not in MEMORY_LIFECYCLE_STATUSES:
+            raise ValueError(f"Unknown memory lifecycle status: {new_status}")
         memory = self._memories[memory_ref.memory_id]
         old_status = memory.status
         if old_status == new_status:
@@ -588,12 +671,21 @@ class MemoryStoreLite:
             )
         memory.status = new_status
         memory.version_id += 1
+        memory.status_updated_at = datetime.now(timezone.utc).isoformat()
         claim = self._claims.get(memory.claim_id)
         if claim is not None:
             claim.status = new_status
         if new_status in BLOCKED_MEMORY_STATUSES:
             self.reference_manager.tombstone_memory(
                 memory.memory_id, reason=f"memory_status:{new_status}"
+            )
+        if new_status in {"deprecated", "outdated", "superseded"}:
+            self._record_compensating_event(
+                event_type=f"memory_{new_status}",
+                target_memory=memory,
+                reason=f"status_transition:{old_status}->{new_status}",
+                replacement_memory_id=None,
+                created_by="MemoryStoreLite",
             )
         report = MemoryStatusTransitionReport(
             memory_id=memory.memory_id,
@@ -603,6 +695,72 @@ class MemoryStoreLite:
         )
         self._persist_snapshot()
         return report
+
+    def apply_lifecycle_transitions(
+        self,
+        *,
+        dormant_after_seconds: float = 30 * 24 * 3600,
+        outdated_after_seconds: float = 180 * 24 * 3600,
+    ) -> MemoryLifecycleSweepReport:
+        now = datetime.now(timezone.utc)
+        report = MemoryLifecycleSweepReport()
+        for memory in self._memories.values():
+            report.checked_count += 1
+            if memory.status not in PROMPT_VIEW_MEMORY_STATUSES | DORMANT_MEMORY_STATUSES:
+                report.skipped_count += 1
+                continue
+            created_at = self._parse_dt(memory.created_at)
+            age_seconds = (now - created_at).total_seconds()
+            if (
+                outdated_after_seconds >= 0
+                and age_seconds >= outdated_after_seconds
+                and memory.status != "outdated"
+            ):
+                self.transition_memory_status(self.ref(memory), "outdated")
+                report.outdated_transition_count += 1
+                continue
+            if (
+                dormant_after_seconds >= 0
+                and age_seconds >= dormant_after_seconds
+                and memory.hit_count == 0
+                and memory.status in PROMPT_VIEW_MEMORY_STATUSES
+            ):
+                self.transition_memory_status(self.ref(memory), "dormant")
+                report.dormant_transition_count += 1
+        if report.dormant_transition_count or report.outdated_transition_count:
+            self._persist_snapshot()
+        return report
+
+    def soft_deprecate(
+        self,
+        memory_ref: MemoryRef,
+        *,
+        reason: str,
+        replacement_ref: MemoryRef | None = None,
+        created_by: str = "ReviewerAgent",
+    ) -> CompensatingEvent:
+        memory = self._memories[memory_ref.memory_id]
+        self.transition_memory_status(memory_ref, "deprecated")
+        event = self._record_compensating_event(
+            event_type="soft_deprecation",
+            target_memory=memory,
+            reason=reason,
+            replacement_memory_id=replacement_ref.memory_id if replacement_ref else None,
+            created_by=created_by,
+        )
+        self._persist_snapshot()
+        return event
+
+    def compensating_events(
+        self, memory_id: str | None = None
+    ) -> list[CompensatingEvent]:
+        if memory_id is None:
+            return list(self._compensating_events)
+        return [
+            event
+            for event in self._compensating_events
+            if event.target_memory_id == memory_id
+        ]
 
     def memory_references(
         self, memory_ref: MemoryRef, ref_type: str | None = None
@@ -620,6 +778,13 @@ class MemoryStoreLite:
             old_ref.memory_id,
             new_ref.memory_id,
             reason=reason or "memory_replaced_by_newer_claim",
+        )
+        self._record_compensating_event(
+            event_type="memory_replacement",
+            target_memory=self._memories[old_ref.memory_id],
+            reason=reason or "memory_replaced_by_newer_claim",
+            replacement_memory_id=new_ref.memory_id,
+            created_by="MemoryStoreLite",
         )
         self._persist_snapshot()
         return max(active_before, replaced_count)
@@ -651,6 +816,33 @@ class MemoryStoreLite:
         text = str(payload)
         return text[:budget_chars]
 
+    def render_storage_view(self, memory_ref: MemoryRef, budget_chars: int = 6000) -> str:
+        memory = self._memories[memory_ref.memory_id]
+        claim = self._claims[memory.claim_id]
+        view = self._views[memory.memory_view_id]
+        payload: dict[str, Any] = {
+            "view_type": "storage_view",
+            "memory": asdict(memory),
+            "claim": asdict(claim),
+            "memory_view": asdict(view),
+            "references": [
+                asdict(ref) for ref in self.reference_manager.active_refs(memory.memory_id)
+            ],
+            "compensating_events": [
+                asdict(event) for event in self.compensating_events(memory.memory_id)
+            ],
+            "layer": {
+                "hot": "in_memory",
+                "warm": str(self.warm_db_path) if self.warm_db_path else "",
+                "cold": str(self.cold_memory_dir) if self.cold_memory_dir else "",
+            },
+        }
+        if memory.promotion_view_id:
+            payload["promotion_view"] = asdict(
+                self._promotion_views[memory.promotion_view_id]
+            )
+        return json.dumps(payload, ensure_ascii=False, indent=2)[:budget_chars]
+
     def render_deliverable_view(
         self, refs: list[MemoryRef], *, task_title: str, budget_chars: int = 1800
     ) -> str:
@@ -670,6 +862,7 @@ class MemoryStoreLite:
         return "\n".join(lines)[:budget_chars]
 
     def run_compaction(self, *, slot_id: str | None = None) -> MemoryCompactionReport:
+        self.apply_lifecycle_transitions()
         compaction_id = f"compact_{len(self._compaction_log) + 1:04d}"
         views = [
             view
@@ -705,6 +898,122 @@ class MemoryStoreLite:
         )
         self._persist_snapshot()
         return report
+
+    def open_write_intent(
+        self,
+        *,
+        task_id: str,
+        section_id: str,
+        locked_by: str,
+        read_set: list[MemoryRef],
+        estimated_cost_tokens: int,
+        ttl_ms: int = 3000,
+    ) -> WriteIntentFence:
+        validation = self.validate_read_set(read_set, requester=locked_by)
+        now = datetime.now(timezone.utc)
+        fence_id = self._next_id(
+            "fence",
+            task_id,
+            locked_by,
+            f"{section_id}:{len(self._write_intents)}",
+        )
+        fence = WriteIntentFence(
+            fence_id=fence_id,
+            task_id=task_id,
+            section_id=section_id,
+            locked_by=locked_by,
+            memory_ids=[ref.memory_id for ref in read_set],
+            expected_versions={ref.memory_id: ref.version_id for ref in read_set},
+            estimated_cost_tokens=max(0, estimated_cost_tokens),
+            created_at=now.isoformat(),
+            expires_at=(now + timedelta(milliseconds=max(1, ttl_ms))).isoformat(),
+            allowed=validation.allowed,
+            blocked_memory_ids=list(validation.blocked_memory_ids),
+        )
+        self._write_intents[fence_id] = fence
+        self._section_dependency_map[section_id] = list(fence.memory_ids)
+        self._persist_snapshot()
+        return fence
+
+    def validate_write_intent(self, fence_id: str) -> PreflightValidationReport:
+        self._expire_write_intents()
+        fence = self._write_intents.get(fence_id)
+        if fence is None:
+            return PreflightValidationReport(
+                allowed=False,
+                checked_count=0,
+                blocked_count=1,
+                stale_read_detected_count=1,
+                blocked_memory_ids=[fence_id],
+            )
+        refs = []
+        for memory_id, version in fence.expected_versions.items():
+            memory = self._memories.get(memory_id)
+            if memory is None:
+                refs.append(
+                    MemoryRef(
+                        memory_id=memory_id,
+                        version_id=version,
+                        status="missing",
+                        task_topic="",
+                        memory_view_id="",
+                        slot_id="",
+                    )
+                )
+            else:
+                refs.append(
+                    MemoryRef(
+                        memory_id=memory.memory_id,
+                        version_id=version,
+                        status=memory.status,
+                        task_topic=memory.task_topic,
+                        memory_view_id=memory.memory_view_id,
+                        slot_id=memory.slot_id,
+                    )
+                )
+        return self.validate_read_set(refs, requester=fence.locked_by)
+
+    def record_patch_regeneration(
+        self,
+        *,
+        section_id: str,
+        read_set: list[MemoryRef],
+        patch_summary: str,
+        estimated_saved_tokens: int = 0,
+    ) -> PatchRegenerationReport:
+        validation = self.validate_read_set(read_set)
+        report = PatchRegenerationReport(
+            section_id=section_id,
+            regenerated=not validation.allowed,
+            stale_memory_ids=list(validation.blocked_memory_ids),
+            patch_summary=patch_summary,
+            estimated_saved_tokens=max(0, estimated_saved_tokens),
+        )
+        self._patch_regeneration_log.append(report)
+        self._persist_snapshot()
+        return report
+
+    def layered_storage_report(self) -> MemoryLayerReport:
+        warm_count = 0
+        if self.warm_db_path and self.warm_db_path.exists():
+            conn = sqlite3.connect(self.warm_db_path)
+            try:
+                warm_count = int(
+                    conn.execute("SELECT COUNT(*) FROM memory_records").fetchone()[0]
+                )
+            finally:
+                conn.close()
+        cold_count = (
+            len(list(self.cold_memory_dir.glob("*.json")))
+            if self.cold_memory_dir and self.cold_memory_dir.exists()
+            else 0
+        )
+        return MemoryLayerReport(
+            warm_db_path=str(self.warm_db_path or ""),
+            cold_dir=str(self.cold_memory_dir or ""),
+            warm_record_count=warm_count,
+            cold_record_count=cold_count,
+        )
 
     def ref_to_dict(self, memory_ref: MemoryRef) -> dict:
         return asdict(memory_ref)
@@ -792,9 +1101,18 @@ class MemoryStoreLite:
             if memory.claim_id == claim_id:
                 memory.status = status
                 memory.version_id += 1
+                memory.status_updated_at = datetime.now(timezone.utc).isoformat()
                 if status in BLOCKED_MEMORY_STATUSES:
                     self.reference_manager.tombstone_memory(
                         memory.memory_id, reason=f"claim_status:{status}"
+                    )
+                if status in {"deprecated", "outdated", "superseded"}:
+                    self._record_compensating_event(
+                        event_type=f"claim_{status}",
+                        target_memory=memory,
+                        reason=f"claim_status:{status}",
+                        replacement_memory_id=None,
+                        created_by="MemoryStoreLite",
                     )
         self._persist_snapshot()
 
@@ -864,6 +1182,7 @@ class MemoryStoreLite:
             encoding="utf-8",
         )
         tmp_path.replace(path)
+        self._persist_layered_records()
 
     def _snapshot_payload(self) -> dict[str, Any]:
         return {
@@ -879,7 +1198,134 @@ class MemoryStoreLite:
             ],
             "memory_references": self.reference_manager.snapshot(),
             "compaction_log": list(self._compaction_log),
+            "compensating_events": [
+                asdict(event) for event in self._compensating_events
+            ],
+            "write_intents": [
+                asdict(fence) for fence in self._write_intents.values()
+            ],
+            "section_dependency_map": dict(self._section_dependency_map),
+            "patch_regeneration_log": [
+                asdict(report) for report in self._patch_regeneration_log
+            ],
         }
+
+    def _init_layered_storage(self) -> None:
+        if self.storage_dir is None or self.warm_db_path is None or self.cold_memory_dir is None:
+            return
+        self.cold_memory_dir.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self.warm_db_path)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_records (
+                    kind TEXT NOT NULL,
+                    record_id TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (kind, record_id)
+                )
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _persist_layered_records(self) -> None:
+        if self.storage_dir is None or self.warm_db_path is None or self.cold_memory_dir is None:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        records: list[tuple[str, str, dict[str, Any]]] = []
+        records.extend(("memory", item.memory_id, asdict(item)) for item in self._memories.values())
+        records.extend(("claim", item.claim_id, asdict(item)) for item in self._claims.values())
+        records.extend(("memory_view", item.memory_view_id, asdict(item)) for item in self._views.values())
+        conn = sqlite3.connect(self.warm_db_path, timeout=30.0)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO memory_records(kind, record_id, payload_json, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                [
+                    (kind, record_id, json.dumps(payload, ensure_ascii=False), now)
+                    for kind, record_id, payload in records
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        for memory in self._memories.values():
+            cold_payload = {
+                "memory": asdict(memory),
+                "claim": asdict(self._claims[memory.claim_id]),
+                "memory_view": asdict(self._views[memory.memory_view_id]),
+                "promotion_view": (
+                    asdict(self._promotion_views[memory.promotion_view_id])
+                    if memory.promotion_view_id
+                    else None
+                ),
+                "references": [
+                    asdict(ref)
+                    for ref in self.reference_manager.active_refs(memory.memory_id)
+                ],
+            }
+            (self.cold_memory_dir / f"{memory.memory_id}.json").write_text(
+                json.dumps(cold_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+    def _expire_write_intents(self) -> None:
+        if not self._write_intents:
+            return
+        now = datetime.now(timezone.utc)
+        expired = [
+            fence_id
+            for fence_id, fence in self._write_intents.items()
+            if self._parse_dt(fence.expires_at) <= now
+        ]
+        for fence_id in expired:
+            self._write_intents.pop(fence_id, None)
+
+    def _blocked_by_write_intent(self, memory_id: str, *, requester: str) -> bool:
+        for fence in self._write_intents.values():
+            if memory_id not in fence.memory_ids:
+                continue
+            if requester and requester == fence.locked_by:
+                continue
+            return True
+        return False
+
+    def _record_compensating_event(
+        self,
+        *,
+        event_type: str,
+        target_memory: MemoryObject,
+        reason: str,
+        replacement_memory_id: str | None,
+        created_by: str,
+    ) -> CompensatingEvent:
+        event = CompensatingEvent(
+            event_id=f"evt_{len(self._compensating_events) + 1:06d}",
+            event_type=event_type,
+            target_memory_id=target_memory.memory_id,
+            target_view_id=target_memory.memory_view_id,
+            reason=reason,
+            replacement_memory_id=replacement_memory_id,
+            created_at=datetime.now(timezone.utc).isoformat(),
+            created_by=created_by,
+        )
+        self._compensating_events.append(event)
+        return event
+
+    def _parse_dt(self, value: str) -> datetime:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
 
     def _compact_claims(self, claim_ids: list[str]) -> str:
         summaries = [self._claims[item].summary for item in claim_ids[-4:]]

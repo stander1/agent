@@ -54,6 +54,9 @@ class ControlBudgetReport:
     estimated_control_tokens: int
     max_control_tokens_per_task: int
     reason: str = ""
+    control_path: str = "rules_first"
+    scoring_assist_allowed: bool = True
+    llm_fallback_allowed: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -210,6 +213,45 @@ class CapabilityRouterLite:
             return "artifact_state"
         return "agent_output"
 
+    def resolve_tie(
+        self,
+        candidates: list[str],
+        *,
+        required_state_type: str | None = None,
+        preferred_capability: str | None = None,
+    ) -> RouteDecision:
+        scored: list[tuple[int, str, list[str]]] = []
+        for agent_id in candidates:
+            profile = self.profiles.get(agent_id)
+            if profile is None:
+                scored.append((0, agent_id, ["missing_profile"]))
+                continue
+            score = 0
+            reasons: list[str] = []
+            if required_state_type and required_state_type in profile.accepted_state_types:
+                score += 3
+                reasons.append("state_type_match")
+            if preferred_capability and preferred_capability in profile.capabilities:
+                score += 2
+                reasons.append("capability_match")
+            score += min(1, len(profile.message_types))
+            if not reasons:
+                reasons.append("stable_agent_id_tiebreak")
+            scored.append((score, agent_id, reasons))
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        _, receiver, reasons = scored[0]
+        return RouteDecision(
+            receiver=receiver,
+            msg_type=(
+                "state_ref_handoff"
+                if required_state_type in {"retrieval_state", "embedding_state"}
+                else "agent_output"
+            ),
+            capability_hint=self.profiles.capability_hint_for(receiver),
+            route_changed=True,
+            reasons=["cold_start_tie_resolved", *reasons],
+        )
+
 
 class CommunicationGateLite:
     def assess(
@@ -265,7 +307,12 @@ class ControlBudgetLite:
         self._token_counts: dict[str, int] = {}
 
     def record_decision(
-        self, *, task_id: str, estimated_control_tokens: int = 0
+        self,
+        *,
+        task_id: str,
+        estimated_control_tokens: int = 0,
+        scoring_confidence: float = 1.0,
+        requires_llm_fallback: bool = False,
     ) -> ControlBudgetReport:
         decision_count = self._decision_counts.get(task_id, 0) + 1
         token_count = self._token_counts.get(task_id, 0) + max(0, estimated_control_tokens)
@@ -276,6 +323,14 @@ class ControlBudgetLite:
             and token_count <= self.max_control_tokens_per_task
         )
         reason = "" if allowed else "control_budget_exhausted"
+        if not allowed:
+            control_path = "blocked"
+        elif requires_llm_fallback:
+            control_path = "llm_fallback"
+        elif scoring_confidence < 0.65:
+            control_path = "scoring_assist"
+        else:
+            control_path = "rules_first"
         return ControlBudgetReport(
             allowed=allowed,
             task_id=task_id,
@@ -284,4 +339,7 @@ class ControlBudgetLite:
             estimated_control_tokens=token_count,
             max_control_tokens_per_task=self.max_control_tokens_per_task,
             reason=reason,
+            control_path=control_path,
+            scoring_assist_allowed=allowed and scoring_confidence < 0.65,
+            llm_fallback_allowed=allowed and requires_llm_fallback,
         )

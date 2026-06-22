@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import json
@@ -13,6 +13,8 @@ StateTier = str
 
 STATE_LIFECYCLE_STATES = {
     "active",
+    "dormant",
+    "outdated",
     "retry_carried",
     "superseded",
     "compressed",
@@ -62,6 +64,10 @@ class StateObject:
     evicted_at: str | None = None
     admission_score: float = 1.0
     admission_status: str = "admitted"
+    access_count: int = 0
+    last_accessed_at: str | None = None
+    status_updated_at: str | None = None
+    outdated_reason: str = ""
 
 
 @dataclass(slots=True)
@@ -87,6 +93,10 @@ class StateGCReport:
     physical_delete_count: int = 0
     retry_summary_state_count: int = 0
     lifecycle_transition_count: int = 0
+    retry_carried_protected_count: int = 0
+    dag_liveness_protected_count: int = 0
+    io_budget_gc_count: int = 0
+    raw_cache_evicted_count: int = 0
 
 
 @dataclass(slots=True)
@@ -121,6 +131,10 @@ class StateAdmissionReport:
 class ColdAccessBudget:
     max_cold_reads_per_task: int = 4
     max_cold_bytes_per_phase: int = 64_000
+    max_concurrent_cold_reads: int = 2
+    max_raw_view_tokens: int = 4096
+    cold_read_timeout_ms: int = 3000
+    full_raw_read_policy: str = "forbidden_by_default"
 
 
 @dataclass(slots=True)
@@ -133,6 +147,8 @@ class ColdAccessReport:
     budget_remaining: int = 0
     cache_hit: bool = False
     payload: dict[str, Any] | None = None
+    raw_view_id: str = ""
+    chunk_ids: list[str] | None = None
 
 
 @dataclass(slots=True)
@@ -146,6 +162,60 @@ class AccessEscalationReport:
     access_escalation_count: int = 0
     prompt_view: str = ""
     cold_access: ColdAccessReport | None = None
+    summary_first_expected_cost: float = 0.0
+    raw_first_expected_cost: float = 0.0
+    raw_need_probability: float = 0.0
+    decision_basis: str = "summary_first_default"
+
+
+@dataclass(slots=True)
+class LoopBudgetConfig:
+    max_attempts: int = 10
+    max_loop_state_bytes: int = 52_428_800
+    max_carried_states: int = 20
+    keep_last_k_attempts: int = 3
+
+
+@dataclass(slots=True)
+class LoopBudgetReport:
+    allowed: bool
+    attempt_count: int
+    carried_state_count: int
+    carried_state_bytes: int
+    max_attempts: int
+    max_loop_state_bytes: int
+    max_carried_states: int
+    reasons: list[str]
+
+
+@dataclass(slots=True)
+class RawChunk:
+    chunk_id: str
+    state_id: str
+    span: str
+    offset_start: int
+    offset_end: int
+    summary: str
+    tags: list[str]
+
+
+@dataclass(slots=True)
+class RawSpanResolutionReport:
+    state_id: str
+    query: str
+    matched_chunk_ids: list[str]
+    raw_view_id: str
+    content: str
+    size_tokens: int
+    cache_hit: bool
+
+
+@dataclass(slots=True)
+class PrefetchReport:
+    requested_count: int = 0
+    prefetched_count: int = 0
+    skipped_count: int = 0
+    raw_view_ids: list[str] | None = None
 
 
 @dataclass(slots=True)
@@ -268,6 +338,7 @@ class StatePoolLite:
         quota_config: StateQuotaConfig | None = None,
         cold_access_budget: ColdAccessBudget | None = None,
         admission_policy: StateAdmissionPolicy | None = None,
+        loop_budget_config: LoopBudgetConfig | None = None,
     ) -> None:
         self.root_dir = root_dir
         self.payload_dir = self.root_dir / "state_payloads"
@@ -289,9 +360,14 @@ class StatePoolLite:
         self.quota_config = quota_config or StateQuotaConfig()
         self.cold_access_budget = cold_access_budget or ColdAccessBudget()
         self.admission_policy = admission_policy or StateAdmissionPolicy()
+        self.loop_budget_config = loop_budget_config or LoopBudgetConfig()
         self._cold_read_counts: dict[str, int] = {}
         self._cold_read_bytes: dict[str, int] = {}
         self._raw_view_cache: dict[str, tuple[int, dict[str, Any]]] = {}
+        self._raw_chunk_index: dict[str, list[RawChunk]] = {}
+        self._raw_view_materialized: dict[str, RawSpanResolutionReport] = {}
+        self._prefetch_queue: list[str] = []
+        self._active_cold_reads = 0
         self.leases = LeaseRegistry()
 
     def write_state(
@@ -370,18 +446,22 @@ class StatePoolLite:
             fallback_summary=summary[:280],
             admission_score=admission.score,
             admission_status=admission.status,
+            status_updated_at=datetime.now(timezone.utc).isoformat(),
         )
         self._states[state_id] = state
+        state_ref = StateRef(
+            state_id=state.state_id,
+            state_type=state.state_type,
+            version=state.version,
+            payload_kind=state.payload_kind,
+            contains_embedding_refs=state.contains_embedding_refs,
+            usage_hint=usage_hint,
+            tier=state.tier,
+        )
+        if audit_payload is not None:
+            self.build_raw_chunk_index(state_ref)
         return (
-            StateRef(
-                state_id=state.state_id,
-                state_type=state.state_type,
-                version=state.version,
-                payload_kind=state.payload_kind,
-                contains_embedding_refs=state.contains_embedding_refs,
-                usage_hint=usage_hint,
-                tier=state.tier,
-            ),
+            state_ref,
             state,
         )
 
@@ -445,6 +525,7 @@ class StatePoolLite:
         self, state_ref: StateRef, agent_role: str, budget_chars: int = 900
     ) -> tuple[str, StateAccessReport]:
         state = self._states[state_ref.state_id]
+        self._mark_accessed(state)
         if state.lifecycle in {"deleted", "tombstoned", "evicted"}:
             tombstone = self._tombstones.get(state.state_id, {})
             fallback_summary = tombstone.get("fallback_summary") or state.fallback_summary
@@ -544,6 +625,7 @@ class StatePoolLite:
 
     def render_audit_view(self, state_ref: StateRef, budget_chars: int = 4000) -> str:
         state = self._states[state_ref.state_id]
+        self._mark_accessed(state)
         with self.leases.read_lease(state.state_id, owner="audit_view"):
             payload = json.loads(Path(state.payload_ref).read_text(encoding="utf-8"))
             rendered = {
@@ -561,6 +643,7 @@ class StatePoolLite:
         state = self._states[state_ref.state_id]
         if not state.audit_payload_ref:
             return None
+        self._mark_accessed(state)
         with self.leases.read_lease(state.state_id, owner="audit_payload"):
             return json.loads(Path(state.audit_payload_ref).read_text(encoding="utf-8"))
 
@@ -572,6 +655,7 @@ class StatePoolLite:
         max_bytes: int | None = None,
     ) -> ColdAccessReport:
         state = self._states[state_ref.state_id]
+        self._mark_accessed(state)
         if state.lifecycle in {"deleted"}:
             return ColdAccessReport(
                 state_id=state.state_id,
@@ -584,6 +668,13 @@ class StatePoolLite:
                 state_id=state.state_id,
                 allowed=False,
                 reason="audit_payload_missing",
+                budget_remaining=self._cold_budget_remaining(state.task_id),
+            )
+        if self._active_cold_reads >= self.cold_access_budget.max_concurrent_cold_reads:
+            return ColdAccessReport(
+                state_id=state.state_id,
+                allowed=False,
+                reason="max_concurrent_cold_reads_exceeded",
                 budget_remaining=self._cold_budget_remaining(state.task_id),
             )
 
@@ -602,6 +693,16 @@ class StatePoolLite:
             payload_bytes = Path(state.audit_payload_ref).stat().st_size
         else:
             payload_bytes = cached[0]
+        raw_view_tokens = max(1, (payload_bytes + 3) // 4)
+        if raw_view_tokens > self.cold_access_budget.max_raw_view_tokens:
+            return ColdAccessReport(
+                state_id=state.state_id,
+                allowed=False,
+                reason="raw_view_token_budget_exceeded",
+                bytes_read=0,
+                cold_read_count=read_count,
+                budget_remaining=self._cold_budget_remaining(state.task_id),
+            )
         byte_limit = min(
             max_bytes or self.cold_access_budget.max_cold_bytes_per_phase,
             self.cold_access_budget.max_cold_bytes_per_phase,
@@ -619,13 +720,18 @@ class StatePoolLite:
 
         cache_hit = cached is not None
         if cached is None:
-            with self.leases.read_lease(state.state_id, owner="cold_access"):
-                payload = json.loads(
-                    Path(state.audit_payload_ref).read_text(encoding="utf-8")
-                )
-            self._raw_view_cache[state.state_id] = (payload_bytes, payload)
+            self._active_cold_reads += 1
+            try:
+                with self.leases.read_lease(state.state_id, owner="cold_access"):
+                    payload = json.loads(
+                        Path(state.audit_payload_ref).read_text(encoding="utf-8")
+                    )
+                self._raw_view_cache[state.state_id] = (payload_bytes, payload)
+            finally:
+                self._active_cold_reads = max(0, self._active_cold_reads - 1)
         else:
             payload = cached[1]
+        raw_view_id = f"rv_{state.state_id}_{len(self._raw_view_materialized) + 1:04d}"
         self._cold_read_counts[state.task_id] = read_count + 1
         self._cold_read_bytes[state.task_id] = already_read + payload_bytes
         return ColdAccessReport(
@@ -637,6 +743,8 @@ class StatePoolLite:
             budget_remaining=max(0, byte_limit - already_read - payload_bytes),
             cache_hit=cache_hit,
             payload=payload,
+            raw_view_id=raw_view_id,
+            chunk_ids=[chunk.chunk_id for chunk in self._raw_chunk_index.get(state.state_id, [])[:3]],
         )
 
     def request_progressive_access(
@@ -648,12 +756,20 @@ class StatePoolLite:
         need_raw: bool = False,
         expected_summary_tokens: int = 96,
         expected_raw_tokens: int = 900,
+        expected_request_tokens: int = 32,
+        expected_recovery_tokens: int = 128,
+        raw_need_probability: float = 0.25,
         budget_chars: int = 900,
     ) -> AccessEscalationReport:
         state = self._states[state_ref.state_id]
         prompt_view, prompt_report = self.render_prompt_view_with_report(
             state_ref, agent_role=agent_role, budget_chars=budget_chars
         )
+        probability = self._clamp01(raw_need_probability)
+        summary_first_cost = expected_summary_tokens + probability * (
+            expected_request_tokens + expected_raw_tokens + expected_recovery_tokens
+        )
+        raw_first_cost = expected_request_tokens + expected_raw_tokens
         if state.lifecycle in {"deleted", "evicted"}:
             return AccessEscalationReport(
                 state_id=state.state_id,
@@ -663,6 +779,10 @@ class StatePoolLite:
                 expected_summary_tokens=expected_summary_tokens,
                 expected_raw_tokens=expected_raw_tokens,
                 prompt_view=prompt_view,
+                summary_first_expected_cost=round(summary_first_cost, 2),
+                raw_first_expected_cost=round(raw_first_cost, 2),
+                raw_need_probability=probability,
+                decision_basis="fallback_summary_for_unavailable_state",
             )
         if not need_raw:
             return AccessEscalationReport(
@@ -673,6 +793,10 @@ class StatePoolLite:
                 expected_summary_tokens=expected_summary_tokens,
                 expected_raw_tokens=expected_raw_tokens,
                 prompt_view=prompt_view,
+                summary_first_expected_cost=round(summary_first_cost, 2),
+                raw_first_expected_cost=round(raw_first_cost, 2),
+                raw_need_probability=probability,
+                decision_basis="summary_first_expected_cost_model",
             )
         if state.tier != "cold" or not state.audit_payload_ref:
             return AccessEscalationReport(
@@ -683,19 +807,36 @@ class StatePoolLite:
                 expected_summary_tokens=expected_summary_tokens,
                 expected_raw_tokens=expected_raw_tokens,
                 prompt_view=prompt_view,
+                summary_first_expected_cost=round(summary_first_cost, 2),
+                raw_first_expected_cost=round(raw_first_cost, 2),
+                raw_need_probability=probability,
+                decision_basis="raw_unavailable",
             )
 
         cold_access = self.request_cold_access(state_ref, reason=reason)
+        raw_first_preferred = summary_first_cost > raw_first_cost
         return AccessEscalationReport(
             state_id=state.state_id,
             selected_level="full_cold_read" if cold_access.allowed else "summary_only",
             allowed=cold_access.allowed,
-            reason=cold_access.reason,
+            reason=(
+                "raw_first_expected_cost_lower"
+                if cold_access.allowed and raw_first_preferred
+                else cold_access.reason
+            ),
             expected_summary_tokens=expected_summary_tokens,
             expected_raw_tokens=expected_raw_tokens,
             access_escalation_count=1,
             prompt_view=prompt_view,
             cold_access=cold_access,
+            summary_first_expected_cost=round(summary_first_cost, 2),
+            raw_first_expected_cost=round(raw_first_cost, 2),
+            raw_need_probability=probability,
+            decision_basis=(
+                "raw_first_expected_cost_model"
+                if raw_first_preferred
+                else "summary_first_then_escalate"
+            ),
         )
 
     def collect_garbage(
@@ -706,12 +847,27 @@ class StatePoolLite:
     ) -> StateGCReport:
         protected = protected_state_ids or set()
         report = StateGCReport()
+        report.raw_cache_evicted_count = self._prune_raw_view_cache()
+        report.io_budget_gc_count += report.raw_cache_evicted_count
+        retry_protected = {
+            state.state_id
+            for state in self._states.values()
+            if state.lifecycle == "retry_carried" or state.retry_ref_count > 0
+        }
+        dag_protected = {
+            state.state_id
+            for state in self._states.values()
+            if state.dependency_ref_count > 0 or state.state_id in self._lineage_state_ids
+        }
+        report.retry_carried_protected_count = len(retry_protected)
+        report.dag_liveness_protected_count = len(dag_protected)
         candidates = [
             state
             for state in self._states.values()
             if state.state_id not in protected
-            and state.state_id not in self._lineage_state_ids
-            and state.lifecycle in {"active", "cooling", "evict_pending"}
+            and state.state_id not in retry_protected
+            and state.state_id not in dag_protected
+            and state.lifecycle in {"active", "dormant", "outdated", "cooling", "evict_pending"}
             and state.tier == "cold"
         ]
         quota_candidates = self._quota_eviction_candidates(protected)
@@ -769,14 +925,58 @@ class StatePoolLite:
             )
         state.lifecycle = new_lifecycle
         state.version += 1
+        state.status_updated_at = datetime.now(timezone.utc).isoformat()
         if superseded_by:
             state.superseded_by = superseded_by
+        if new_lifecycle == "outdated":
+            state.outdated_reason = "manual_transition"
         return StateLifecycleTransitionReport(
             state_id=state.state_id,
             old_lifecycle=old,
             new_lifecycle=new_lifecycle,
             transitioned=True,
         )
+
+    def supersede_state(
+        self, old_ref: StateRef, new_ref: StateRef, *, reason: str = "state_replaced"
+    ) -> StateLifecycleTransitionReport:
+        old_state = self._states[old_ref.state_id]
+        old_state.replacement_state_id = new_ref.state_id
+        old_state.outdated_reason = reason
+        return self.transition_state(old_ref, "outdated", superseded_by=new_ref.state_id)
+
+    def apply_lifecycle_transitions(
+        self,
+        *,
+        dormant_after_seconds: float = 30 * 24 * 3600,
+        outdated_after_seconds: float = 180 * 24 * 3600,
+    ) -> StateGCReport:
+        now = datetime.now(timezone.utc)
+        report = StateGCReport()
+        for state in self._states.values():
+            if state.lifecycle not in {"active", "dormant"}:
+                continue
+            created_at = self._parse_dt(state.created_at)
+            age_seconds = (now - created_at).total_seconds()
+            if outdated_after_seconds >= 0 and age_seconds >= outdated_after_seconds:
+                old = state.lifecycle
+                state.lifecycle = "outdated"
+                state.version += 1
+                state.status_updated_at = now.isoformat()
+                state.outdated_reason = "age_threshold"
+                report.lifecycle_transition_count += int(old != state.lifecycle)
+                continue
+            if (
+                dormant_after_seconds >= 0
+                and age_seconds >= dormant_after_seconds
+                and state.access_count == 0
+                and state.lifecycle == "active"
+            ):
+                state.lifecycle = "dormant"
+                state.version += 1
+                state.status_updated_at = now.isoformat()
+                report.lifecycle_transition_count += 1
+        return report
 
     def write_retry_loop_summary(
         self,
@@ -787,11 +987,22 @@ class StatePoolLite:
         carried_state_refs: list[StateRef],
         max_attempts: int = 8,
     ) -> StateRef:
-        compact_attempts = attempts[-max_attempts:]
+        budget_report = self.assess_loop_budget(
+            attempts=attempts,
+            carried_state_refs=carried_state_refs,
+        )
+        keep_attempts = min(
+            max_attempts,
+            self.loop_budget_config.keep_last_k_attempts,
+            self.loop_budget_config.max_attempts,
+        )
+        compact_attempts = attempts[-keep_attempts:]
+        compact_carried_refs = carried_state_refs[: self.loop_budget_config.max_carried_states]
         payload = {
             "attempt_count": len(attempts),
             "compressed_attempt_count": len(compact_attempts),
-            "carried_state_ids": [ref.state_id for ref in carried_state_refs],
+            "carried_state_ids": [ref.state_id for ref in compact_carried_refs],
+            "loop_budget": asdict(budget_report),
             "attempt_summaries": [
                 {
                     "attempt_id": item.get("attempt_id", index + 1),
@@ -810,15 +1021,137 @@ class StatePoolLite:
             usage_hint="retry_history_compaction",
             lifecycle="retry_carried",
             tier="warm",
-            retry_ref_count=len(carried_state_refs),
+            retry_ref_count=len(compact_carried_refs),
         )
         return ref
+
+    def assess_loop_budget(
+        self, *, attempts: list[dict[str, Any]], carried_state_refs: list[StateRef]
+    ) -> LoopBudgetReport:
+        carried_bytes = 0
+        for ref in carried_state_refs:
+            state = self._states.get(ref.state_id)
+            if state is not None:
+                carried_bytes += state.size_bytes
+        reasons: list[str] = []
+        config = self.loop_budget_config
+        if len(attempts) > config.max_attempts:
+            reasons.append("max_attempts_exceeded")
+        if len(carried_state_refs) > config.max_carried_states:
+            reasons.append("max_carried_states_exceeded")
+        if carried_bytes > config.max_loop_state_bytes:
+            reasons.append("max_loop_state_bytes_exceeded")
+        return LoopBudgetReport(
+            allowed=not reasons,
+            attempt_count=len(attempts),
+            carried_state_count=len(carried_state_refs),
+            carried_state_bytes=carried_bytes,
+            max_attempts=config.max_attempts,
+            max_loop_state_bytes=config.max_loop_state_bytes,
+            max_carried_states=config.max_carried_states,
+            reasons=reasons or ["within_loop_budget"],
+        )
 
     def ref_to_dict(self, state_ref: StateRef) -> dict[str, Any]:
         return asdict(state_ref)
 
     def mark_lineage(self, state_ids: list[str]) -> None:
         self._lineage_state_ids.update(state_ids)
+
+    def build_raw_chunk_index(
+        self, state_ref: StateRef, *, chunk_chars: int = 1200
+    ) -> list[RawChunk]:
+        state = self._states[state_ref.state_id]
+        if not state.audit_payload_ref or not Path(state.audit_payload_ref).exists():
+            self._raw_chunk_index[state.state_id] = []
+            return []
+        payload = json.loads(Path(state.audit_payload_ref).read_text(encoding="utf-8"))
+        text = self._payload_to_text(payload)
+        chunks: list[RawChunk] = []
+        for index, start in enumerate(range(0, len(text), max(1, chunk_chars)), start=1):
+            end = min(len(text), start + chunk_chars)
+            chunk_text = text[start:end]
+            chunk = RawChunk(
+                chunk_id=f"{state.state_id}:c_{index:03d}",
+                state_id=state.state_id,
+                span=f"{start}-{end}",
+                offset_start=start,
+                offset_end=end,
+                summary=chunk_text[:160],
+                tags=self._chunk_terms(chunk_text)[:8],
+            )
+            chunks.append(chunk)
+        self._raw_chunk_index[state.state_id] = chunks
+        return chunks
+
+    def resolve_raw_span(
+        self,
+        state_ref: StateRef,
+        *,
+        query: str,
+        max_chunks: int = 2,
+    ) -> RawSpanResolutionReport:
+        state = self._states[state_ref.state_id]
+        chunks = self._raw_chunk_index.get(state.state_id) or self.build_raw_chunk_index(state_ref)
+        query_terms = set(self._chunk_terms(query))
+        scored: list[tuple[int, RawChunk]] = []
+        for chunk in chunks:
+            overlap = len(query_terms & set(chunk.tags))
+            scored.append((overlap, chunk))
+        scored.sort(key=lambda item: (-item[0], item[1].offset_start))
+        selected = [chunk for _, chunk in scored[:max(1, max_chunks)]]
+        cache_key = "|".join([state.state_id, query, ",".join(chunk.chunk_id for chunk in selected)])
+        raw_view_id = f"rv_{hashlib.sha256(cache_key.encode('utf-8')).hexdigest()[:12]}"
+        cached = self._raw_view_materialized.get(raw_view_id)
+        if cached is not None:
+            return RawSpanResolutionReport(
+                state_id=state.state_id,
+                query=query,
+                matched_chunk_ids=list(cached.matched_chunk_ids),
+                raw_view_id=cached.raw_view_id,
+                content=cached.content,
+                size_tokens=cached.size_tokens,
+                cache_hit=True,
+            )
+        source_text = ""
+        if state.audit_payload_ref and Path(state.audit_payload_ref).exists():
+            source_text = self._payload_to_text(
+                json.loads(Path(state.audit_payload_ref).read_text(encoding="utf-8"))
+            )
+        content = "\n".join(
+            source_text[chunk.offset_start : chunk.offset_end] for chunk in selected
+        )
+        report = RawSpanResolutionReport(
+            state_id=state.state_id,
+            query=query,
+            matched_chunk_ids=[chunk.chunk_id for chunk in selected],
+            raw_view_id=raw_view_id,
+            content=content,
+            size_tokens=max(1, (len(content) + 3) // 4),
+            cache_hit=False,
+        )
+        self._raw_view_materialized[raw_view_id] = report
+        return report
+
+    def prefetch_raw_view(
+        self, state_refs: list[StateRef], *, query: str, max_chunks: int = 2
+    ) -> PrefetchReport:
+        raw_view_ids: list[str] = []
+        skipped = 0
+        for ref in state_refs:
+            state = self._states.get(ref.state_id)
+            if state is None or not state.audit_payload_ref:
+                skipped += 1
+                continue
+            self._prefetch_queue.append(ref.state_id)
+            report = self.resolve_raw_span(ref, query=query, max_chunks=max_chunks)
+            raw_view_ids.append(report.raw_view_id)
+        return PrefetchReport(
+            requested_count=len(state_refs),
+            prefetched_count=len(raw_view_ids),
+            skipped_count=skipped,
+            raw_view_ids=raw_view_ids,
+        )
 
     def _tombstone_state(self, state: StateObject, *, reason: str) -> None:
         if state.lifecycle == "evicted":
@@ -851,7 +1184,10 @@ class StatePoolLite:
             if (
                 state.state_id in protected
                 or state.state_id in self._lineage_state_ids
-                or state.lifecycle not in {"active", "cooling", "evict_pending", "archived"}
+                or state.lifecycle == "retry_carried"
+                or state.retry_ref_count > 0
+                or state.dependency_ref_count > 0
+                or state.lifecycle not in {"active", "dormant", "outdated", "cooling", "evict_pending", "archived"}
             ):
                 continue
             by_task.setdefault(state.task_id, []).append(state)
@@ -875,6 +1211,59 @@ class StatePoolLite:
             self.cold_access_budget.max_cold_reads_per_task
             - self._cold_read_counts.get(task_id, 0),
         )
+
+    def _mark_accessed(self, state: StateObject) -> None:
+        state.access_count += 1
+        state.last_accessed_at = datetime.now(timezone.utc).isoformat()
+
+    def _prune_raw_view_cache(self) -> int:
+        if not self._raw_view_cache:
+            return 0
+        max_bytes = max(1, self.cold_access_budget.max_raw_view_tokens * 4)
+        total_bytes = sum(size for size, _ in self._raw_view_cache.values())
+        evicted = 0
+        for state_id in list(self._raw_view_cache.keys()):
+            if total_bytes <= max_bytes:
+                break
+            size, _ = self._raw_view_cache.pop(state_id)
+            total_bytes -= size
+            evicted += 1
+        return evicted
+
+    def _payload_to_text(self, payload: Any) -> str:
+        if isinstance(payload, str):
+            return payload
+        if isinstance(payload, dict):
+            parts: list[str] = []
+            for key, value in payload.items():
+                parts.append(f"{key}: {self._payload_to_text(value)}")
+            return "\n".join(parts)
+        if isinstance(payload, list):
+            return "\n".join(self._payload_to_text(item) for item in payload)
+        return str(payload)
+
+    def _chunk_terms(self, text: str) -> list[str]:
+        terms: list[str] = []
+        current = []
+        for char in text.lower():
+            if char.isalnum() or "\u4e00" <= char <= "\u9fff":
+                current.append(char)
+            elif current:
+                term = "".join(current)
+                if term not in terms:
+                    terms.append(term)
+                current = []
+        if current:
+            term = "".join(current)
+            if term not in terms:
+                terms.append(term)
+        return terms
+
+    def _parse_dt(self, value: str) -> datetime:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
 
     def _clamp01(self, value: float) -> float:
         return max(0.0, min(1.0, float(value)))

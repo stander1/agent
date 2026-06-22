@@ -1,5 +1,6 @@
 import unittest
 import tempfile
+import sqlite3
 from pathlib import Path
 
 from agent_runtime.memory.memory_store import MemoryStoreLite
@@ -159,6 +160,120 @@ class MemoryGovernanceTest(unittest.TestCase):
             snapshot = snapshot_path.read_text(encoding="utf-8")
             self.assertIn(report.memory_ref.memory_id, snapshot)
             self.assertIn("memory_references", snapshot)
+
+    def test_lifecycle_sweep_marks_dormant_and_outdated_memory(self) -> None:
+        store = MemoryStoreLite()
+        dormant = store.write_memory_with_report(
+            task_id="L1",
+            source_agent="writer",
+            task_topic="lifecycle dormant",
+            summary="low frequency but still valid memory",
+            tags=["lifecycle"],
+            slot_hint="reuse_strategy",
+        )
+        dormant_report = store.apply_lifecycle_transitions(
+            dormant_after_seconds=0,
+            outdated_after_seconds=999999,
+        )
+        self.assertEqual(dormant_report.dormant_transition_count, 1)
+        self.assertEqual(store._memories[dormant.memory_ref.memory_id].status, "dormant")
+        self.assertTrue(store.validate_read_set([store.ref(store._memories[dormant.memory_ref.memory_id])]).allowed)
+
+        outdated_report = store.apply_lifecycle_transitions(
+            dormant_after_seconds=0,
+            outdated_after_seconds=0,
+        )
+        self.assertEqual(outdated_report.outdated_transition_count, 1)
+        outdated_ref = store.ref(store._memories[dormant.memory_ref.memory_id])
+        self.assertEqual(outdated_ref.status, "outdated")
+        self.assertFalse(store.validate_read_set([outdated_ref]).allowed)
+
+    def test_soft_deprecation_creates_compensating_event_and_storage_view(self) -> None:
+        store = MemoryStoreLite()
+        report = store.write_memory_with_report(
+            task_id="S1",
+            source_agent="writer",
+            task_topic="soft deprecation",
+            summary="claim later found stale",
+            tags=["soft_deprecation"],
+            slot_hint="reuse_strategy",
+        )
+
+        event = store.soft_deprecate(
+            report.memory_ref,
+            reason="semantic_drift_detected",
+            created_by="ReviewerAgent",
+        )
+        storage_view = store.render_storage_view(report.memory_ref)
+
+        self.assertEqual(event.event_type, "soft_deprecation")
+        self.assertEqual(store._memories[report.memory_ref.memory_id].status, "deprecated")
+        self.assertIn("storage_view", storage_view)
+        self.assertIn("compensating_events", storage_view)
+
+    def test_write_intent_fence_blocks_other_writer_and_records_patch_regeneration(self) -> None:
+        store = MemoryStoreLite()
+        report = store.write_memory_with_report(
+            task_id="W1",
+            source_agent="writer",
+            task_topic="write intent",
+            summary="section depends on this memory",
+            tags=["write_intent"],
+            slot_hint="reuse_strategy",
+        )
+
+        fence = store.open_write_intent(
+            task_id="W1",
+            section_id="section-2",
+            locked_by="ReviewerAgent",
+            read_set=[report.memory_ref],
+            estimated_cost_tokens=2000,
+            ttl_ms=10000,
+        )
+        writer_validation = store.validate_read_set(
+            [report.memory_ref],
+            requester="WriterAgent",
+        )
+        reviewer_validation = store.validate_write_intent(fence.fence_id)
+        patch = store.record_patch_regeneration(
+            section_id="section-2",
+            read_set=[report.memory_ref],
+            patch_summary="regenerate section when fence blocks stale write",
+            estimated_saved_tokens=1200,
+        )
+
+        self.assertTrue(fence.allowed)
+        self.assertFalse(writer_validation.allowed)
+        self.assertTrue(reviewer_validation.allowed)
+        self.assertTrue(patch.regenerated)
+        self.assertIn(report.memory_ref.memory_id, patch.stale_memory_ids)
+
+    def test_layered_memory_writes_warm_sqlite_and_cold_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MemoryStoreLite(storage_dir=Path(tmp))
+            report = store.write_memory_with_report(
+                task_id="P1",
+                source_agent="writer",
+                task_topic="layered memory",
+                summary="memory should appear in warm sqlite and cold file layer",
+                tags=["layered"],
+                slot_hint="reuse_strategy",
+                source_state_ids=["state_layered"],
+            )
+
+            layer = store.layered_storage_report()
+            self.assertGreaterEqual(layer.warm_record_count, 3)
+            self.assertGreaterEqual(layer.cold_record_count, 1)
+            conn = sqlite3.connect(layer.warm_db_path)
+            try:
+                row = conn.execute(
+                    "SELECT payload_json FROM memory_records WHERE kind='memory' AND record_id=?",
+                    (report.memory_ref.memory_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+            self.assertIsNotNone(row)
+            self.assertTrue((Path(layer.cold_dir) / f"{report.memory_ref.memory_id}.json").exists())
 
 
 if __name__ == "__main__":

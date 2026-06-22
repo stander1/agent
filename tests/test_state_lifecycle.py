@@ -7,6 +7,7 @@ from agent_runtime.state.state_pool import (
     AccessEscalationReport,
     ColdAccessBudget,
     LeaseRegistry,
+    LoopBudgetConfig,
     StateAdmissionPolicy,
     StateRef,
     StatePoolLite,
@@ -140,7 +141,14 @@ class StateLifecycleTest(unittest.TestCase):
 
     def test_retry_loop_summary_is_compacted_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            pool = StatePoolLite(Path(tmp))
+            pool = StatePoolLite(
+                Path(tmp),
+                loop_budget_config=LoopBudgetConfig(
+                    max_attempts=2,
+                    max_carried_states=1,
+                    keep_last_k_attempts=1,
+                ),
+            )
             carried_ref, _ = pool.write_state(
                 task_id="T1",
                 source_agent="writer",
@@ -156,6 +164,7 @@ class StateLifecycleTest(unittest.TestCase):
                 attempts=[
                     {"attempt_id": 1, "status": "failed", "summary": "bad json"},
                     {"attempt_id": 2, "status": "fixed", "summary": "valid json"},
+                    {"attempt_id": 3, "status": "fixed", "summary": "valid json again"},
                 ],
                 carried_state_refs=[carried_ref],
             )
@@ -164,6 +173,9 @@ class StateLifecycleTest(unittest.TestCase):
             self.assertEqual(pool._states[retry_ref.state_id].lifecycle, "retry_carried")
             view = pool.render_prompt_view(retry_ref, "ReviewerAgent")
             self.assertIn("retry loop summary", view)
+            payload = Path(pool._states[retry_ref.state_id].payload_ref).read_text(encoding="utf-8")
+            self.assertIn("max_attempts_exceeded", payload)
+            self.assertIn('"compressed_attempt_count": 1', payload)
 
     def test_state_admission_scores_low_value_states_as_audit_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -195,6 +207,123 @@ class StateLifecycleTest(unittest.TestCase):
             self.assertEqual(state_ref.state_type, "artifact_state")
             self.assertEqual(state.admission_status, "audit_only")
             self.assertLess(state.admission_score, 0.5)
+
+    def test_state_lifecycle_sweep_and_supersede_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = StatePoolLite(Path(tmp))
+            old_ref, old_state = pool.write_state(
+                task_id="T1",
+                source_agent="writer",
+                state_type="artifact_state",
+                payload={"artifact_id": "old"},
+                summary="old artifact",
+                usage_hint="artifact_summary",
+                tier="cold",
+            )
+            report = pool.apply_lifecycle_transitions(
+                dormant_after_seconds=0,
+                outdated_after_seconds=999999,
+            )
+            self.assertEqual(report.lifecycle_transition_count, 1)
+            self.assertEqual(old_state.lifecycle, "dormant")
+
+            new_ref, _ = pool.write_state(
+                task_id="T1",
+                source_agent="writer",
+                state_type="artifact_state",
+                payload={"artifact_id": "new"},
+                summary="new artifact",
+                usage_hint="artifact_summary",
+                tier="cold",
+            )
+            transition = pool.supersede_state(old_ref, new_ref, reason="newer_artifact")
+            self.assertTrue(transition.transitioned)
+            self.assertEqual(old_state.lifecycle, "outdated")
+            self.assertEqual(old_state.replacement_state_id, new_ref.state_id)
+
+    def test_cold_access_chunk_index_span_prefetch_and_expected_cost(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = StatePoolLite(
+                Path(tmp),
+                cold_access_budget=ColdAccessBudget(max_cold_reads_per_task=3),
+            )
+            state_ref, _ = pool.write_state(
+                task_id="T1",
+                source_agent="writer",
+                state_type="artifact_state",
+                payload={"artifact_id": "a1"},
+                summary="cold artifact",
+                usage_hint="artifact_summary",
+                tier="cold",
+                audit_payload={
+                    "content": "alpha evidence. needle finding is here. beta appendix.",
+                    "stderr": "no error",
+                },
+            )
+
+            chunks = pool.build_raw_chunk_index(state_ref, chunk_chars=24)
+            span = pool.resolve_raw_span(state_ref, query="needle finding", max_chunks=1)
+            prefetch = pool.prefetch_raw_view([state_ref], query="needle", max_chunks=1)
+            access = pool.request_progressive_access(
+                state_ref,
+                agent_role="ReviewerAgent",
+                reason="verify needle",
+                need_raw=True,
+                expected_summary_tokens=10,
+                expected_request_tokens=10,
+                expected_raw_tokens=100,
+                expected_recovery_tokens=20,
+                raw_need_probability=1.0,
+            )
+
+            self.assertGreaterEqual(len(chunks), 1)
+            self.assertIn("needle", span.content)
+            self.assertEqual(prefetch.prefetched_count, 1)
+            self.assertIsInstance(access, AccessEscalationReport)
+            self.assertEqual(access.decision_basis, "raw_first_expected_cost_model")
+            self.assertEqual(access.reason, "raw_first_expected_cost_lower")
+            self.assertTrue(access.cold_access.chunk_ids)
+
+    def test_gc_protects_retry_and_dag_live_states_and_prunes_io_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = StatePoolLite(
+                Path(tmp),
+                quota_config=StateQuotaConfig(max_task_states=1, max_task_bytes=10_000),
+                cold_access_budget=ColdAccessBudget(max_raw_view_tokens=1, max_cold_reads_per_task=3),
+            )
+            retry_ref, retry_state = pool.write_state(
+                task_id="T1",
+                source_agent="runtime",
+                state_type="artifact_state",
+                payload={"artifact_id": "retry"},
+                summary="retry protected",
+                usage_hint="artifact_summary",
+                tier="cold",
+                audit_payload={"content": "retry raw"},
+                retry_ref_count=1,
+            )
+            dag_ref, dag_state = pool.write_state(
+                task_id="T1",
+                source_agent="runtime",
+                state_type="artifact_state",
+                payload={"artifact_id": "dag"},
+                summary="dag protected",
+                usage_hint="artifact_summary",
+                tier="cold",
+                audit_payload={"content": "dag raw"},
+                dependency_ref_count=1,
+            )
+            pool._raw_view_cache["oversized"] = (100, {"content": "x" * 100})
+
+            report = pool.collect_garbage(max_deleted=2)
+
+            self.assertGreaterEqual(report.retry_carried_protected_count, 1)
+            self.assertGreaterEqual(report.dag_liveness_protected_count, 1)
+            self.assertGreaterEqual(report.raw_cache_evicted_count, 1)
+            self.assertNotEqual(retry_state.lifecycle, "evicted")
+            self.assertNotEqual(dag_state.lifecycle, "evicted")
+            self.assertIn(retry_ref.state_id, pool._states)
+            self.assertIn(dag_ref.state_id, pool._states)
 
 
 class ReadinessBarrierTest(unittest.TestCase):
