@@ -37,7 +37,7 @@ def run_llm_benchmark(
     metrics = MetricsCollector()
     trace = TraceLogger(output_dir)
     state_pool = StatePoolLite(output_dir)
-    memory_store = MemoryStoreLite()
+    memory_store = MemoryStoreLite(output_dir / "memory")
     token_counter = TokenCounter(
         tokenizer_name=tokenizer_name,
         model_name=model_name,
@@ -65,36 +65,37 @@ def run_llm_benchmark(
     )
     deliverables: list[dict] = []
     deliverables_jsonl = output_dir / "deliverables.jsonl"
-    with deliverables_jsonl.open("w", encoding="utf-8") as deliverable_stream:
-        for round_id in range(1, rounds + 1):
-            for mode in modes:
-                for task in tasks:
-                    output = runtime.run_task(task=task, round_id=round_id, mode=mode)
-                    record = build_deliverable_record(
-                        task=task,
-                        round_id=round_id,
-                        mode=mode,
-                        output=output,
-                    )
-                    deliverables.append(record)
-                    deliverable_stream.write(
-                        json.dumps(record, ensure_ascii=False) + "\n"
-                    )
-                    deliverable_stream.flush()
-
-    runtime.flush_background_tasks()
-    metrics.export(output_dir)
-    summary = metrics.summary()
-    summary["llm_config"] = llm_config.without_secret()
-    with (output_dir / "summary.json").open("w", encoding="utf-8") as fh:
-        json.dump(summary, fh, ensure_ascii=False, indent=2)
-    with (output_dir / "deliverables.json").open("w", encoding="utf-8") as fh:
-        json.dump(
-            {"count": len(deliverables), "deliverables": deliverables},
-            fh,
-            ensure_ascii=False,
-            indent=2,
-        )
+    try:
+        with deliverables_jsonl.open("w", encoding="utf-8") as deliverable_stream:
+            for round_id in range(1, rounds + 1):
+                for mode in modes:
+                    for task in tasks:
+                        output = runtime.run_task(task=task, round_id=round_id, mode=mode)
+                        record = build_deliverable_record(
+                            task=task,
+                            round_id=round_id,
+                            mode=mode,
+                            output=output,
+                        )
+                        deliverables.append(record)
+                        deliverable_stream.write(
+                            json.dumps(record, ensure_ascii=False) + "\n"
+                        )
+                        deliverable_stream.flush()
+    finally:
+        runtime.close()
+        metrics.export(output_dir)
+        summary = metrics.summary()
+        summary["llm_config"] = llm_config.without_secret()
+        with (output_dir / "summary.json").open("w", encoding="utf-8") as fh:
+            json.dump(summary, fh, ensure_ascii=False, indent=2)
+        with (output_dir / "deliverables.json").open("w", encoding="utf-8") as fh:
+            json.dump(
+                {"count": len(deliverables), "deliverables": deliverables},
+                fh,
+                ensure_ascii=False,
+                indent=2,
+            )
     return summary
 
 

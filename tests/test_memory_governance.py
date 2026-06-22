@@ -275,6 +275,45 @@ class MemoryGovernanceTest(unittest.TestCase):
             self.assertIsNotNone(row)
             self.assertTrue((Path(layer.cold_dir) / f"{report.memory_ref.memory_id}.json").exists())
 
+    def test_layered_memory_reloads_without_snapshot_and_keeps_claim_semantics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage_dir = Path(tmp)
+            store = MemoryStoreLite(storage_dir=storage_dir)
+            report = store.write_memory_with_report(
+                task_id="R1",
+                source_agent="reviewer",
+                task_topic="persistent travel constraint",
+                summary="Avoid overnight trains in future travel plans.",
+                tags=["travel_reload"],
+                slot_hint="travel_preference",
+                source_state_ids=["state_reload"],
+                evidence_refs=["evidence_reload"],
+                confidence=0.93,
+                claim_type="preference",
+                polarity="negative",
+                modality="preferred",
+                temporal_scope="future",
+                schema_version="ccf.v2-test",
+            )
+            (storage_dir / "memory_store_snapshot.json").unlink()
+
+            restored = MemoryStoreLite(storage_dir=storage_dir)
+            refs = restored.search_memory(
+                "future travel plans overnight trains",
+                tags=["travel_reload"],
+            )
+            restored_memory = restored._memories[report.memory_ref.memory_id]
+            restored_claim = restored._claims[restored_memory.claim_id]
+
+            self.assertIn(report.memory_ref.memory_id, [item.memory_id for item in refs])
+            self.assertEqual(restored_claim.claim_type, "preference")
+            self.assertEqual(restored_claim.polarity, "negative")
+            self.assertEqual(restored_claim.modality, "preferred")
+            self.assertEqual(restored_claim.temporal_scope, "future")
+            self.assertEqual(restored_claim.schema_version, "ccf.v2-test")
+            self.assertIn(restored_memory.promotion_view_id, restored._promotion_views)
+            self.assertTrue(restored.memory_references(report.memory_ref))
+
 
 if __name__ == "__main__":
     unittest.main()

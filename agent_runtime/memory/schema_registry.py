@@ -83,6 +83,7 @@ class SchemaRegistryLite:
         polarity: str = "positive",
         modality: str = "asserted",
         temporal_scope: str = "current_task",
+        schema_version: str = "ccf.v1-lite",
     ) -> CanonicalClaimLite:
         return CanonicalClaimLite(
             subject=subject,
@@ -94,6 +95,7 @@ class SchemaRegistryLite:
             temporal_scope=temporal_scope,
             source_agent=source_agent,
             confidence=confidence,
+            schema_version=schema_version,
         )
 
     @staticmethod

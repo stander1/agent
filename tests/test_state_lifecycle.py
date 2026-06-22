@@ -48,9 +48,11 @@ class StateLifecycleTest(unittest.TestCase):
             self.assertEqual(first.lifecycle, "evicted")
             self.assertIn(first_ref.state_id, pool._tombstones)
 
-            swept = pool.sweep_tombstones(max_swept=1)
+            swept = pool.sweep_tombstones(max_swept=1, min_age_seconds=0)
             self.assertEqual(swept.physical_delete_count, 1)
             self.assertEqual(first.lifecycle, "deleted")
+            self.assertNotIn(first_ref.state_id, pool._states)
+            self.assertIn("state_tombstone", pool.render_prompt_view(first_ref, "ReviewerAgent"))
 
     def test_cold_access_budget_allows_then_blocks_raw_reads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -207,6 +209,36 @@ class StateLifecycleTest(unittest.TestCase):
             self.assertEqual(state_ref.state_type, "artifact_state")
             self.assertEqual(state.admission_status, "audit_only")
             self.assertLess(state.admission_score, 0.5)
+            payload = Path(state.payload_ref).read_text(encoding="utf-8")
+            self.assertIn('"admission_status": "audit_only"', payload)
+            self.assertNotIn('"artifact_id": "low_value"', payload)
+
+    def test_fencing_token_validation_rejects_released_and_stale_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = StatePoolLite(Path(tmp))
+            state_ref, state = pool.write_state(
+                task_id="T1",
+                source_agent="writer",
+                state_type="artifact_state",
+                payload={"artifact_id": "a1"},
+                summary="artifact",
+                usage_hint="artifact_summary",
+                tier="cold",
+            )
+            lease = pool.leases.acquire_read_lease(state_ref.state_id)
+            self.assertTrue(
+                pool.validate_fencing_token(
+                    state_ref, lease.fencing_token, expected_version=state.version
+                )
+            )
+            state.version += 1
+            self.assertFalse(
+                pool.validate_fencing_token(
+                    state_ref, lease.fencing_token, expected_version=state_ref.version
+                )
+            )
+            pool.leases.release_read_lease(lease.fencing_token)
+            self.assertFalse(pool.validate_fencing_token(state_ref, lease.fencing_token))
 
     def test_state_lifecycle_sweep_and_supersede_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,2 +1,1 @@
 tiktoken>=0.13.0
-transformers>=5.0.0

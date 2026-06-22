@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import json
@@ -104,6 +104,7 @@ class StateQuotaConfig:
     max_task_states: int = 24
     max_task_bytes: int = 256_000
     max_hot_states: int = 12
+    tombstone_grace_seconds: float = 300.0
 
 
 @dataclass(slots=True)
@@ -355,6 +356,7 @@ class StatePoolLite:
         ):
             path.mkdir(parents=True, exist_ok=True)
         self._states: dict[str, StateObject] = {}
+        self._hot_payloads: dict[str, dict[str, Any]] = {}
         self._tombstones: dict[str, dict[str, Any]] = {}
         self._lineage_state_ids: set[str] = set()
         self.quota_config = quota_config or StateQuotaConfig()
@@ -395,7 +397,7 @@ class StatePoolLite:
         if lifecycle not in STATE_LIFECYCLE_STATES:
             raise ValueError(f"Unknown state lifecycle: {lifecycle}")
         state_id = self._next_state_id(task_id, source_agent, state_type, payload)
-        tier = tier or self._default_tier(state_type, payload)
+        requested_tier = tier
         payload_to_store = dict(payload)
 
         audit_payload_ref = None
@@ -411,14 +413,39 @@ class StatePoolLite:
                 audit_encoded.encode("utf-8")
             ).hexdigest()
 
-        encoded = json.dumps(payload_to_store, ensure_ascii=False, indent=2)
+        original_encoded = json.dumps(payload_to_store, ensure_ascii=False, indent=2)
         admission = self.assess_state_admission(
             state_type=state_type,
-            payload_bytes=len(encoded.encode("utf-8")) + audit_size_bytes,
+            payload_bytes=len(original_encoded.encode("utf-8")) + audit_size_bytes,
             downstream_need=downstream_need,
             confidence=confidence,
             novelty=novelty,
         )
+        if requested_tier is None:
+            tier = self._tier_from_admission(
+                state_type=state_type,
+                payload=payload,
+                payload_bytes=len(original_encoded.encode("utf-8")) + audit_size_bytes,
+                admission=admission,
+                has_audit_payload=audit_payload_ref is not None,
+            )
+        else:
+            tier = requested_tier
+        if not admission.admitted:
+            payload_to_store = {
+                "admission_status": admission.status,
+                "summary": summary,
+                "original_payload_hash": hashlib.sha256(
+                    original_encoded.encode("utf-8")
+                ).hexdigest(),
+                "original_payload_bytes": len(original_encoded.encode("utf-8")),
+            }
+            if audit_payload_ref:
+                payload_to_store["audit_payload_ref"] = audit_payload_ref
+                payload_to_store["audit_payload_hash"] = hashlib.sha256(
+                    Path(audit_payload_ref).read_bytes()
+                ).hexdigest()
+        encoded = json.dumps(payload_to_store, ensure_ascii=False, indent=2)
         path = self._tier_dir(tier) / f"{state_id}.json"
         path.write_text(encoded, encoding="utf-8")
         content_hash = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -449,6 +476,8 @@ class StatePoolLite:
             status_updated_at=datetime.now(timezone.utc).isoformat(),
         )
         self._states[state_id] = state
+        if tier == "hot":
+            self._hot_payloads[state_id] = dict(payload_to_store)
         state_ref = StateRef(
             state_id=state.state_id,
             state_type=state.state_type,
@@ -524,7 +553,22 @@ class StatePoolLite:
     def render_prompt_view_with_report(
         self, state_ref: StateRef, agent_role: str, budget_chars: int = 900
     ) -> tuple[str, StateAccessReport]:
-        state = self._states[state_ref.state_id]
+        state = self._states.get(state_ref.state_id)
+        if state is None:
+            tombstone = self._tombstones.get(state_ref.state_id)
+            if tombstone is None:
+                raise KeyError(state_ref.state_id)
+            rendered = (
+                f"[state_tombstone:{state_ref.state_id}] state no longer has prompt payload; "
+                f"lifecycle=deleted; "
+                f"fallback_summary={tombstone.get('fallback_summary', '')}"
+            )
+            return rendered[:budget_chars], StateAccessReport(
+                state_id=state_ref.state_id,
+                access_level="summary",
+                read_lease_acquire_count=0,
+                summary_access_count=1,
+            )
         self._mark_accessed(state)
         if state.lifecycle in {"deleted", "tombstoned", "evicted"}:
             tombstone = self._tombstones.get(state.state_id, {})
@@ -536,12 +580,13 @@ class StatePoolLite:
             report = StateAccessReport(
                 state_id=state.state_id,
                 access_level="summary",
+                read_lease_acquire_count=0,
                 summary_access_count=1,
             )
             return rendered[:budget_chars], report
 
         with self.leases.read_lease(state.state_id, owner=agent_role) as lease:
-            payload = json.loads(Path(state.payload_ref).read_text(encoding="utf-8"))
+            payload = self._load_prompt_payload(state)
 
             if state.state_type == "retrieval_state":
                 ranked = payload.get("evidence_rank", [])
@@ -890,12 +935,25 @@ class StatePoolLite:
                 report.quota_evicted_count += 1
         return report
 
-    def sweep_tombstones(self, *, max_swept: int = 8) -> StateGCReport:
+    def sweep_tombstones(
+        self,
+        *,
+        max_swept: int = 8,
+        min_age_seconds: float | None = None,
+    ) -> StateGCReport:
         report = StateGCReport()
+        grace_seconds = (
+            self.quota_config.tombstone_grace_seconds
+            if min_age_seconds is None
+            else max(0.0, min_age_seconds)
+        )
+        now = datetime.now(timezone.utc)
         evicted = [
             state
             for state in self._states.values()
             if state.lifecycle == "evicted" and self.leases.active_readers(state.state_id) == 0
+            and state.evicted_at is not None
+            and (now - self._parse_dt(state.evicted_at)).total_seconds() >= grace_seconds
         ]
         evicted.sort(key=lambda item: item.evicted_at or item.created_at)
         for state in evicted[:max_swept]:
@@ -905,6 +963,11 @@ class StatePoolLite:
             old = state.lifecycle
             state.lifecycle = "deleted"
             state.version += 1
+            self._hot_payloads.pop(state.state_id, None)
+            self._raw_view_cache.pop(state.state_id, None)
+            self._raw_chunk_index.pop(state.state_id, None)
+            self._lineage_state_ids.discard(state.state_id)
+            self._states.pop(state.state_id, None)
             report.physical_delete_count += 1
             report.lifecycle_transition_count += int(old != state.lifecycle)
         return report
@@ -1054,6 +1117,30 @@ class StatePoolLite:
 
     def ref_to_dict(self, state_ref: StateRef) -> dict[str, Any]:
         return asdict(state_ref)
+
+    def validate_fencing_token(
+        self,
+        state_ref: StateRef,
+        fencing_token: str,
+        *,
+        expected_version: int | None = None,
+    ) -> bool:
+        state = self._states.get(state_ref.state_id)
+        if state is None or state.lifecycle in {"deleted", "evicted"}:
+            return False
+        if expected_version is not None and state.version != expected_version:
+            return False
+        return fencing_token in self.leases.active_fencing_tokens(state.state_id)
+
+    def finalize_task(self, task_id: str) -> None:
+        self._cold_read_counts.pop(task_id, None)
+        self._cold_read_bytes.pop(task_id, None)
+        self._prefetch_queue = [
+            state_id
+            for state_id in self._prefetch_queue
+            if self._states.get(state_id) is not None
+            and self._states[state_id].task_id != task_id
+        ]
 
     def mark_lineage(self, state_ids: list[str]) -> None:
         self._lineage_state_ids.update(state_ids)
@@ -1286,6 +1373,30 @@ class StatePoolLite:
         if len(encoded) > 8192:
             return "cold"
         return "warm"
+
+    def _tier_from_admission(
+        self,
+        *,
+        state_type: str,
+        payload: dict[str, Any],
+        payload_bytes: int,
+        admission: StateAdmissionReport,
+        has_audit_payload: bool,
+    ) -> StateTier:
+        if not admission.admitted:
+            return "cold" if has_audit_payload else "warm"
+        if state_type == "artifact_state" or payload_bytes > 8192:
+            return "cold"
+        if admission.score >= 0.75:
+            return "hot"
+        return self._default_tier(state_type, payload)
+
+    def _load_prompt_payload(self, state: StateObject) -> dict[str, Any]:
+        if state.tier == "hot":
+            payload = self._hot_payloads.get(state.state_id)
+            if payload is not None:
+                return dict(payload)
+        return json.loads(Path(state.payload_ref).read_text(encoding="utf-8"))
 
     def _next_state_id(
         self, task_id: str, source_agent: str, state_type: str, payload: dict[str, Any]

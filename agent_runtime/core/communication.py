@@ -95,7 +95,12 @@ class CapabilityProfileManagerLite:
         "reviewer": CapabilityProfile(
             agent_id="reviewer",
             role="ReviewerAgent",
-            capabilities={"validation", "schema_review", "failure_review"},
+            capabilities={
+                "validation",
+                "schema_review",
+                "failure_review",
+                "final_deliverable_review",
+            },
             accepted_state_types={
                 "artifact_state",
                 "failure_state",
@@ -343,3 +348,7 @@ class ControlBudgetLite:
             scoring_assist_allowed=allowed and scoring_confidence < 0.65,
             llm_fallback_allowed=allowed and requires_llm_fallback,
         )
+
+    def finalize_task(self, task_id: str) -> None:
+        self._decision_counts.pop(task_id, None)
+        self._token_counts.pop(task_id, None)

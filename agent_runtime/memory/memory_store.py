@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import json
@@ -335,6 +335,7 @@ class MemoryStoreLite:
         self.warm_db_path = self.storage_dir / "memory_warm.sqlite" if self.storage_dir else None
         self.cold_memory_dir = self.storage_dir / "memory_cold" if self.storage_dir else None
         self._init_layered_storage()
+        self._load_layered_storage()
 
     def write_memory(
         self,
@@ -349,6 +350,11 @@ class MemoryStoreLite:
         evidence_refs: list[str] | None = None,
         reuse_intent: str | None = None,
         confidence: float = 0.78,
+        claim_type: str = "fact",
+        polarity: str = "positive",
+        modality: str = "asserted",
+        temporal_scope: str = "current_task",
+        schema_version: str = "ccf.v1-lite",
     ) -> MemoryRef:
         return self.write_memory_with_report(
             task_id=task_id,
@@ -361,6 +367,11 @@ class MemoryStoreLite:
             evidence_refs=evidence_refs,
             reuse_intent=reuse_intent,
             confidence=confidence,
+            claim_type=claim_type,
+            polarity=polarity,
+            modality=modality,
+            temporal_scope=temporal_scope,
+            schema_version=schema_version,
         ).memory_ref
 
     def write_memory_with_report(
@@ -376,6 +387,11 @@ class MemoryStoreLite:
         evidence_refs: list[str] | None = None,
         reuse_intent: str | None = None,
         confidence: float = 0.78,
+        claim_type: str = "fact",
+        polarity: str = "positive",
+        modality: str = "asserted",
+        temporal_scope: str = "current_task",
+        schema_version: str = "ccf.v1-lite",
     ) -> MemoryWriteReport:
         resolved = self._resolve_slot(slot_hint or self._infer_slot_hint(tags, task_topic))
         source_state_ids = source_state_ids or []
@@ -401,6 +417,11 @@ class MemoryStoreLite:
             value=summary,
             source_agent=source_agent,
             confidence=confidence,
+            claim_type=claim_type,
+            polarity=polarity,
+            modality=modality,
+            temporal_scope=temporal_scope,
+            schema_version=schema_version,
         )
         slot_policy = self.schema_registry.policy_for(resolved.slot_id)
         claim = ClaimCard(
@@ -565,6 +586,11 @@ class MemoryStoreLite:
             evidence_refs=evidence_refs,
             reuse_intent=reuse_intent,
             confidence=confidence,
+            claim_type=str(card.get("claim_type") or "fact"),
+            polarity=str(card.get("polarity") or "positive"),
+            modality=str(card.get("modality") or "asserted"),
+            temporal_scope=str(card.get("temporal_scope") or "current_task"),
+            schema_version=str(card.get("schema_version") or "ccf.v1-lite"),
         )
         report.memory_ref = write_report.memory_ref
         report.memory_write_count = write_report.memory_write_count
@@ -1232,6 +1258,83 @@ class MemoryStoreLite:
             conn.commit()
         finally:
             conn.close()
+
+    def _load_layered_storage(self) -> None:
+        if self.storage_dir is None or self.warm_db_path is None:
+            return
+        conn = sqlite3.connect(self.warm_db_path, timeout=30.0)
+        try:
+            rows = conn.execute(
+                "SELECT kind, record_id, payload_json FROM memory_records"
+            ).fetchall()
+        finally:
+            conn.close()
+        for kind, record_id, payload_json in rows:
+            payload = json.loads(payload_json)
+            if kind == "memory":
+                self._memories[record_id] = MemoryObject(**payload)
+            elif kind == "claim":
+                self._claims[record_id] = ClaimCard(**payload)
+            elif kind == "memory_view":
+                self._views[record_id] = MemoryView(**payload)
+
+        cold_references: list[dict[str, object]] = []
+        if self.cold_memory_dir and self.cold_memory_dir.exists():
+            for path in self.cold_memory_dir.glob("*.json"):
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                promotion_payload = payload.get("promotion_view")
+                if isinstance(promotion_payload, dict):
+                    promotion = PromotionView(**promotion_payload)
+                    self._promotion_views[promotion.promotion_view_id] = promotion
+                references = payload.get("references", [])
+                if isinstance(references, list):
+                    cold_references.extend(
+                        item for item in references if isinstance(item, dict)
+                    )
+        self.reference_manager.restore(cold_references)
+
+        snapshot_path = self.storage_dir / "memory_store_snapshot.json"
+        if not snapshot_path.exists():
+            return
+        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        for payload in snapshot.get("memories", []):
+            memory = MemoryObject(**payload)
+            self._memories.setdefault(memory.memory_id, memory)
+        for payload in snapshot.get("claim_cards", []):
+            claim = ClaimCard(**payload)
+            self._claims.setdefault(claim.claim_id, claim)
+        for payload in snapshot.get("memory_views", []):
+            view = MemoryView(**payload)
+            self._views.setdefault(view.memory_view_id, view)
+        for payload in snapshot.get("promotion_views", []):
+            view = PromotionView(**payload)
+            self._promotion_views[view.promotion_view_id] = view
+        for payload in snapshot.get("memory_candidates", []):
+            candidate = MemoryCandidate(**payload)
+            self._memory_candidates[candidate.candidate_id] = candidate
+        for payload in snapshot.get("claim_candidates", []):
+            candidate = ClaimCandidate(**payload)
+            self._claim_candidates[candidate.candidate_id] = candidate
+        self.reference_manager.restore(snapshot.get("memory_references", []))
+        self._compaction_log = list(snapshot.get("compaction_log", []))
+        self._compensating_events = [
+            CompensatingEvent(**payload)
+            for payload in snapshot.get("compensating_events", [])
+        ]
+        self._write_intents = {
+            fence.fence_id: fence
+            for fence in (
+                WriteIntentFence(**payload)
+                for payload in snapshot.get("write_intents", [])
+            )
+        }
+        self._section_dependency_map = dict(
+            snapshot.get("section_dependency_map", {})
+        )
+        self._patch_regeneration_log = [
+            PatchRegenerationReport(**payload)
+            for payload in snapshot.get("patch_regeneration_log", [])
+        ]
 
     def _persist_layered_records(self) -> None:
         if self.storage_dir is None or self.warm_db_path is None or self.cold_memory_dir is None:

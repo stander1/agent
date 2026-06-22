@@ -32,7 +32,7 @@ def run_v0_benchmark(
     metrics = MetricsCollector()
     trace = TraceLogger(output_dir)
     state_pool = StatePoolLite(output_dir)
-    memory_store = MemoryStoreLite()
+    memory_store = MemoryStoreLite(output_dir / "memory")
     token_counter = TokenCounter(
         tokenizer_name=tokenizer_name,
         model_name=model_name,
@@ -51,14 +51,15 @@ def run_v0_benchmark(
     for path in task_suite_paths:
         tasks.extend(load_task_suite(path))
 
-    for round_id in range(1, rounds + 1):
-        for mode in modes:
-            for task in tasks:
-                runtime.run_task(task=task, round_id=round_id, mode=mode)
-
-    runtime.flush_background_tasks()
-    metrics.export(output_dir)
-    summary = metrics.summary()
-    with (output_dir / "summary.json").open("w", encoding="utf-8") as fh:
-        json.dump(summary, fh, ensure_ascii=False, indent=2)
+    try:
+        for round_id in range(1, rounds + 1):
+            for mode in modes:
+                for task in tasks:
+                    runtime.run_task(task=task, round_id=round_id, mode=mode)
+    finally:
+        runtime.close()
+        metrics.export(output_dir)
+        summary = metrics.summary()
+        with (output_dir / "summary.json").open("w", encoding="utf-8") as fh:
+            json.dump(summary, fh, ensure_ascii=False, indent=2)
     return summary

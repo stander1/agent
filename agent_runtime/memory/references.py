@@ -115,3 +115,16 @@ class MemoryReferenceManagerLite:
 
     def snapshot(self) -> list[dict[str, object]]:
         return [record.to_dict() for record in self._records.values()]
+
+    def restore(self, records: list[dict[str, object]]) -> int:
+        restored = 0
+        for payload in records:
+            try:
+                record = MemoryReferenceRecord(**payload)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                continue
+            self._records[record.ref_id] = record
+            if record.replacement_memory_id:
+                self._replacement_chain[record.memory_id] = record.replacement_memory_id
+            restored += 1
+        return restored

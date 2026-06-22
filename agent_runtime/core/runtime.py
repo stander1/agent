@@ -3,6 +3,8 @@ from __future__ import annotations
 from concurrent.futures import Future, ThreadPoolExecutor
 import hashlib
 import json
+import re
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -73,7 +75,12 @@ class V0Runtime:
     """Deterministic v0 runtime for baseline measurement."""
 
     MAX_FORMAT_RETRY_INPUT_TOKENS = 800
-    FINAL_DELIVERABLE_AGENTS = {"writer", "reviewer"}
+    DELIVERABLE_VIEW_BUDGET_CHARS = 2200
+    HANDOFF_SUMMARY_CHARS = 160
+    LITE_CONTEXT_SUMMARY_CHARS = 180
+    ARTIFACT_PAYLOAD_SUMMARY_CHARS = 240
+    ARTIFACT_STATE_SUMMARY_CHARS = 120
+    GC_PROTECTED_RECENT_STATE_COUNT = 6
 
     def __init__(
         self,
@@ -102,8 +109,55 @@ class V0Runtime:
             thread_name_prefix="cmjcc-memory",
         )
         self._background_memory_jobs: list[BackgroundMemoryJob] = []
+        self._background_jobs_lock = threading.RLock()
+        self._closed = False
 
     def run_task(self, task: TaskSpec, round_id: int, mode: Mode) -> AgentOutput:
+        if self._closed:
+            raise RuntimeError("Runtime is closed")
+        started = time.perf_counter()
+        try:
+            return self._run_task_impl(task, round_id, mode)
+        except Exception as exc:
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            self.metrics.finish_task(
+                task_id=task.task_id,
+                round_id=round_id,
+                mode=mode,
+                latency_ms=elapsed_ms,
+                success=False,
+            )
+            failure_payload = {
+                "task_id": task.task_id,
+                "round_id": round_id,
+                "mode": mode,
+                "latency_ms": elapsed_ms,
+                "success": False,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+            self.trace.write("task_failed", failure_payload)
+            self.trace.write("task_finished", failure_payload)
+            snapshot_writer = getattr(self, "_write_pool_snapshot", None)
+            if callable(snapshot_writer):
+                try:
+                    snapshot_writer(task=task, round_id=round_id, mode=mode)
+                except Exception as snapshot_exc:
+                    self.trace.write(
+                        "pool_snapshot_failed",
+                        {
+                            "task_id": task.task_id,
+                            "round_id": round_id,
+                            "mode": mode,
+                            "error": repr(snapshot_exc),
+                        },
+                    )
+            raise
+        finally:
+            self.state_pool.finalize_task(task.task_id)
+            self.control_budget.finalize_task(task.task_id)
+
+    def _run_task_impl(self, task: TaskSpec, round_id: int, mode: Mode) -> AgentOutput:
         started = time.perf_counter()
         history_key = (round_id, mode)
         full_history = self._baseline_full_history.get(history_key, [])
@@ -154,7 +208,7 @@ class V0Runtime:
                 deliverable_view = self.memory_store.render_deliverable_view(
                     task_memory_refs,
                     task_title=task.title,
-                    budget_chars=2200,
+                    budget_chars=self.DELIVERABLE_VIEW_BUDGET_CHARS,
                 )
             if task_memory_prompt_views:
                 self.metrics.record_memory_retrieval(
@@ -195,7 +249,7 @@ class V0Runtime:
                         agent_deliverable_view = self.memory_store.render_deliverable_view(
                             agent_memory_refs,
                             task_title=task.title,
-                            budget_chars=2200,
+                            budget_chars=self.DELIVERABLE_VIEW_BUDGET_CHARS,
                         )
 
             memory_prompt_views = (
@@ -212,10 +266,10 @@ class V0Runtime:
                 state_refs=state_refs,
                 memory_prompt_views=memory_prompt_views,
                 deliverable_view=agent_deliverable_view
-                if mode == "runtime_lite" and agent.agent_id in self.FINAL_DELIVERABLE_AGENTS
+                if mode == "runtime_lite" and self._is_final_deliverable_agent(agent)
                 else "",
                 deliverable_schema_prompt=deliverable_schema_prompt
-                if mode == "runtime_lite" and agent.agent_id in self.FINAL_DELIVERABLE_AGENTS
+                if mode == "runtime_lite" and self._is_final_deliverable_agent(agent)
                 else "",
                 agent_role=agent.role,
             )
@@ -333,7 +387,7 @@ class V0Runtime:
                         hit_count=hit_count,
                         required_count=required_count,
                     )
-            if agent.agent_id in self.FINAL_DELIVERABLE_AGENTS:
+            if self._is_final_deliverable_agent(agent):
                 final_deliverable_output = output
             llm_meta = output.metadata.get("llm", {})
             if llm_meta:
@@ -354,7 +408,9 @@ class V0Runtime:
             current_task_outputs.append(output)
 
             output_state_refs: list[StateRef] = []
-            output_memory_refs: list[MemoryRef] = []
+            output_memory_refs: list[MemoryRef] = (
+                list(agent_memory_refs) if mode == "runtime_lite" else []
+            )
             message_content = output.content
             if mode == "runtime_lite":
                 written_state_refs = self._write_agent_state(
@@ -380,7 +436,7 @@ class V0Runtime:
                     mode=mode,
                     from_agent=agent.agent_id,
                     next_receiver=self._next_agent_id(agent.agent_id),
-                    summary=self._summary(output.content, 160),
+                    summary=self._summary(output.content, self.HANDOFF_SUMMARY_CHARS),
                     state_refs=output_state_refs,
                     memory_refs=output_memory_refs,
                 )
@@ -391,7 +447,7 @@ class V0Runtime:
                             f"{agent.agent_id} 完成阶段输出；"
                             f"state_refs={[ref.state_id for ref in output_state_refs]}; "
                             f"memory_refs={[ref.memory_id for ref in output_memory_refs]}; "
-                            f"summary={self._summary(output.content, 180)}"
+                            f"summary={self._summary(output.content, self.LITE_CONTEXT_SUMMARY_CHARS)}"
                         ),
                     )
                 )
@@ -405,12 +461,11 @@ class V0Runtime:
                 content=message_content,
                 state_refs=[ref.state_id for ref in output_state_refs],
                 memory_refs=[ref.memory_id for ref in output_memory_refs],
-                cost_report={
-                    "direct_text_tokens": 0,
-                    "prompt_tokens": 0,
-                    "retrieved_memory_tokens": 0,
-                    "control_llm_tokens": 0,
-                },
+                cost_report=self._build_message_cost_report(
+                    message_content=message_content,
+                    prompt=prompt,
+                    memory_prompt_views=memory_prompt_views,
+                ),
             )
             self.metrics.record_message(message, self.token_counter)
             self.trace.write("message_sent", asdict(message))
@@ -426,6 +481,23 @@ class V0Runtime:
                     "memory_refs": [asdict(ref) for ref in output_memory_refs],
                 },
             )
+            if mode == "runtime_lite":
+                gate = self._handoff_gate(message_content)
+                if not gate.get("allowed", False):
+                    self.trace.write(
+                        "communication_handoff_blocked",
+                        {
+                            "task_id": task.task_id,
+                            "round_id": round_id,
+                            "sender": agent.agent_id,
+                            "allowed_next_step": gate.get("allowed_next_step", ""),
+                            "reasons": gate.get("reasons", []),
+                        },
+                    )
+                    raise RuntimeError(
+                        "Communication gate blocked handoff: "
+                        f"{gate.get('allowed_next_step', 'review_required')}"
+                    )
             previous_sender = agent.agent_id
 
         if mode == "runtime_lite" and memory_refs_used:
@@ -439,9 +511,13 @@ class V0Runtime:
             self._baseline_full_history[history_key] = full_history + current_task_outputs
         if mode == "runtime_lite":
             gc_report = self.state_pool.collect_garbage(
-                protected_state_ids={ref.state_id for ref in state_refs[-6:]},
+                protected_state_ids={
+                    ref.state_id
+                    for ref in state_refs[-self.GC_PROTECTED_RECENT_STATE_COUNT :]
+                },
                 max_deleted=2,
             )
+            self.state_pool.sweep_tombstones(max_swept=2)
             self.metrics.record_state_gc(
                 task_id=task.task_id,
                 round_id=round_id,
@@ -490,6 +566,23 @@ class V0Runtime:
     def flush_background_tasks(self) -> None:
         self._drain_background_memory_jobs(reason="benchmark_finished")
 
+    def close(self) -> None:
+        if self._closed:
+            return
+        try:
+            self.flush_background_tasks()
+        finally:
+            self._background_executor.shutdown(wait=True, cancel_futures=False)
+            self._baseline_full_history.clear()
+            self._closed = True
+
+    def __enter__(self) -> "V0Runtime":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        del exc_type, exc, traceback
+        self.close()
+
     def _schedule_runtime_memory_write(
         self,
         *,
@@ -514,16 +607,17 @@ class V0Runtime:
             source_state_ids=source_state_ids,
             evidence_refs=evidence_refs,
         )
-        self._background_memory_jobs.append(
-            BackgroundMemoryJob(
-                task_id=task.task_id,
-                round_id=round_id,
-                mode=mode,
-                agent_id=agent.agent_id,
-                future=future,
-                scheduled_at=time.perf_counter(),
+        with self._background_jobs_lock:
+            self._background_memory_jobs.append(
+                BackgroundMemoryJob(
+                    task_id=task.task_id,
+                    round_id=round_id,
+                    mode=mode,
+                    agent_id=agent.agent_id,
+                    future=future,
+                    scheduled_at=time.perf_counter(),
+                )
             )
-        )
         self.metrics.record_background_memory_job(
             task_id=task.task_id,
             round_id=round_id,
@@ -546,10 +640,11 @@ class V0Runtime:
         )
 
     def _drain_background_memory_jobs(self, *, reason: str) -> None:
-        if not self._background_memory_jobs:
-            return
-        jobs = self._background_memory_jobs
-        self._background_memory_jobs = []
+        with self._background_jobs_lock:
+            if not self._background_memory_jobs:
+                return
+            jobs = self._background_memory_jobs
+            self._background_memory_jobs = []
         self.trace.write(
             "background_memory_flush_started",
             {
@@ -1104,10 +1199,15 @@ class V0Runtime:
                 "stderr_ref": None,
                 "file_path": None,
                 "sha256": sha256,
-                "summary": self._summary(output.content, 240),
+                "summary": self._summary(
+                    output.content, self.ARTIFACT_PAYLOAD_SUMMARY_CHARS
+                ),
             }
             state_type = "artifact_state"
-            summary = f"{agent.agent_id} 产物状态：{self._summary(output.content, 120)}"
+            summary = (
+                f"{agent.agent_id} 产物状态："
+                f"{self._summary(output.content, self.ARTIFACT_STATE_SUMMARY_CHARS)}"
+            )
             usage_hint = "artifact_summary"
             tier = "cold"
             access_policy = "prompt_view_with_audit_cold_access"
@@ -1129,9 +1229,6 @@ class V0Runtime:
                 audit_payload=audit_payload,
             )
         ]
-
-    def _build_retrieval_payload(self, task: TaskSpec) -> dict:
-        return build_retrieval_state_payload(task)
 
     def _build_shp_message(
         self,
@@ -1206,7 +1303,47 @@ class V0Runtime:
 
     def _is_final_task(self, task: TaskSpec) -> bool:
         title = task.title.lower()
-        return task.task_id.endswith("10") or "最终" in task.title or "final" in title
+        explicit_final_id = re.search(r"(?:^|[^0-9])10$", task.task_id) is not None
+        return explicit_final_id or "最终" in task.title or "final" in title
+
+    def _is_final_deliverable_agent(self, agent: DeterministicAgent) -> bool:
+        profile = self.capability_profiles.get(agent.agent_id)
+        if profile is None:
+            return False
+        return bool(
+            {"final_deliverable_draft", "final_deliverable_review"}
+            & profile.capabilities
+        )
+
+    def _build_message_cost_report(
+        self,
+        *,
+        message_content: str,
+        prompt: str,
+        memory_prompt_views: list[str],
+    ) -> dict[str, int]:
+        memory_text = "\n".join(memory_prompt_views)
+        return {
+            "direct_text_tokens": self.token_counter.count(message_content).token_count,
+            "prompt_tokens": self.token_counter.count(prompt).token_count,
+            "retrieved_memory_tokens": (
+                self.token_counter.count(memory_text).token_count if memory_text else 0
+            ),
+            "control_llm_tokens": 0,
+        }
+
+    @staticmethod
+    def _handoff_gate(message_content: str) -> dict[str, object]:
+        payload = json.loads(message_content)
+        metrics = payload.get("metrics", {})
+        if not isinstance(metrics, dict):
+            return {}
+        gate = metrics.get("communication_gate", {})
+        return gate if isinstance(gate, dict) else {}
+
+    def _background_job_count(self) -> int:
+        with self._background_jobs_lock:
+            return len(self._background_memory_jobs)
 
     def _slot_hint_for_task(self, task: TaskSpec, agent_id: str) -> str:
         if self._is_final_task(task):

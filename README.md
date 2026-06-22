@@ -2,7 +2,7 @@
 
 本仓库用于迭代实现一个面向多 Agent 协作的跨框架运行时工具层，目标是在多 Agent 任务中通过结构化通信、非文本状态传递和共享记忆复用降低协作开销。
 
-当前版本：`v4.0 cost governance and lifecycle lite`
+当前版本：`v5.9 audit-remediated cross-task runtime lite`
 
 实验结果记录见：
 
@@ -18,6 +18,19 @@
 - [docs/experiments/v3.3-memory-admission-results.md](docs/experiments/v3.3-memory-admission-results.md)
 - [docs/experiments/v4.0-cost-lifecycle-results.md](docs/experiments/v4.0-cost-lifecycle-results.md)
 - [docs/experiments/v4.0-full-ab-results.md](docs/experiments/v4.0-full-ab-results.md)
+- [docs/experiments/v5.9-mimo-cross-task-results.md](docs/experiments/v5.9-mimo-cross-task-results.md)
+
+核心安装仅需要 `tiktoken`：
+
+```powershell
+python -m pip install -e .
+```
+
+只有在需要 Hugging Face tokenizer 时才安装可选依赖：
+
+```powershell
+python -m pip install -e ".[transformers]"
+```
 
 版本切换与 GitHub 浏览方式见：[docs/versioning.md](docs/versioning.md)
 

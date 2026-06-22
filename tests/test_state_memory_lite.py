@@ -94,10 +94,33 @@ class StatePoolLiteTest(unittest.TestCase):
             view = pool.render_prompt_view(state_ref, "WriterAgent")
             self.assertIn("state_tombstone", view)
 
-            swept = pool.sweep_tombstones(max_swept=1)
+            swept = pool.sweep_tombstones(max_swept=1, min_age_seconds=0)
             self.assertEqual(swept.physical_delete_count, 1)
             self.assertEqual(state.lifecycle, "deleted")
+            self.assertNotIn(state_ref.state_id, pool._states)
             self.assertFalse(Path(state.payload_ref).exists())
+
+    def test_hot_prompt_view_uses_memory_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = StatePoolLite(Path(tmp))
+            state_ref, state = pool.write_state(
+                task_id="T1",
+                source_agent="retriever",
+                state_type="retrieval_state",
+                payload={
+                    "evidence_rank": ["c1"],
+                    "score_map": {"c1": 0.9},
+                    "chunks": {"c1": {"text": "热区内存证据"}},
+                },
+                summary="hot retrieval",
+                usage_hint="summary_context_selection",
+            )
+            self.assertEqual(state.tier, "hot")
+            Path(state.payload_ref).unlink()
+
+            view = pool.render_prompt_view(state_ref, "WriterAgent")
+
+            self.assertIn("热区内存证据", view)
 
 
 class MemoryStoreLiteTest(unittest.TestCase):

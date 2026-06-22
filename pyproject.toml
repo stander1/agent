@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multi-agent-collaboration-runtime"
+version = "0.5.9"
+description = "Cross-framework runtime primitives for low-overhead multi-agent collaboration"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "tiktoken>=0.13.0",
+]
+
+[project.optional-dependencies]
+transformers = [
+  "transformers>=5.0.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["agent_runtime*"]
