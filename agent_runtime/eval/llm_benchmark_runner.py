@@ -106,6 +106,17 @@ def build_deliverable_record(
     mode: Mode,
     output: AgentOutput,
 ) -> dict:
+    roles = output.metadata.get("deliverable_roles", {})
+    final_answer = roles.get("final_answer") if isinstance(roles, dict) else None
+    draft_answer = roles.get("draft_answer") if isinstance(roles, dict) else None
+    review_report = roles.get("review_report") if isinstance(roles, dict) else None
+    if not isinstance(final_answer, dict):
+        final_answer = {
+            "agent_id": output.agent_id,
+            "content": output.content,
+            "content_chars": len(output.content),
+            "metadata": output.metadata,
+        }
     return {
         "task_id": task.task_id,
         "group_id": task.group_id,
@@ -113,6 +124,10 @@ def build_deliverable_record(
         "round_id": round_id,
         "mode": mode,
         "agent_id": output.agent_id,
+        "deliverable_role": output.metadata.get("deliverable_role", "final_answer"),
+        "draft_answer": draft_answer,
+        "review_report": review_report,
+        "final_answer": final_answer,
         "content": output.content,
         "content_chars": len(output.content),
         "metadata": output.metadata,

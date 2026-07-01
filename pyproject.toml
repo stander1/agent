@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "multi-agent-collaboration-runtime"
-version = "0.5.9"
+version = "0.5.12.post3"
 description = "Cross-framework runtime primitives for low-overhead multi-agent collaboration"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,7 +12,14 @@ dependencies = [
   "tiktoken>=0.13.0",
 ]
 
+[project.scripts]
+agentlite = "agent_runtime.cli:main"
+
 [project.optional-dependencies]
+autogen = [
+  "autogen-agentchat==0.7.5",
+  "autogen-core==0.7.5",
+]
 transformers = [
   "transformers>=5.0.0",
 ]

@@ -26,6 +26,8 @@ REPORT_METRICS = [
     "latency_ms",
     "llm_total_tokens",
     "end_to_end_collaboration_tokens",
+    "summary_update_count",
+    "summary_update_estimated_tokens",
     "retrieved_memory_tokens",
     "memory_hit_count",
     "useful_memory_hit_count",
@@ -33,6 +35,18 @@ REPORT_METRICS = [
     "raw_access_count",
     "fallback_count",
 ]
+
+MAIN_BASELINE_MODE = "baseline_bounded_nl_framework"
+STRESS_BASELINE_MODE = "baseline_stress_full_broadcast"
+LEGACY_BASELINE_MODE = "baseline_text"
+RUNTIME_MODE = "runtime_lite"
+BASELINE_PRIORITY = [MAIN_BASELINE_MODE, STRESS_BASELINE_MODE, LEGACY_BASELINE_MODE]
+MODE_PRESETS: dict[str, list[Mode]] = {
+    "both": [MAIN_BASELINE_MODE, RUNTIME_MODE],
+    "fair": [MAIN_BASELINE_MODE, RUNTIME_MODE],
+    "stress": [STRESS_BASELINE_MODE, RUNTIME_MODE],
+    "all": [STRESS_BASELINE_MODE, MAIN_BASELINE_MODE, RUNTIME_MODE],
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,7 +66,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rounds", type=int, default=1)
     parser.add_argument(
         "--mode",
-        choices=["baseline_text", "runtime_lite", "both"],
+        choices=[
+            LEGACY_BASELINE_MODE,
+            STRESS_BASELINE_MODE,
+            MAIN_BASELINE_MODE,
+            RUNTIME_MODE,
+            "both",
+            "fair",
+            "stress",
+            "all",
+        ],
         default="both",
     )
     parser.add_argument("--output-dir", type=Path, default=None)
@@ -72,9 +95,7 @@ def main() -> int:
     args = parse_args()
     suites = args.suite or ["A", "B"]
     suite_paths = [SUITE_PRESETS[item] for item in suites]
-    modes: list[Mode] = (
-        ["baseline_text", "runtime_lite"] if args.mode == "both" else [args.mode]
-    )
+    modes: list[Mode] = MODE_PRESETS.get(args.mode, [args.mode])
     output_dir = args.output_dir
     if output_dir is None:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -139,10 +160,12 @@ def build_cross_task_report(
         for suite_id in suites
     }
     return {
-        "version": "v5.9-cross-task",
+        "version": "v5.10-cross-task",
         "provider": provider,
         "suites": suites,
         "shared_runtime": True,
+        "baseline_mode": choose_baseline_mode(summary.get("by_mode", {}).keys()),
+        "runtime_mode": RUNTIME_MODE,
         "by_mode": summarize_by_mode(summary.get("by_mode", {})),
         "by_suite": by_suite,
         "audit_focus": {
@@ -172,12 +195,14 @@ def build_cross_task_report(
 
 
 def summarize_by_mode(by_mode: dict) -> dict:
-    baseline = dict(by_mode.get("baseline_text", {}))
-    runtime = dict(by_mode.get("runtime_lite", {}))
+    baseline_mode = choose_baseline_mode(by_mode.keys())
+    baseline = dict(by_mode.get(baseline_mode, {}))
+    runtime = dict(by_mode.get(RUNTIME_MODE, {}))
     return {
         metric: {
-            "baseline_text": baseline.get(metric, 0),
-            "runtime_lite": runtime.get(metric, 0),
+            "baseline": baseline.get(metric, 0),
+            "baseline_mode": baseline_mode,
+            RUNTIME_MODE: runtime.get(metric, 0),
             "delta": numeric_delta(runtime.get(metric, 0), baseline.get(metric, 0)),
             "percent_change": percent_change(runtime.get(metric, 0), baseline.get(metric, 0)),
         }
@@ -186,11 +211,12 @@ def summarize_by_mode(by_mode: dict) -> dict:
 
 
 def summarize_rows(rows: list[dict]) -> dict:
+    baseline_mode = choose_baseline_mode({str(row.get("mode", "")) for row in rows})
     totals: dict[str, dict[str, float]] = {
-        "baseline_text": {metric: 0 for metric in REPORT_METRICS},
-        "runtime_lite": {metric: 0 for metric in REPORT_METRICS},
+        baseline_mode: {metric: 0 for metric in REPORT_METRICS},
+        RUNTIME_MODE: {metric: 0 for metric in REPORT_METRICS},
     }
-    row_counts: dict[str, int] = {"baseline_text": 0, "runtime_lite": 0}
+    row_counts: dict[str, int] = {baseline_mode: 0, RUNTIME_MODE: 0}
     task_ids: set[str] = set()
     for row in rows:
         mode = str(row.get("mode", ""))
@@ -207,11 +233,12 @@ def summarize_rows(rows: list[dict]) -> dict:
         totals[mode]["success_count"] = count
     comparison = {}
     for metric in REPORT_METRICS:
-        base = totals["baseline_text"][metric]
-        runtime = totals["runtime_lite"][metric]
+        base = totals[baseline_mode][metric]
+        runtime = totals[RUNTIME_MODE][metric]
         comparison[metric] = {
-            "baseline_text": base,
-            "runtime_lite": runtime,
+            "baseline": base,
+            "baseline_mode": baseline_mode,
+            RUNTIME_MODE: runtime,
             "delta": runtime - base,
             "percent_change": percent_change(runtime, base),
         }
@@ -219,6 +246,14 @@ def summarize_rows(rows: list[dict]) -> dict:
         "task_count": len([item for item in task_ids if item]),
         "metrics": comparison,
     }
+
+
+def choose_baseline_mode(modes: object) -> str:
+    mode_set = set(modes or [])
+    for mode in BASELINE_PRIORITY:
+        if mode in mode_set:
+            return mode
+    return MAIN_BASELINE_MODE
 
 
 def numeric_delta(new_value: object, old_value: object) -> float | int | None:
@@ -236,24 +271,27 @@ def percent_change(new_value: object, old_value: object) -> float | None:
 
 
 def render_markdown_report(report: dict) -> str:
+    baseline_mode = report.get("baseline_mode", MAIN_BASELINE_MODE)
     lines = [
-        "# v5.9 跨任务连续实验报告",
+        "# v5.10 跨任务连续实验报告",
         "",
         f"- Provider: `{report['provider']}`",
         f"- Suites: `{', '.join(report['suites'])}`",
         f"- Shared runtime: `{report['shared_runtime']}`",
+        f"- Baseline mode: `{baseline_mode}`",
+        f"- Runtime mode: `{report.get('runtime_mode', RUNTIME_MODE)}`",
         "",
         "## A+B 合计",
         "",
-        "| 指标 | baseline_text | runtime_lite | 变化 |",
+        f"| 指标 | {baseline_mode} | {RUNTIME_MODE} | 变化 |",
         "|---|---:|---:|---:|",
     ]
     for metric, values in report["by_mode"].items():
         lines.append(
             "| {metric} | {base} | {runtime} | {change} |".format(
                 metric=metric,
-                base=format_number(values["baseline_text"]),
-                runtime=format_number(values["runtime_lite"]),
+                base=format_number(values["baseline"]),
+                runtime=format_number(values[RUNTIME_MODE]),
                 change=format_percent(values["percent_change"]),
             )
         )
@@ -263,7 +301,7 @@ def render_markdown_report(report: dict) -> str:
             [
                 f"### Suite {suite_id}",
                 "",
-                "| 指标 | baseline_text | runtime_lite | 变化 |",
+                f"| 指标 | {baseline_mode} | {RUNTIME_MODE} | 变化 |",
                 "|---|---:|---:|---:|",
             ]
         )
@@ -271,8 +309,8 @@ def render_markdown_report(report: dict) -> str:
             lines.append(
                 "| {metric} | {base} | {runtime} | {change} |".format(
                     metric=metric,
-                    base=format_number(values["baseline_text"]),
-                    runtime=format_number(values["runtime_lite"]),
+                    base=format_number(values["baseline"]),
+                    runtime=format_number(values[RUNTIME_MODE]),
                     change=format_percent(values["percent_change"]),
                 )
             )

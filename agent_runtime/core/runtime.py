@@ -1,49 +1,34 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
-import hashlib
 import json
 import re
 import threading
 import time
 from dataclasses import asdict, dataclass
-from pathlib import Path
 from typing import Iterable
 
 from agent_runtime.core.agents import DeterministicAgent
-from agent_runtime.core.communication import (
-    CapabilityProfileManagerLite,
-    CapabilityRouterLite,
-    CommunicationGateLite,
-    ControlBudgetLite,
-)
 from agent_runtime.core.deliverable_schema import (
     render_schema_prompt,
     schema_field_coverage,
     schema_coverage,
     schema_for_task,
 )
+from agent_runtime.core.kernel import (
+    AgentDescriptor,
+    CollaborationKernel,
+    MemoryContext,
+)
 from agent_runtime.core.models import AgentOutput, Mode, RuntimeMessage, TaskSpec
-from agent_runtime.core.readiness import ReadinessBarrierLite
 from agent_runtime.eval.metrics import MetricsCollector
 from agent_runtime.eval.token_counter import TokenCounter
 from agent_runtime.eval.trace_logger import TraceLogger
-from agent_runtime.bridge.state_memory_bridge import StateToMemoryBridgeLite
 from agent_runtime.memory.memory_store import (
     MemoryAdmissionReport,
     MemoryRef,
     MemoryStoreLite,
     MemoryWriteReport,
-)
-from agent_runtime.protocol.shp import build_handoff_envelope
-from agent_runtime.reliability.contract_guard import (
-    ContractContext,
-    guard_agent_output,
-    render_contract_retry_prompt,
-)
-from agent_runtime.state.non_text import (
-    build_embedding_state_payload,
-    build_retrieval_state_payload,
 )
 from agent_runtime.state.state_pool import StatePoolLite, StateRef
 
@@ -71,6 +56,16 @@ class BackgroundMemoryJob:
     scheduled_at: float
 
 
+@dataclass(slots=True)
+class BoundedBaselineEntry:
+    task_id: str
+    group_id: str
+    title: str
+    final_answer: str
+    bounded_summary: str
+    key_messages: list[str]
+
+
 class V0Runtime:
     """Deterministic v0 runtime for baseline measurement."""
 
@@ -81,6 +76,10 @@ class V0Runtime:
     ARTIFACT_PAYLOAD_SUMMARY_CHARS = 240
     ARTIFACT_STATE_SUMMARY_CHARS = 120
     GC_PROTECTED_RECENT_STATE_COUNT = 6
+    BOUNDED_LOCAL_CONTEXT_BUDGET_TOKENS = 8000
+    BOUNDED_CROSS_CONTEXT_BUDGET_TOKENS = 1200
+    BOUNDED_RECENT_KEY_MESSAGES_K = 2
+    BOUNDED_SUMMARY_MAX_TOKENS = 500
 
     def __init__(
         self,
@@ -95,15 +94,26 @@ class V0Runtime:
         self.token_counter = token_counter
         self.metrics = metrics
         self.trace = trace
-        self.state_pool = state_pool or StatePoolLite(Path("runs") / "state")
-        self.memory_store = memory_store or MemoryStoreLite()
-        self.state_memory_bridge = StateToMemoryBridgeLite(self.memory_store)
-        self.readiness_barrier = ReadinessBarrierLite()
-        self.capability_profiles = CapabilityProfileManagerLite(self.agents)
-        self.capability_router = CapabilityRouterLite(self.capability_profiles)
-        self.communication_gate = CommunicationGateLite()
-        self.control_budget = ControlBudgetLite()
+        self.kernel = CollaborationKernel(
+            agents=self.agents,
+            token_counter=token_counter,
+            metrics=metrics,
+            trace=trace,
+            state_pool=state_pool,
+            memory_store=memory_store,
+        )
+        # Compatibility aliases keep existing experiments and extensions stable
+        # while framework-neutral behavior moves behind CollaborationKernel.
+        self.state_pool = self.kernel.state_pool
+        self.memory_store = self.kernel.memory_store
+        self.state_memory_bridge = self.kernel.state_memory_bridge
+        self.readiness_barrier = self.kernel.readiness_barrier
+        self.capability_profiles = self.kernel.capability_profiles
+        self.capability_router = self.kernel.capability_router
+        self.communication_gate = self.kernel.communication_gate
+        self.control_budget = self.kernel.control_budget
         self._baseline_full_history: dict[tuple[int, str], list[AgentOutput]] = {}
+        self._bounded_histories: dict[tuple[int, str], list[BoundedBaselineEntry]] = {}
         self._background_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="cmjcc-memory",
@@ -154,14 +164,28 @@ class V0Runtime:
                     )
             raise
         finally:
-            self.state_pool.finalize_task(task.task_id)
-            self.control_budget.finalize_task(task.task_id)
+            self.kernel.finalize_task(task.task_id)
 
     def _run_task_impl(self, task: TaskSpec, round_id: int, mode: Mode) -> AgentOutput:
         started = time.perf_counter()
-        history_key = (round_id, mode)
-        full_history = self._baseline_full_history.get(history_key, [])
-        context: list[AgentOutput] = list(full_history) if mode == "baseline_text" else []
+        stress_history_key = (round_id, mode)
+        full_history = (
+            self._baseline_full_history.get(stress_history_key, [])
+            if self._is_stress_baseline_mode(mode)
+            else []
+        )
+        bounded_history_key = (round_id, self._task_thread_key(task))
+        bounded_history = (
+            self._bounded_histories.get(bounded_history_key, [])
+            if self._is_bounded_baseline_mode(mode)
+            else []
+        )
+        if self._is_stress_baseline_mode(mode):
+            context: list[AgentOutput] = list(full_history)
+        elif self._is_bounded_baseline_mode(mode):
+            context = self._build_bounded_cross_task_context(bounded_history)
+        else:
+            context = []
         current_task_outputs: list[AgentOutput] = []
         self.trace.write(
             "task_started",
@@ -171,8 +195,10 @@ class V0Runtime:
                 "mode": mode,
                 "title": task.title,
                 "baseline_full_history_items": len(full_history)
-                if mode == "baseline_text"
+                if self._is_stress_baseline_mode(mode)
                 else 0,
+                "bounded_history_items": len(bounded_history),
+                "thread_key": self._task_thread_key(task),
             },
         )
 
@@ -181,6 +207,9 @@ class V0Runtime:
         memory_refs_used: list[MemoryRef] = []
         lite_context: list[AgentOutput] = []
         final_deliverable_output: AgentOutput | None = None
+        draft_answer_output: AgentOutput | None = None
+        review_report_output: AgentOutput | None = None
+        final_answer_output: AgentOutput | None = None
         task_memory_refs: list[MemoryRef] = []
         task_memory_prompt_views: list[str] = []
         deliverable_view = ""
@@ -188,42 +217,26 @@ class V0Runtime:
         deliverable_schema_prompt = render_schema_prompt(deliverable_schema)
         if mode == "runtime_lite":
             self._drain_background_memory_jobs(reason="before_memory_search")
-            search_report = self.memory_store.search_memory_with_report(
-                task.prompt,
-                tags=[task.group_id],
-                top_k=4 if self._is_final_task(task) else 2,
+            memory_context = self.kernel.prepare_memory_context(
+                task=task,
+                round_id=round_id,
+                mode=mode,
+                final_task=self._is_final_task(task),
+                deliverable_budget_chars=self.DELIVERABLE_VIEW_BUDGET_CHARS,
             )
-            task_memory_refs = search_report.refs
-            self.metrics.record_memory_search_backend(
+            task_memory_refs = memory_context.refs
+            task_memory_prompt_views = memory_context.prompt_views
+            deliverable_view = memory_context.deliverable_view
+            memory_refs_used.extend(task_memory_refs)
+
+        for agent in self.agents:
+            self.metrics.record_agent_role(
                 task_id=task.task_id,
                 round_id=round_id,
                 mode=mode,
-                retrieval_backend=search_report.retrieval_backend,
-                vector_retrieval_count=search_report.vector_retrieval_count,
+                agent_id=agent.agent_id,
+                role=agent.role,
             )
-            task_memory_prompt_views = [
-                self.memory_store.render_prompt_view(ref) for ref in task_memory_refs
-            ]
-            if self._is_final_task(task):
-                deliverable_view = self.memory_store.render_deliverable_view(
-                    task_memory_refs,
-                    task_title=task.title,
-                    budget_chars=self.DELIVERABLE_VIEW_BUDGET_CHARS,
-                )
-            if task_memory_prompt_views:
-                self.metrics.record_memory_retrieval(
-                    task_id=task.task_id,
-                    round_id=round_id,
-                    mode=mode,
-                    hit_count=len(task_memory_refs),
-                    useful_hit_count=len(task_memory_refs),
-                    wrong_hit_count=0,
-                    prompt_view="\n".join(task_memory_prompt_views),
-                    token_counter=self.token_counter,
-                )
-                memory_refs_used.extend(task_memory_refs)
-
-        for agent in self.agents:
             agent_memory_refs = task_memory_refs
             agent_memory_prompt_views = task_memory_prompt_views
             agent_deliverable_view = deliverable_view
@@ -272,6 +285,7 @@ class V0Runtime:
                 if mode == "runtime_lite" and self._is_final_deliverable_agent(agent)
                 else "",
                 agent_role=agent.role,
+                agent_id=agent.agent_id,
             )
             self.metrics.record_prompt(
                 task_id=task.task_id,
@@ -316,8 +330,17 @@ class V0Runtime:
                 "writer",
                 "reviewer",
             }:
+                schema_check_started = time.perf_counter()
                 hit_count, required_count, missing_fields = schema_field_coverage(
                     deliverable_schema, output.content
+                )
+                self.metrics.record_agent_local_timing(
+                    task_id=task.task_id,
+                    round_id=round_id,
+                    mode=mode,
+                    agent_id=agent.agent_id,
+                    schema_check_ms=(time.perf_counter() - schema_check_started)
+                    * 1000,
                 )
                 self.metrics.record_deliverable_schema(
                     task_id=task.task_id,
@@ -348,7 +371,22 @@ class V0Runtime:
                             latency_ms=float(
                                 retry_llm_meta.get("latency_ms", 0.0) or 0.0
                             ),
+                            agent_id=agent.agent_id,
+                            output_chars=len(retry_output.content),
                         )
+                        self.metrics.record_provider_guard(
+                            task_id=task.task_id,
+                            round_id=round_id,
+                            mode=mode,
+                            provider_guard=retry_llm_meta.get("provider_guard"),
+                            agent_id=agent.agent_id,
+                        )
+                    self.metrics.record_agent_retry(
+                        task_id=task.task_id,
+                        round_id=round_id,
+                        mode=mode,
+                        agent_id=agent.agent_id,
+                    )
                     self.metrics.record_final_quality_retry(
                         task_id=task.task_id,
                         round_id=round_id,
@@ -377,8 +415,17 @@ class V0Runtime:
                         ),
                         metadata=output.metadata,
                     )
+                    schema_check_started = time.perf_counter()
                     hit_count, required_count = schema_coverage(
                         deliverable_schema, output.content
+                    )
+                    self.metrics.record_agent_local_timing(
+                        task_id=task.task_id,
+                        round_id=round_id,
+                        mode=mode,
+                        agent_id=agent.agent_id,
+                        schema_check_ms=(time.perf_counter() - schema_check_started)
+                        * 1000,
                     )
                     self.metrics.record_deliverable_schema(
                         task_id=task.task_id,
@@ -387,6 +434,13 @@ class V0Runtime:
                         hit_count=hit_count,
                         required_count=required_count,
                     )
+            deliverable_role = self._deliverable_role_for_agent(agent)
+            if deliverable_role == "draft_answer":
+                draft_answer_output = output
+                if self._is_final_task(task):
+                    final_answer_output = output
+            elif deliverable_role == "review_report":
+                review_report_output = output
             if self._is_final_deliverable_agent(agent):
                 final_deliverable_output = output
             llm_meta = output.metadata.get("llm", {})
@@ -397,12 +451,15 @@ class V0Runtime:
                     mode=mode,
                     usage=llm_meta.get("usage", {}),
                     latency_ms=float(llm_meta.get("latency_ms", 0.0) or 0.0),
+                    agent_id=agent.agent_id,
+                    output_chars=len(output.content),
                 )
                 self.metrics.record_provider_guard(
                     task_id=task.task_id,
                     round_id=round_id,
                     mode=mode,
                     provider_guard=llm_meta.get("provider_guard"),
+                    agent_id=agent.agent_id,
                 )
             context.append(output)
             current_task_outputs.append(output)
@@ -498,6 +555,7 @@ class V0Runtime:
                         "Communication gate blocked handoff: "
                         f"{gate.get('allowed_next_step', 'review_required')}"
                     )
+            self._write_pool_snapshot(task=task, round_id=round_id, mode=mode)
             previous_sender = agent.agent_id
 
         if mode == "runtime_lite" and memory_refs_used:
@@ -507,8 +565,28 @@ class V0Runtime:
                 mode=mode,
                 count=len(memory_refs_used),
             )
-        if mode == "baseline_text":
-            self._baseline_full_history[history_key] = full_history + current_task_outputs
+        selected_output = self._select_deliverable_output(
+            task=task,
+            fallback_output=final_deliverable_output or context[-1],
+            draft_answer_output=draft_answer_output,
+            review_report_output=review_report_output,
+            final_answer_output=final_answer_output,
+        )
+        if self._is_stress_baseline_mode(mode):
+            self._baseline_full_history[stress_history_key] = (
+                full_history + current_task_outputs
+            )
+        if self._is_bounded_baseline_mode(mode):
+            bounded_entry = self._build_bounded_history_entry(
+                task=task,
+                round_id=round_id,
+                mode=mode,
+                selected_output=selected_output,
+                current_task_outputs=current_task_outputs,
+            )
+            self._bounded_histories[bounded_history_key] = (
+                bounded_history + [bounded_entry]
+            )
         if mode == "runtime_lite":
             gc_report = self.state_pool.collect_garbage(
                 protected_state_ids={
@@ -544,24 +622,29 @@ class V0Runtime:
                 "latency_ms": elapsed_ms,
                 "success": True,
                 "final_deliverable_agent": (
-                    final_deliverable_output.agent_id
-                    if final_deliverable_output is not None
-                    else context[-1].agent_id
+                    selected_output.agent_id
+                ),
+                "deliverable_role": selected_output.metadata.get(
+                    "deliverable_role", ""
                 ),
             },
         )
-        if final_deliverable_output is not None:
+        if selected_output is not None:
             self.trace.write(
                 "final_deliverable_selected",
                 {
                     "task_id": task.task_id,
                     "round_id": round_id,
                     "mode": mode,
-                    "agent_id": final_deliverable_output.agent_id,
-                    "content_chars": len(final_deliverable_output.content),
+                    "agent_id": selected_output.agent_id,
+                    "deliverable_role": selected_output.metadata.get(
+                        "deliverable_role", ""
+                    ),
+                    "content_chars": len(selected_output.content),
                 },
             )
-        return final_deliverable_output or context[-1]
+        self._write_pool_snapshot(task=task, round_id=round_id, mode=mode)
+        return selected_output
 
     def flush_background_tasks(self) -> None:
         self._drain_background_memory_jobs(reason="benchmark_finished")
@@ -574,6 +657,8 @@ class V0Runtime:
         finally:
             self._background_executor.shutdown(wait=True, cancel_futures=False)
             self._baseline_full_history.clear()
+            self._bounded_histories.clear()
+            self.kernel.close()
             self._closed = True
 
     def __enter__(self) -> "V0Runtime":
@@ -658,6 +743,13 @@ class V0Runtime:
                 result = job.future.result()
             except Exception as exc:
                 wait_ms = (time.perf_counter() - wait_started) * 1000
+                self.metrics.record_agent_local_timing(
+                    task_id=job.task_id,
+                    round_id=job.round_id,
+                    mode=job.mode,
+                    agent_id="local_runtime",
+                    local_memory_search_ms=wait_ms,
+                )
                 self.metrics.record_background_memory_job(
                     task_id=job.task_id,
                     round_id=job.round_id,
@@ -682,6 +774,13 @@ class V0Runtime:
                 continue
             wait_ms = (time.perf_counter() - wait_started) * 1000
             self._record_runtime_memory_result(result)
+            self.metrics.record_agent_local_timing(
+                task_id=job.task_id,
+                round_id=job.round_id,
+                mode=job.mode,
+                agent_id="local_runtime",
+                local_memory_search_ms=wait_ms,
+            )
             self.metrics.record_background_memory_job(
                 task_id=job.task_id,
                 round_id=job.round_id,
@@ -703,6 +802,27 @@ class V0Runtime:
                     "wait_ms": wait_ms,
                 },
             )
+
+    def _write_pool_snapshot(self, *, task: TaskSpec, round_id: int, mode: Mode) -> None:
+        memory_snapshot = (
+            {
+                "status": "background_memory_pending",
+                "pending_job_count": self._background_job_count(),
+            }
+            if self._background_job_count()
+            else self.memory_store.snapshot()
+        )
+        snapshot = {
+            "task_id": task.task_id,
+            "round_id": round_id,
+            "mode": mode,
+            "state_pool": self.state_pool.snapshot(),
+            "memory_store": memory_snapshot,
+        }
+        path = self.trace.output_dir / "pool_snapshot_latest.json"
+        tmp_path = path.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(path)
 
     def _record_runtime_memory_result(self, result: RuntimeMemoryWriteResult) -> None:
         if result.admission_report is not None:
@@ -830,43 +950,12 @@ class V0Runtime:
         mode: Mode,
         retry_prompt: str,
     ) -> str:
-        token_count = self.token_counter.count(retry_prompt)
-        budget_exhausted = token_count.token_count > self.MAX_FORMAT_RETRY_INPUT_TOKENS
-        if not budget_exhausted:
-            self.metrics.record_retry_budget(
-                task_id=task.task_id,
-                round_id=round_id,
-                mode=mode,
-                retry_input_tokens=token_count.token_count,
-                budget_exhausted=False,
-            )
-            return retry_prompt
-
-        ratio = self.MAX_FORMAT_RETRY_INPUT_TOKENS / max(1, token_count.token_count)
-        keep_chars = max(400, int(len(retry_prompt) * ratio * 0.9))
-        trimmed = (
-            retry_prompt[:keep_chars]
-            + "\n\n[retry_budget_truncated: full artifact and overflow fields omitted]"
-        )
-        self.metrics.record_retry_budget(
-            task_id=task.task_id,
+        return self.kernel.apply_retry_budget(
+            task=task,
             round_id=round_id,
             mode=mode,
-            retry_input_tokens=token_count.token_count,
-            budget_exhausted=True,
+            retry_prompt=retry_prompt,
         )
-        self.trace.write(
-            "retry_budget_applied",
-            {
-                "task_id": task.task_id,
-                "round_id": round_id,
-                "mode": mode,
-                "input_tokens": token_count.token_count,
-                "max_tokens": self.MAX_FORMAT_RETRY_INPUT_TOKENS,
-                "trimmed_chars": len(trimmed),
-            },
-        )
-        return trimmed
 
     def _apply_contract_guard(
         self,
@@ -877,106 +966,17 @@ class V0Runtime:
         agent: DeterministicAgent,
         output: AgentOutput,
     ) -> AgentOutput:
-        context = ContractContext(
-            task_id=task.task_id,
-            agent_id=agent.agent_id,
-            role=agent.role,
-            next_action=self._next_agent_id(agent.agent_id),
-            artifact_ref=f"cold://{task.task_id}/{round_id}/{agent.agent_id}/artifact",
-        )
-        result = guard_agent_output(output.content, context)
-        self.trace.write(
-            "contract_guard_checked",
-            {
-                "task_id": task.task_id,
-                "round_id": round_id,
-                "mode": mode,
-                "agent_id": agent.agent_id,
-                "contract_status": result.contract_status,
-                "schema_valid": result.schema_valid,
-                "repair_actions": result.repair_actions,
-                "schema_errors": result.schema_errors,
-            },
-        )
-
-        if result.retry_required:
-            result.retry_attempted = True
-            retry_prompt = render_contract_retry_prompt(context=context, result=result)
-            retry_prompt = self._apply_retry_budget(
-                task=task,
-                round_id=round_id,
-                mode=mode,
-                retry_prompt=retry_prompt,
-            )
-            retry_output = agent.run(
-                task,
-                [AgentOutput(agent_id="runtime_prompt", content=retry_prompt)],
-            )
-            retry_llm_meta = retry_output.metadata.get("llm", {})
-            if retry_llm_meta:
-                self.metrics.record_llm_call(
-                    task_id=task.task_id,
-                    round_id=round_id,
-                    mode=mode,
-                    usage=retry_llm_meta.get("usage", {}),
-                    latency_ms=float(retry_llm_meta.get("latency_ms", 0.0) or 0.0),
-                )
-                self.metrics.record_provider_guard(
-                    task_id=task.task_id,
-                    round_id=round_id,
-                    mode=mode,
-                    provider_guard=retry_llm_meta.get("provider_guard"),
-                )
-            self.metrics.record_retry_tokens(
-                task_id=task.task_id,
-                round_id=round_id,
-                mode=mode,
-                retry_prompt=retry_prompt,
-                retry_output=retry_output.content,
-                token_counter=self.token_counter,
-            )
-            retry_result = guard_agent_output(
-                retry_output.content,
-                ContractContext(
-                    task_id=task.task_id,
-                    agent_id=agent.agent_id,
-                    role=agent.role,
-                    next_action=self._next_agent_id(agent.agent_id),
-                    artifact_ref=context.artifact_ref,
-                ),
-            )
-            if retry_result.schema_valid:
-                result.control = retry_result.control
-                result.schema_valid = True
-                result.contract_status = "repaired"
-                result.repair_actions.extend(["context_pruned_format_retry"])
-                result.schema_errors = []
-                result.retry_required = False
-            self.trace.write(
-                "contract_guard_retry",
-                {
-                    "task_id": task.task_id,
-                    "round_id": round_id,
-                    "mode": mode,
-                    "agent_id": agent.agent_id,
-                    "retry_schema_valid": retry_result.schema_valid,
-                    "retry_status": retry_result.contract_status,
-                },
-            )
-
-        self.metrics.record_contract_guard(
-            task_id=task.task_id,
+        return self.kernel.validate_agent_output(
+            task=task,
             round_id=round_id,
             mode=mode,
-            contract_report=result.to_dict(),
-        )
-
-        metadata = dict(output.metadata)
-        metadata["contract_guard"] = result.to_dict()
-        return AgentOutput(
-            agent_id=output.agent_id,
-            content=result.artifact,
-            metadata=metadata,
+            agent=self._agent_descriptor(agent),
+            next_action=self._next_agent_id(agent.agent_id),
+            output=output,
+            retry_output=lambda retry_prompt: agent.run(
+                task,
+                [AgentOutput(agent_id="runtime_prompt", content=retry_prompt)],
+            ),
         )
 
     def _build_prompt(
@@ -990,48 +990,48 @@ class V0Runtime:
         deliverable_view: str = "",
         deliverable_schema_prompt: str = "",
         agent_role: str = "",
+        agent_id: str = "",
     ) -> str:
-        if mode == "baseline_text":
+        if self._is_stress_baseline_mode(mode):
             previous = "\n\n".join(item.content for item in context)
             return f"任务：{task.prompt}\n\n完整上游上下文：\n{previous}"
 
+        if self._is_bounded_baseline_mode(mode):
+            previous = "\n\n".join(
+                f"[{item.agent_id}]\n{item.content}" for item in context
+            )
+            previous = self._truncate_to_token_budget(
+                previous,
+                self.BOUNDED_LOCAL_CONTEXT_BUDGET_TOKENS,
+            )
+            return (
+                f"任务：{task.prompt}\n\n"
+                "baseline_bounded_nl_framework：当前 task 内可以共享自然语言上下文；"
+                "跨 task 只能看到上一轮最终交付、bounded summary 和少量 key messages。\n\n"
+                f"有界上下文：\n{previous or '无可用跨任务上下文'}"
+            )
+
         if mode == "runtime_lite":
-            state_views = []
-            for ref in (state_refs or [])[-5:]:
-                escalation_report = self.state_pool.request_progressive_access(
-                    ref,
-                    agent_role=agent_role,
-                    reason="runtime_prompt_view",
-                    need_raw=False,
-                    budget_chars=700,
-                )
-                state_views.append(escalation_report.prompt_view)
-                raw_access_count = int(
-                    escalation_report.cold_access is not None
-                    and escalation_report.cold_access.allowed
-                )
-                self.metrics.record_state_access(
-                    task_id=task.task_id,
-                    round_id=round_id,
-                    mode=mode,
-                    raw_access_count=raw_access_count,
-                    summary_access_count=int(
-                        escalation_report.selected_level
-                        in {"summary", "summary_only", "metadata"}
-                    ),
-                    evidence_snippet_access_count=(
-                        int(escalation_report.selected_level == "evidence_snippets")
-                    ),
-                    access_escalation_count=(
-                        escalation_report.access_escalation_count
-                    ),
-                    read_lease_acquire_count=1 + raw_access_count,
-                )
-            memory_block = "\n".join(memory_prompt_views or [])
-            state_block = "\n\n".join(state_views)
+            prepared = self.kernel.before_agent_receive(
+                task=task,
+                round_id=round_id,
+                mode=mode,
+                agent=AgentDescriptor(
+                    agent_id=agent_id or agent_role or "unknown",
+                    role=agent_role or agent_id or "UnknownAgent",
+                ),
+                state_refs=list(state_refs or []),
+                memory_context=MemoryContext(
+                    refs=[],
+                    prompt_views=list(memory_prompt_views or []),
+                    deliverable_view=deliverable_view,
+                ),
+            )
+            memory_block = "\n".join(prepared.memory_prompt_views)
+            state_block = "\n\n".join(prepared.state_prompt_views)
             deliverable_block = (
-                f"\n\nDeliverable View:\n{deliverable_view}"
-                if deliverable_view
+                f"\n\nDeliverable View:\n{prepared.deliverable_view}"
+                if prepared.deliverable_view
                 else ""
             )
             schema_block = (
@@ -1086,149 +1086,13 @@ class V0Runtime:
         agent: DeterministicAgent,
         output: AgentOutput,
     ) -> list[StateRef]:
-        def commit_state(
-            *,
-            state_type: str,
-            payload: dict,
-            summary: str,
-            usage_hint: str,
-            contains_embedding_refs: bool,
-            tier: str,
-            access_policy: str,
-            audit_payload: dict | None = None,
-        ) -> StateRef:
-            state_ref, state = self.state_pool.write_state(
-                task_id=task.task_id,
-                source_agent=agent.agent_id,
-                state_type=state_type,
-                payload=payload,
-                summary=summary,
-                usage_hint=usage_hint,
-                contains_embedding_refs=contains_embedding_refs,
-                tier=tier,
-                access_policy=access_policy,
-                audit_payload=audit_payload,
-            )
-            self.metrics.record_state_write(
-                task_id=task.task_id,
-                round_id=round_id,
-                mode=mode,
-                state_type=state_type,
-                payload_bytes=state.size_bytes,
-                tier=state.tier,
-            )
-            self.trace.write(
-                "state_written",
-                {
-                    "task_id": task.task_id,
-                    "round_id": round_id,
-                    "mode": mode,
-                    "state": asdict(state),
-                },
-            )
-            return state_ref
-
-        contract_guard = output.metadata.get("contract_guard", {})
-        if contract_guard.get("contract_status") == "degraded_fallback":
-            payload = {
-                "error_type": "contract_violation",
-                "contract_status": "degraded_fallback",
-                "schema_errors": contract_guard.get("schema_errors", []),
-                "allowed_next_step": "review_or_retry_only",
-                "artifact_digest": contract_guard.get("artifact_digest", {}),
-            }
-            state_type = "failure_state"
-            summary = (
-                f"{agent.agent_id} 输出契约降级："
-                f"{'; '.join(contract_guard.get('schema_errors', [])[:2])}"
-            )
-            usage_hint = "review_or_retry_only"
-            tier = "hot"
-            access_policy = "prompt_view_only"
-            audit_payload = {
-                "content": output.content,
-                "contract_guard": contract_guard,
-                "content_chars": len(output.content),
-            }
-            return [
-                commit_state(
-                    state_type=state_type,
-                    payload=payload,
-                    summary=summary,
-                    usage_hint=usage_hint,
-                    contains_embedding_refs=False,
-                    tier=tier,
-                    access_policy=access_policy,
-                    audit_payload=audit_payload,
-                )
-            ]
-        elif agent.agent_id == "retriever":
-            embedding_payload = build_embedding_state_payload(task)
-            embedding_ref = commit_state(
-                state_type="embedding_state",
-                payload=embedding_payload,
-                summary=(
-                    f"{task.title} 的向量引用状态，包含 "
-                    f"{len(embedding_payload['chunk_embedding_ids'])} 个 chunk embedding。"
-                ),
-                usage_hint="vector_similarity_scoring",
-                contains_embedding_refs=True,
-                tier="hot",
-                access_policy="metadata_view_only",
-            )
-            payload = build_retrieval_state_payload(
-                task, embedding_state_id=embedding_ref.state_id
-            )
-            retrieval_ref = commit_state(
-                state_type="retrieval_state",
-                payload=payload,
-                summary=f"{task.title} 的检索状态，包含 {len(task.documents)} 条证据和排序分数。",
-                usage_hint="summary_context_selection",
-                contains_embedding_refs=True,
-                tier="hot",
-                access_policy="prompt_view_only",
-            )
-            return [embedding_ref, retrieval_ref]
-        else:
-            artifact_id = f"artifact_{task.task_id}_{round_id}_{agent.agent_id}"
-            sha256 = hashlib.sha256(output.content.encode("utf-8")).hexdigest()
-            payload = {
-                "code_artifact_id": artifact_id,
-                "artifact_id": artifact_id,
-                "stdout_ref": None,
-                "stderr_ref": None,
-                "file_path": None,
-                "sha256": sha256,
-                "summary": self._summary(
-                    output.content, self.ARTIFACT_PAYLOAD_SUMMARY_CHARS
-                ),
-            }
-            state_type = "artifact_state"
-            summary = (
-                f"{agent.agent_id} 产物状态："
-                f"{self._summary(output.content, self.ARTIFACT_STATE_SUMMARY_CHARS)}"
-            )
-            usage_hint = "artifact_summary"
-            tier = "cold"
-            access_policy = "prompt_view_with_audit_cold_access"
-            audit_payload = {
-                "artifact_id": artifact_id,
-                "sha256": sha256,
-                "content": output.content,
-                "content_chars": len(output.content),
-            }
-        return [
-            commit_state(
-                state_type=state_type,
-                payload=payload,
-                summary=summary,
-                usage_hint=usage_hint,
-                contains_embedding_refs=False,
-                tier=tier,
-                access_policy=access_policy,
-                audit_payload=audit_payload,
-            )
-        ]
+        return self.kernel.write_agent_state(
+            task=task,
+            round_id=round_id,
+            mode=mode,
+            agent=self._agent_descriptor(agent),
+            output=output,
+        )
 
     def _build_shp_message(
         self,
@@ -1242,56 +1106,166 @@ class V0Runtime:
         state_refs: list[StateRef],
         memory_refs: list[MemoryRef],
     ) -> str:
-        readiness_report = self.readiness_barrier.assess(
-            state_refs=state_refs,
-            degraded=any(ref.state_type == "failure_state" for ref in state_refs),
-        )
-        route_decision = self.capability_router.route(
+        return self.kernel.build_handoff(
+            task=task,
+            round_id=round_id,
+            mode=mode,
             sender=from_agent,
             declared_receiver=next_receiver,
+            summary=summary,
             state_refs=state_refs,
-            readiness=readiness_report.readiness,
+            memory_refs=memory_refs,
         )
-        budget_report = self.control_budget.record_decision(
-            task_id=task.task_id,
-            estimated_control_tokens=12 + len(state_refs) * 3 + len(memory_refs) * 2,
+
+    def _build_bounded_cross_task_context(
+        self, entries: list[BoundedBaselineEntry]
+    ) -> list[AgentOutput]:
+        if not entries:
+            return []
+        remaining = self.BOUNDED_CROSS_CONTEXT_BUDGET_TOKENS
+        blocks: list[str] = []
+        for entry in reversed(entries):
+            key_messages = "\n".join(f"- {item}" for item in entry.key_messages)
+            block = (
+                f"Previous task: {entry.task_id} | {entry.title}\n"
+                f"accepted_final_output:\n{entry.final_answer}\n\n"
+                f"bounded_summary:\n{entry.bounded_summary}\n\n"
+                f"key_messages:\n{key_messages or '- none'}"
+            )
+            token_count = self.token_counter.count(block).token_count
+            if token_count > remaining:
+                block = self._truncate_to_token_budget(block, remaining)
+                token_count = self.token_counter.count(block).token_count
+            if block:
+                blocks.insert(0, block)
+                remaining -= token_count
+            if remaining <= 0:
+                break
+        if not blocks:
+            return []
+        content = "\n\n---\n\n".join(blocks)
+        return [
+            AgentOutput(
+                agent_id="bounded_cross_task_context",
+                content=content,
+                metadata={
+                    "baseline_context": "bounded_natural_language",
+                    "entry_count": len(blocks),
+                    "token_budget": self.BOUNDED_CROSS_CONTEXT_BUDGET_TOKENS,
+                },
+            )
+        ]
+
+    def _build_bounded_history_entry(
+        self,
+        *,
+        task: TaskSpec,
+        round_id: int,
+        mode: Mode,
+        selected_output: AgentOutput,
+        current_task_outputs: list[AgentOutput],
+    ) -> BoundedBaselineEntry:
+        source_text = "\n\n".join(output.content for output in current_task_outputs)
+        summary_seed = (
+            f"{task.task_id} {task.title}\n"
+            f"{self._summary(selected_output.content, 1600)}"
         )
-        gate_report = self.communication_gate.assess(
-            readiness=readiness_report.readiness,
-            route_decision=route_decision,
-            budget_report=budget_report,
+        bounded_summary = self._truncate_to_token_budget(
+            summary_seed,
+            self.BOUNDED_SUMMARY_MAX_TOKENS,
         )
-        self.metrics.record_control_decision(
+        final_answer = self._truncate_to_token_budget(
+            selected_output.content,
+            max(
+                1,
+                self.BOUNDED_CROSS_CONTEXT_BUDGET_TOKENS
+                - self.BOUNDED_SUMMARY_MAX_TOKENS,
+            ),
+        )
+        key_messages = [
+            f"{output.agent_id}: {self._summary(output.content, 260)}"
+            for output in current_task_outputs[-self.BOUNDED_RECENT_KEY_MESSAGES_K :]
+        ]
+        estimated_tokens = self.token_counter.count(
+            source_text + "\n\n" + bounded_summary
+        ).token_count
+        self.metrics.record_summary_update(
             task_id=task.task_id,
             round_id=round_id,
             mode=mode,
-            route_changed=route_decision.route_changed,
-            gate_status=gate_report.status,
-            budget_allowed=budget_report.allowed,
+            estimated_tokens=estimated_tokens,
+            method="deterministic",
         )
-        envelope = build_handoff_envelope(
-            task_id=task.task_id,
-            round_id=round_id,
-            sender=from_agent,
-            receiver=route_decision.receiver,
-            summary=summary,
-            action=f"{from_agent}_completed",
-            state_refs=state_refs,
-            memory_refs=memory_refs,
-            metrics={
-                "state_ref_count": len(state_refs),
-                "memory_ref_count": len(memory_refs),
-                "readiness_reasons": readiness_report.reasons,
-                "route_decision": route_decision.to_dict(),
-                "communication_gate": gate_report.to_dict(),
-                "control_budget": budget_report.to_dict(),
+        self.trace.write(
+            "bounded_summary_updated",
+            {
+                "task_id": task.task_id,
+                "round_id": round_id,
+                "mode": mode,
+                "method": "deterministic",
+                "summary_tokens_estimated": estimated_tokens,
+                "key_message_count": len(key_messages),
             },
-            readiness=gate_report.status,
-            allowed_next_step=gate_report.allowed_next_step,
-            capability_hint=route_decision.capability_hint,
-            msg_type=route_decision.msg_type,
         )
-        return envelope.to_json()
+        return BoundedBaselineEntry(
+            task_id=task.task_id,
+            group_id=task.group_id,
+            title=task.title,
+            final_answer=final_answer,
+            bounded_summary=bounded_summary,
+            key_messages=key_messages,
+        )
+
+    def _select_deliverable_output(
+        self,
+        *,
+        task: TaskSpec,
+        fallback_output: AgentOutput,
+        draft_answer_output: AgentOutput | None,
+        review_report_output: AgentOutput | None,
+        final_answer_output: AgentOutput | None,
+    ) -> AgentOutput:
+        final_answer = (
+            final_answer_output
+            if final_answer_output is not None
+            else draft_answer_output
+            if draft_answer_output is not None
+            else fallback_output
+        )
+        selected = final_answer if self._is_final_task(task) else fallback_output
+        roles: dict[str, dict[str, object]] = {}
+        if draft_answer_output is not None:
+            roles["draft_answer"] = self._deliverable_payload(draft_answer_output)
+        if review_report_output is not None:
+            roles["review_report"] = self._deliverable_payload(review_report_output)
+        if final_answer is not None:
+            roles["final_answer"] = self._deliverable_payload(final_answer)
+        selected_role = (
+            "final_answer"
+            if self._is_final_task(task) and selected is final_answer
+            else "review_report"
+            if review_report_output is selected
+            else "draft_answer"
+            if draft_answer_output is selected
+            else "agent_output"
+        )
+        metadata = dict(selected.metadata)
+        metadata["deliverable_role"] = selected_role
+        metadata["deliverable_roles"] = roles
+        return AgentOutput(
+            agent_id=selected.agent_id,
+            content=selected.content,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _deliverable_payload(output: AgentOutput) -> dict[str, object]:
+        return {
+            "agent_id": output.agent_id,
+            "content": output.content,
+            "content_chars": len(output.content),
+            "metadata": output.metadata,
+        }
 
     def _next_agent_id(self, agent_id: str) -> str:
         ids = [agent.agent_id for agent in self.agents]
@@ -1302,9 +1276,33 @@ class V0Runtime:
         return ids[index + 1] if index + 1 < len(ids) else "runtime"
 
     def _is_final_task(self, task: TaskSpec) -> bool:
-        title = task.title.lower()
+        title = task.title.strip().lower()
         explicit_final_id = re.search(r"(?:^|[^0-9])10$", task.task_id) is not None
-        return explicit_final_id or "最终" in task.title or "final" in title
+        return explicit_final_id or title.startswith("\u6700\u7ec8") or title.startswith("final")
+
+    @staticmethod
+    def _is_stress_baseline_mode(mode: Mode) -> bool:
+        return mode in {"baseline_text", "baseline_stress_full_broadcast"}
+
+    @staticmethod
+    def _is_bounded_baseline_mode(mode: Mode) -> bool:
+        return mode == "baseline_bounded_nl_framework"
+
+    @staticmethod
+    def _task_thread_key(task: TaskSpec) -> str:
+        if task.group_id:
+            return task.group_id
+        match = re.match(r"([A-Za-z]+)", task.task_id)
+        return match.group(1) if match else "default"
+
+    def _deliverable_role_for_agent(self, agent: DeterministicAgent) -> str:
+        profile = self.capability_profiles.get(agent.agent_id)
+        capabilities = profile.capabilities if profile is not None else set()
+        if "final_deliverable_draft" in capabilities:
+            return "draft_answer"
+        if "final_deliverable_review" in capabilities:
+            return "review_report"
+        return ""
 
     def _is_final_deliverable_agent(self, agent: DeterministicAgent) -> bool:
         profile = self.capability_profiles.get(agent.agent_id)
@@ -1322,24 +1320,15 @@ class V0Runtime:
         prompt: str,
         memory_prompt_views: list[str],
     ) -> dict[str, int]:
-        memory_text = "\n".join(memory_prompt_views)
-        return {
-            "direct_text_tokens": self.token_counter.count(message_content).token_count,
-            "prompt_tokens": self.token_counter.count(prompt).token_count,
-            "retrieved_memory_tokens": (
-                self.token_counter.count(memory_text).token_count if memory_text else 0
-            ),
-            "control_llm_tokens": 0,
-        }
+        return self.kernel.build_message_cost_report(
+            message_content=message_content,
+            prompt=prompt,
+            memory_prompt_views=memory_prompt_views,
+        )
 
     @staticmethod
     def _handoff_gate(message_content: str) -> dict[str, object]:
-        payload = json.loads(message_content)
-        metrics = payload.get("metrics", {})
-        if not isinstance(metrics, dict):
-            return {}
-        gate = metrics.get("communication_gate", {})
-        return gate if isinstance(gate, dict) else {}
+        return CollaborationKernel.handoff_gate(message_content)
 
     def _background_job_count(self) -> int:
         with self._background_jobs_lock:
@@ -1356,6 +1345,32 @@ class V0Runtime:
         return "reuse_strategy"
 
     @staticmethod
+    def _agent_descriptor(agent: object) -> AgentDescriptor:
+        return AgentDescriptor(
+            agent_id=str(getattr(agent, "agent_id", "")),
+            role=str(getattr(agent, "role", getattr(agent, "agent_id", ""))),
+        )
+
+    @staticmethod
     def _summary(text: str, limit: int) -> str:
         compact = " ".join(text.split())
         return compact[:limit]
+
+    def _truncate_to_token_budget(self, text: str, budget_tokens: int) -> str:
+        if budget_tokens <= 0 or not text:
+            return ""
+        token_count = self.token_counter.count(text).token_count
+        if token_count <= budget_tokens:
+            return text
+        low = 0
+        high = len(text)
+        best = ""
+        while low <= high:
+            mid = (low + high) // 2
+            candidate = text[:mid]
+            if self.token_counter.count(candidate).token_count <= budget_tokens:
+                best = candidate
+                low = mid + 1
+            else:
+                high = mid - 1
+        return best.rstrip()

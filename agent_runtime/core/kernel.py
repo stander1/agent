@@ -1,0 +1,775 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import time
+import uuid
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Iterable
+
+from agent_runtime.bridge.state_memory_bridge import StateToMemoryBridgeLite
+from agent_runtime.core.communication import (
+    CapabilityProfileManagerLite,
+    CapabilityRouterLite,
+    CommunicationGateLite,
+    ControlBudgetLite,
+)
+from agent_runtime.core.models import AgentOutput, Mode, TaskSpec
+from agent_runtime.core.readiness import ReadinessBarrierLite
+from agent_runtime.eval.metrics import MetricsCollector
+from agent_runtime.eval.token_counter import TokenCounter
+from agent_runtime.eval.trace_logger import TraceLogger
+from agent_runtime.memory.memory_store import MemoryRef, MemoryStoreLite
+from agent_runtime.protocol.shp import build_handoff_envelope
+from agent_runtime.reliability.contract_guard import (
+    ContractContext,
+    guard_agent_output,
+    render_contract_retry_prompt,
+)
+from agent_runtime.state.non_text import (
+    build_embedding_state_payload,
+    build_retrieval_state_payload,
+)
+from agent_runtime.state.state_pool import StatePoolLite, StateRef
+
+
+@dataclass(slots=True, frozen=True)
+class AgentDescriptor:
+    agent_id: str
+    role: str
+    capabilities: tuple[str, ...] = ()
+    framework_metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class KernelSession:
+    session_id: str
+    framework: str
+    external_session_id: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    opened_at: float = field(default_factory=time.time)
+    closed_at: float | None = None
+
+
+@dataclass(slots=True)
+class MemoryContext:
+    refs: list[MemoryRef]
+    prompt_views: list[str]
+    deliverable_view: str = ""
+
+
+@dataclass(slots=True)
+class PreparedAgentInput:
+    agent: AgentDescriptor
+    state_prompt_views: list[str]
+    memory_prompt_views: list[str]
+    deliverable_view: str = ""
+    raw_access_count: int = 0
+
+
+@dataclass(slots=True)
+class ProcessedAgentOutput:
+    output: AgentOutput
+    state_refs: list[StateRef]
+
+
+class CollaborationKernel:
+    """Framework-neutral collaboration data-plane services.
+
+    Framework adapters keep ownership of agent construction and scheduling.
+    The kernel owns contract handling, state and memory access, SHP handoff
+    construction, and collaboration observability.
+    """
+
+    MAX_FORMAT_RETRY_INPUT_TOKENS = 800
+    ARTIFACT_PAYLOAD_SUMMARY_CHARS = 240
+    ARTIFACT_STATE_SUMMARY_CHARS = 120
+
+    def __init__(
+        self,
+        *,
+        agents: Iterable[object],
+        token_counter: TokenCounter,
+        metrics: MetricsCollector,
+        trace: TraceLogger,
+        state_pool: StatePoolLite | None = None,
+        memory_store: MemoryStoreLite | None = None,
+    ) -> None:
+        agent_list = list(agents)
+        self.token_counter = token_counter
+        self.metrics = metrics
+        self.trace = trace
+        self.state_pool = state_pool or StatePoolLite(Path("runs") / "state")
+        self.memory_store = memory_store or MemoryStoreLite()
+        self.state_memory_bridge = StateToMemoryBridgeLite(self.memory_store)
+        self.readiness_barrier = ReadinessBarrierLite()
+        self.capability_profiles = CapabilityProfileManagerLite(agent_list)
+        self.capability_router = CapabilityRouterLite(self.capability_profiles)
+        self.communication_gate = CommunicationGateLite()
+        self.control_budget = ControlBudgetLite()
+        self._sessions: dict[str, KernelSession] = {}
+        self._closed = False
+
+    def open_session(
+        self,
+        *,
+        framework: str,
+        external_session_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> KernelSession:
+        self._ensure_open()
+        session = KernelSession(
+            session_id=f"session_{uuid.uuid4().hex}",
+            framework=framework,
+            external_session_id=external_session_id,
+            metadata=dict(metadata or {}),
+        )
+        self._sessions[session.session_id] = session
+        self.trace.write(
+            "kernel_session_opened",
+            {
+                "session_id": session.session_id,
+                "framework": framework,
+                "external_session_id": external_session_id,
+                "metadata": session.metadata,
+            },
+        )
+        return session
+
+    def close_session(self, session_id: str) -> None:
+        session = self._sessions.pop(session_id, None)
+        if session is None:
+            return
+        session.closed_at = time.time()
+        self.trace.write(
+            "kernel_session_closed",
+            {
+                "session_id": session.session_id,
+                "framework": session.framework,
+                "external_session_id": session.external_session_id,
+            },
+        )
+
+    def active_sessions(self) -> list[KernelSession]:
+        return list(self._sessions.values())
+
+    def prepare_memory_context(
+        self,
+        *,
+        task: TaskSpec,
+        round_id: int,
+        mode: Mode,
+        final_task: bool,
+        deliverable_budget_chars: int,
+    ) -> MemoryContext:
+        self._ensure_open()
+        started = time.perf_counter()
+        search_report = self.memory_store.search_memory_with_report(
+            task.prompt,
+            tags=[task.group_id],
+            top_k=4 if final_task else 2,
+        )
+        self.metrics.record_memory_search_backend(
+            task_id=task.task_id,
+            round_id=round_id,
+            mode=mode,
+            retrieval_backend=search_report.retrieval_backend,
+            vector_retrieval_count=search_report.vector_retrieval_count,
+        )
+        prompt_views = [
+            self.memory_store.render_prompt_view(ref) for ref in search_report.refs
+        ]
+        deliverable_view = (
+            self.memory_store.render_deliverable_view(
+                search_report.refs,
+                task_title=task.title,
+                budget_chars=deliverable_budget_chars,
+            )
+            if final_task
+            else ""
+        )
+        if prompt_views:
+            self.metrics.record_memory_retrieval(
+                task_id=task.task_id,
+                round_id=round_id,
+                mode=mode,
+                hit_count=len(search_report.refs),
+                useful_hit_count=len(search_report.refs),
+                wrong_hit_count=0,
+                prompt_view="\n".join(prompt_views),
+                token_counter=self.token_counter,
+            )
+        self.metrics.record_agent_local_timing(
+            task_id=task.task_id,
+            round_id=round_id,
+            mode=mode,
+            agent_id="local_runtime",
+            local_memory_search_ms=(time.perf_counter() - started) * 1000,
+        )
+        return MemoryContext(
+            refs=search_report.refs,
+            prompt_views=prompt_views,
+            deliverable_view=deliverable_view,
+        )
+
+    def before_agent_receive(
+        self,
+        *,
+        task: TaskSpec,
+        round_id: int,
+        mode: Mode,
+        agent: AgentDescriptor,
+        state_refs: list[StateRef],
+        memory_context: MemoryContext | None = None,
+        state_budget_chars: int = 700,
+    ) -> PreparedAgentInput:
+        self._ensure_open()
+        state_views: list[str] = []
+        state_read_ms = 0.0
+        raw_access_total = 0
+        for ref in state_refs[-5:]:
+            started = time.perf_counter()
+            escalation_report = self.state_pool.request_progressive_access(
+                ref,
+                agent_role=agent.role,
+                reason="runtime_prompt_view",
+                need_raw=False,
+                budget_chars=state_budget_chars,
+            )
+            state_read_ms += (time.perf_counter() - started) * 1000
+            state_views.append(escalation_report.prompt_view)
+            raw_access_count = int(
+                escalation_report.cold_access is not None
+                and escalation_report.cold_access.allowed
+            )
+            raw_access_total += raw_access_count
+            self.metrics.record_state_access(
+                task_id=task.task_id,
+                round_id=round_id,
+                mode=mode,
+                raw_access_count=raw_access_count,
+                summary_access_count=int(
+                    escalation_report.selected_level
+                    in {"summary", "summary_only", "metadata"}
+                ),
+                evidence_snippet_access_count=int(
+                    escalation_report.selected_level == "evidence_snippets"
+                ),
+                access_escalation_count=(
+                    escalation_report.access_escalation_count
+                ),
+                read_lease_acquire_count=1 + raw_access_count,
+            )
+        self.metrics.record_agent_local_timing(
+            task_id=task.task_id,
+            round_id=round_id,
+            mode=mode,
+            agent_id=agent.agent_id,
+            local_state_read_ms=state_read_ms,
+            raw_access_count=raw_access_total,
+        )
+        memory_context = memory_context or MemoryContext([], [])
+        return PreparedAgentInput(
+            agent=agent,
+            state_prompt_views=state_views,
+            memory_prompt_views=memory_context.prompt_views,
+            deliverable_view=memory_context.deliverable_view,
+            raw_access_count=raw_access_total,
+        )
+
+    def after_agent_output(
+        self,
+        *,
+        task: TaskSpec,
+        round_id: int,
+        mode: Mode,
+        agent: AgentDescriptor,
+        next_action: str,
+        output: AgentOutput,
+        retry_output: Callable[[str], AgentOutput] | None = None,
+    ) -> ProcessedAgentOutput:
+        self._ensure_open()
+        processed = self.validate_agent_output(
+            task=task,
+            round_id=round_id,
+            mode=mode,
+            agent=agent,
+            next_action=next_action,
+            output=output,
+            retry_output=retry_output,
+        )
+        state_refs = self.write_agent_state(
+            task=task,
+            round_id=round_id,
+            mode=mode,
+            agent=agent,
+            output=processed,
+        )
+        return ProcessedAgentOutput(output=processed, state_refs=state_refs)
+
+    def validate_agent_output(
+        self,
+        *,
+        task: TaskSpec,
+        round_id: int,
+        mode: Mode,
+        agent: AgentDescriptor,
+        next_action: str,
+        output: AgentOutput,
+        retry_output: Callable[[str], AgentOutput] | None = None,
+    ) -> AgentOutput:
+        self._ensure_open()
+        return self._apply_contract_guard(
+            task=task,
+            round_id=round_id,
+            mode=mode,
+            agent=agent,
+            next_action=next_action,
+            output=output,
+            retry_output=retry_output,
+        )
+
+    def write_agent_state(
+        self,
+        *,
+        task: TaskSpec,
+        round_id: int,
+        mode: Mode,
+        agent: AgentDescriptor,
+        output: AgentOutput,
+    ) -> list[StateRef]:
+        self._ensure_open()
+
+        def commit_state(
+            *,
+            state_type: str,
+            payload: dict[str, Any],
+            summary: str,
+            usage_hint: str,
+            contains_embedding_refs: bool,
+            tier: str,
+            access_policy: str,
+            audit_payload: dict[str, Any] | None = None,
+        ) -> StateRef:
+            state_ref, state = self.state_pool.write_state(
+                task_id=task.task_id,
+                source_agent=agent.agent_id,
+                state_type=state_type,
+                payload=payload,
+                summary=summary,
+                usage_hint=usage_hint,
+                contains_embedding_refs=contains_embedding_refs,
+                tier=tier,
+                access_policy=access_policy,
+                audit_payload=audit_payload,
+            )
+            self.metrics.record_state_write(
+                task_id=task.task_id,
+                round_id=round_id,
+                mode=mode,
+                state_type=state_type,
+                payload_bytes=state.size_bytes,
+                tier=state.tier,
+            )
+            self.trace.write(
+                "state_written",
+                {
+                    "task_id": task.task_id,
+                    "round_id": round_id,
+                    "mode": mode,
+                    "state": asdict(state),
+                },
+            )
+            return state_ref
+
+        contract_guard = output.metadata.get("contract_guard", {})
+        if contract_guard.get("contract_status") == "degraded_fallback":
+            return [
+                commit_state(
+                    state_type="failure_state",
+                    payload={
+                        "error_type": "contract_violation",
+                        "contract_status": "degraded_fallback",
+                        "schema_errors": contract_guard.get("schema_errors", []),
+                        "allowed_next_step": "review_or_retry_only",
+                        "artifact_digest": contract_guard.get(
+                            "artifact_digest", {}
+                        ),
+                    },
+                    summary=(
+                        f"{agent.agent_id} 输出契约降级："
+                        f"{'; '.join(contract_guard.get('schema_errors', [])[:2])}"
+                    ),
+                    usage_hint="review_or_retry_only",
+                    contains_embedding_refs=False,
+                    tier="hot",
+                    access_policy="prompt_view_only",
+                    audit_payload={
+                        "content": output.content,
+                        "contract_guard": contract_guard,
+                        "content_chars": len(output.content),
+                    },
+                )
+            ]
+
+        if agent.agent_id == "retriever":
+            embedding_payload = build_embedding_state_payload(task)
+            embedding_ref = commit_state(
+                state_type="embedding_state",
+                payload=embedding_payload,
+                summary=(
+                    f"{task.title} 的向量引用状态，包含 "
+                    f"{len(embedding_payload['chunk_embedding_ids'])} 个 chunk embedding。"
+                ),
+                usage_hint="vector_similarity_scoring",
+                contains_embedding_refs=True,
+                tier="hot",
+                access_policy="metadata_view_only",
+            )
+            retrieval_payload = build_retrieval_state_payload(
+                task, embedding_state_id=embedding_ref.state_id
+            )
+            retrieval_ref = commit_state(
+                state_type="retrieval_state",
+                payload=retrieval_payload,
+                summary=(
+                    f"{task.title} 的检索状态，包含 "
+                    f"{len(task.documents)} 条证据和排序分数。"
+                ),
+                usage_hint="summary_context_selection",
+                contains_embedding_refs=True,
+                tier="hot",
+                access_policy="prompt_view_only",
+            )
+            return [embedding_ref, retrieval_ref]
+
+        artifact_id = f"artifact_{task.task_id}_{round_id}_{agent.agent_id}"
+        sha256 = hashlib.sha256(output.content.encode("utf-8")).hexdigest()
+        return [
+            commit_state(
+                state_type="artifact_state",
+                payload={
+                    "code_artifact_id": artifact_id,
+                    "artifact_id": artifact_id,
+                    "stdout_ref": None,
+                    "stderr_ref": None,
+                    "file_path": None,
+                    "sha256": sha256,
+                    "summary": self._summary(
+                        output.content, self.ARTIFACT_PAYLOAD_SUMMARY_CHARS
+                    ),
+                },
+                summary=(
+                    f"{agent.agent_id} 产物状态："
+                    f"{self._summary(output.content, self.ARTIFACT_STATE_SUMMARY_CHARS)}"
+                ),
+                usage_hint="artifact_summary",
+                contains_embedding_refs=False,
+                tier="cold",
+                access_policy="prompt_view_with_audit_cold_access",
+                audit_payload={
+                    "artifact_id": artifact_id,
+                    "sha256": sha256,
+                    "content": output.content,
+                    "content_chars": len(output.content),
+                },
+            )
+        ]
+
+    def build_handoff(
+        self,
+        *,
+        task: TaskSpec,
+        round_id: int,
+        mode: Mode,
+        sender: str,
+        declared_receiver: str,
+        summary: str,
+        state_refs: list[StateRef],
+        memory_refs: list[MemoryRef],
+    ) -> str:
+        self._ensure_open()
+        readiness_report = self.readiness_barrier.assess(
+            state_refs=state_refs,
+            degraded=any(ref.state_type == "failure_state" for ref in state_refs),
+        )
+        route_decision = self.capability_router.route(
+            sender=sender,
+            declared_receiver=declared_receiver,
+            state_refs=state_refs,
+            readiness=readiness_report.readiness,
+        )
+        budget_report = self.control_budget.record_decision(
+            task_id=task.task_id,
+            estimated_control_tokens=12 + len(state_refs) * 3 + len(memory_refs) * 2,
+        )
+        gate_report = self.communication_gate.assess(
+            readiness=readiness_report.readiness,
+            route_decision=route_decision,
+            budget_report=budget_report,
+        )
+        self.metrics.record_control_decision(
+            task_id=task.task_id,
+            round_id=round_id,
+            mode=mode,
+            route_changed=route_decision.route_changed,
+            gate_status=gate_report.status,
+            budget_allowed=budget_report.allowed,
+        )
+        envelope = build_handoff_envelope(
+            task_id=task.task_id,
+            round_id=round_id,
+            sender=sender,
+            receiver=route_decision.receiver,
+            summary=summary,
+            action=f"{sender}_completed",
+            state_refs=state_refs,
+            memory_refs=memory_refs,
+            metrics={
+                "state_ref_count": len(state_refs),
+                "memory_ref_count": len(memory_refs),
+                "readiness_reasons": readiness_report.reasons,
+                "route_decision": route_decision.to_dict(),
+                "communication_gate": gate_report.to_dict(),
+                "control_budget": budget_report.to_dict(),
+            },
+            readiness=gate_report.status,
+            allowed_next_step=gate_report.allowed_next_step,
+            capability_hint=route_decision.capability_hint,
+            msg_type=route_decision.msg_type,
+        )
+        return envelope.to_json()
+
+    def build_message_cost_report(
+        self,
+        *,
+        message_content: str,
+        prompt: str,
+        memory_prompt_views: list[str],
+    ) -> dict[str, int]:
+        memory_text = "\n".join(memory_prompt_views)
+        return {
+            "direct_text_tokens": self.token_counter.count(
+                message_content
+            ).token_count,
+            "prompt_tokens": self.token_counter.count(prompt).token_count,
+            "retrieved_memory_tokens": (
+                self.token_counter.count(memory_text).token_count
+                if memory_text
+                else 0
+            ),
+            "control_llm_tokens": 0,
+        }
+
+    def finalize_task(self, task_id: str) -> None:
+        self.state_pool.finalize_task(task_id)
+        self.control_budget.finalize_task(task_id)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        for session_id in list(self._sessions):
+            self.close_session(session_id)
+        self._closed = True
+
+    def _apply_contract_guard(
+        self,
+        *,
+        task: TaskSpec,
+        round_id: int,
+        mode: Mode,
+        agent: AgentDescriptor,
+        next_action: str,
+        output: AgentOutput,
+        retry_output: Callable[[str], AgentOutput] | None,
+    ) -> AgentOutput:
+        context = ContractContext(
+            task_id=task.task_id,
+            agent_id=agent.agent_id,
+            role=agent.role,
+            next_action=next_action,
+            artifact_ref=(
+                f"cold://{task.task_id}/{round_id}/{agent.agent_id}/artifact"
+            ),
+        )
+        started = time.perf_counter()
+        result = guard_agent_output(output.content, context)
+        self.metrics.record_agent_local_timing(
+            task_id=task.task_id,
+            round_id=round_id,
+            mode=mode,
+            agent_id=agent.agent_id,
+            artifact_digest_ms=(time.perf_counter() - started) * 1000,
+        )
+        self.trace.write(
+            "contract_guard_checked",
+            {
+                "task_id": task.task_id,
+                "round_id": round_id,
+                "mode": mode,
+                "agent_id": agent.agent_id,
+                "contract_status": result.contract_status,
+                "schema_valid": result.schema_valid,
+                "repair_actions": result.repair_actions,
+                "schema_errors": result.schema_errors,
+            },
+        )
+
+        if result.retry_required and retry_output is not None:
+            result.retry_attempted = True
+            retry_prompt = self.apply_retry_budget(
+                task=task,
+                round_id=round_id,
+                mode=mode,
+                retry_prompt=render_contract_retry_prompt(
+                    context=context, result=result
+                ),
+            )
+            retry_result_output = retry_output(retry_prompt)
+            retry_llm_meta = retry_result_output.metadata.get("llm", {})
+            if retry_llm_meta:
+                self.metrics.record_llm_call(
+                    task_id=task.task_id,
+                    round_id=round_id,
+                    mode=mode,
+                    usage=retry_llm_meta.get("usage", {}),
+                    latency_ms=float(
+                        retry_llm_meta.get("latency_ms", 0.0) or 0.0
+                    ),
+                    agent_id=agent.agent_id,
+                    output_chars=len(retry_result_output.content),
+                )
+                self.metrics.record_provider_guard(
+                    task_id=task.task_id,
+                    round_id=round_id,
+                    mode=mode,
+                    provider_guard=retry_llm_meta.get("provider_guard"),
+                    agent_id=agent.agent_id,
+                )
+            self.metrics.record_retry_tokens(
+                task_id=task.task_id,
+                round_id=round_id,
+                mode=mode,
+                retry_prompt=retry_prompt,
+                retry_output=retry_result_output.content,
+                token_counter=self.token_counter,
+            )
+            retry_started = time.perf_counter()
+            retry_result = guard_agent_output(
+                retry_result_output.content,
+                ContractContext(
+                    task_id=task.task_id,
+                    agent_id=agent.agent_id,
+                    role=agent.role,
+                    next_action=next_action,
+                    artifact_ref=context.artifact_ref,
+                ),
+            )
+            self.metrics.record_agent_local_timing(
+                task_id=task.task_id,
+                round_id=round_id,
+                mode=mode,
+                agent_id=agent.agent_id,
+                artifact_digest_ms=(time.perf_counter() - retry_started) * 1000,
+            )
+            if retry_result.schema_valid:
+                result.control = retry_result.control
+                result.schema_valid = True
+                result.contract_status = "repaired"
+                result.repair_actions.extend(["context_pruned_format_retry"])
+                result.schema_errors = []
+                result.retry_required = False
+            self.trace.write(
+                "contract_guard_retry",
+                {
+                    "task_id": task.task_id,
+                    "round_id": round_id,
+                    "mode": mode,
+                    "agent_id": agent.agent_id,
+                    "retry_schema_valid": retry_result.schema_valid,
+                    "retry_status": retry_result.contract_status,
+                },
+            )
+
+        self.metrics.record_contract_guard(
+            task_id=task.task_id,
+            round_id=round_id,
+            mode=mode,
+            contract_report=result.to_dict(),
+            agent_id=agent.agent_id,
+        )
+        metadata = dict(output.metadata)
+        metadata["contract_guard"] = result.to_dict()
+        return AgentOutput(
+            agent_id=output.agent_id,
+            content=result.artifact,
+            metadata=metadata,
+        )
+
+    def apply_retry_budget(
+        self,
+        *,
+        task: TaskSpec,
+        round_id: int,
+        mode: Mode,
+        retry_prompt: str,
+    ) -> str:
+        token_count = self.token_counter.count(retry_prompt)
+        budget_exhausted = (
+            token_count.token_count > self.MAX_FORMAT_RETRY_INPUT_TOKENS
+        )
+        if not budget_exhausted:
+            self.metrics.record_retry_budget(
+                task_id=task.task_id,
+                round_id=round_id,
+                mode=mode,
+                retry_input_tokens=token_count.token_count,
+                budget_exhausted=False,
+            )
+            return retry_prompt
+
+        ratio = self.MAX_FORMAT_RETRY_INPUT_TOKENS / max(
+            1, token_count.token_count
+        )
+        keep_chars = max(400, int(len(retry_prompt) * ratio * 0.9))
+        trimmed = (
+            retry_prompt[:keep_chars]
+            + "\n\n[retry_budget_truncated: full artifact and overflow fields omitted]"
+        )
+        self.metrics.record_retry_budget(
+            task_id=task.task_id,
+            round_id=round_id,
+            mode=mode,
+            retry_input_tokens=token_count.token_count,
+            budget_exhausted=True,
+        )
+        self.trace.write(
+            "retry_budget_applied",
+            {
+                "task_id": task.task_id,
+                "round_id": round_id,
+                "mode": mode,
+                "input_tokens": token_count.token_count,
+                "max_tokens": self.MAX_FORMAT_RETRY_INPUT_TOKENS,
+                "trimmed_chars": len(trimmed),
+            },
+        )
+        return trimmed
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("Collaboration kernel is closed")
+
+    @staticmethod
+    def handoff_gate(message_content: str) -> dict[str, object]:
+        payload = json.loads(message_content)
+        metrics = payload.get("metrics", {})
+        if not isinstance(metrics, dict):
+            return {}
+        gate = metrics.get("communication_gate", {})
+        return gate if isinstance(gate, dict) else {}
+
+    @staticmethod
+    def _summary(text: str, limit: int) -> str:
+        return " ".join(text.split())[:limit]

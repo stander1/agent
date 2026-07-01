@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any
 
 
-BASELINE_MODE = "baseline_text"
+BASELINE_MODE = "baseline_bounded_nl_framework"
+LEGACY_BASELINE_MODE = "baseline_text"
 RUNTIME_MODE = "runtime_lite"
 
 SUMMARY_METRICS = [
@@ -23,6 +24,9 @@ SUMMARY_METRICS = [
     "prompt_view_tokens",
     "retrieved_memory_tokens",
     "end_to_end_collaboration_tokens",
+    "summary_update_count",
+    "summary_update_estimated_tokens",
+    "summary_update_total_tokens",
     "fallback_count",
     "provider_response_retry_count",
     "contract_retry_count",
@@ -69,7 +73,10 @@ def percent_change(new_value: Any, old_value: Any) -> float | None:
 
 
 def mode_summary(run: SuiteRun, mode: str) -> dict[str, Any]:
-    return dict(run.summary.get("by_mode", {}).get(mode, {}))
+    by_mode = run.summary.get("by_mode", {})
+    if mode == BASELINE_MODE and mode not in by_mode:
+        return dict(by_mode.get(LEGACY_BASELINE_MODE, {}))
+    return dict(by_mode.get(mode, {}))
 
 
 def compare_modes(run: SuiteRun) -> dict[str, Any]:
@@ -274,13 +281,16 @@ def render_metric_table(metrics: dict[str, Any]) -> list[str]:
         "prompt_view_tokens",
         "retrieved_memory_tokens",
         "end_to_end_collaboration_tokens",
+        "summary_update_count",
+        "summary_update_estimated_tokens",
+        "summary_update_total_tokens",
         "fallback_count",
         "provider_response_retry_count",
         "contract_retry_count",
         "background_memory_wait_ms",
     ]
     lines = [
-        "| 指标 | baseline_text | runtime_lite | 变化 |",
+        f"| 指标 | {BASELINE_MODE} | {RUNTIME_MODE} | 变化 |",
         "| --- | ---: | ---: | ---: |",
     ]
     for key in selected:

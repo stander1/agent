@@ -25,6 +25,42 @@ class FailingAgent(DeterministicAgent):
         raise ValueError("intentional runtime failure")
 
 
+class ContextEchoWriter(DeterministicAgent):
+    agent_id = "writer"
+    role = "WriterAgent"
+
+    def run(self, task: TaskSpec, context: list[AgentOutput]) -> AgentOutput:
+        joined = "\n".join(item.content for item in context)
+        return AgentOutput(
+            agent_id=self.agent_id,
+            content=f"writer_output task={task.task_id}\ncontext={joined}",
+        )
+
+
+class FinalAnswerWriter(DeterministicAgent):
+    agent_id = "writer"
+    role = "WriterAgent"
+
+    def run(self, task: TaskSpec, context: list[AgentOutput]) -> AgentOutput:
+        del context
+        return AgentOutput(
+            agent_id=self.agent_id,
+            content=f"FINAL ANSWER for {task.task_id}",
+        )
+
+
+class ReviewReportAgent(DeterministicAgent):
+    agent_id = "reviewer"
+    role = "ReviewerAgent"
+
+    def run(self, task: TaskSpec, context: list[AgentOutput]) -> AgentOutput:
+        joined = "\n".join(item.content for item in context)
+        return AgentOutput(
+            agent_id=self.agent_id,
+            content=f"REVIEW REPORT for {task.task_id}\n{joined}",
+        )
+
+
 class RuntimeTest(unittest.TestCase):
     def _runtime(
         self,
@@ -82,6 +118,26 @@ class RuntimeTest(unittest.TestCase):
             try:
                 self.assertTrue(runtime._is_final_task(TaskSpec("A10", "A", "step", "x")))
                 self.assertFalse(runtime._is_final_task(TaskSpec("A110", "A", "step", "x")))
+                self.assertFalse(
+                    runtime._is_final_task(
+                        TaskSpec(
+                            "A5",
+                            "A",
+                            "\u7b2c\u4e00\u7248\u6700\u7ec8\u65c5\u884c\u624b\u518c\u751f\u6210",
+                            "x",
+                        )
+                    )
+                )
+                self.assertTrue(
+                    runtime._is_final_task(
+                        TaskSpec(
+                            "X9",
+                            "X",
+                            "\u6700\u7ec8\u5ba1\u8ba1\u624b\u518c\u4e0e\u7cfb\u7edf\u51b3\u7b56\u65e5\u5fd7",
+                            "x",
+                        )
+                    )
+                )
             finally:
                 runtime.close()
 
@@ -155,6 +211,59 @@ class RuntimeTest(unittest.TestCase):
             self.assertTrue(all(item["cost_report"]["direct_text_tokens"] > 0 for item in messages))
             self.assertTrue(all(item["cost_report"]["prompt_tokens"] > 0 for item in messages))
             self.assertGreater(second_row.memory_refs_count, 0)
+
+    def test_bounded_baseline_keeps_thread_history_separate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            runtime, metrics = self._runtime(output_dir, [ContextEchoWriter()])
+            try:
+                a1 = TaskSpec("A1", "travel_A", "travel first", "A first task")
+                b1 = TaskSpec("B1", "security_B", "security first", "B first task")
+                a2 = TaskSpec("A2", "travel_A", "travel second", "A second task")
+
+                first_output = runtime.run_task(
+                    a1, round_id=1, mode="baseline_bounded_nl_framework"
+                )
+                second_output = runtime.run_task(
+                    b1, round_id=1, mode="baseline_bounded_nl_framework"
+                )
+                third_output = runtime.run_task(
+                    a2, round_id=1, mode="baseline_bounded_nl_framework"
+                )
+            finally:
+                runtime.close()
+
+            self.assertIn("task=A1", first_output.content)
+            self.assertNotIn("task=A1", second_output.content)
+            self.assertIn("Previous task: A1", third_output.content)
+            self.assertNotIn("Previous task: B1", third_output.content)
+            summary = metrics.summary()["by_mode"]["baseline_bounded_nl_framework"]
+            self.assertEqual(summary["summary_update_count"], 3)
+            self.assertEqual(summary["summary_update_method"], "deterministic")
+            self.assertGreater(summary["summary_update_estimated_tokens"], 0)
+
+    def test_final_task_returns_writer_final_answer_and_keeps_review_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _ = self._runtime(
+                Path(tmp),
+                [FinalAnswerWriter(), ReviewReportAgent()],
+            )
+            try:
+                output = runtime.run_task(
+                    TaskSpec("A10", "travel_A", "final travel", "final task"),
+                    round_id=1,
+                    mode="baseline_bounded_nl_framework",
+                )
+            finally:
+                runtime.close()
+
+            self.assertEqual(output.agent_id, "writer")
+            self.assertEqual(output.metadata["deliverable_role"], "final_answer")
+            self.assertEqual(output.content, "FINAL ANSWER for A10")
+            roles = output.metadata["deliverable_roles"]
+            self.assertEqual(roles["final_answer"]["agent_id"], "writer")
+            self.assertEqual(roles["review_report"]["agent_id"], "reviewer")
+            self.assertIn("REVIEW REPORT", roles["review_report"]["content"])
 
     def test_trace_logger_serializes_concurrent_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -25,6 +25,17 @@ SUITE_PRESETS = {
     "B": ("安全应急连续任务", PROJECT_ROOT / "benchmarks" / "security_task_group_b.json"),
 }
 
+MODE_PRESETS: dict[str, list[Mode]] = {
+    "both": ["baseline_bounded_nl_framework", "runtime_lite"],
+    "fair": ["baseline_bounded_nl_framework", "runtime_lite"],
+    "stress": ["baseline_stress_full_broadcast", "runtime_lite"],
+    "all": [
+        "baseline_stress_full_broadcast",
+        "baseline_bounded_nl_framework",
+        "runtime_lite",
+    ],
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run v5.0 competition evaluation.")
@@ -35,7 +46,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-root", type=Path, default=None)
     parser.add_argument(
         "--mode",
-        choices=["baseline_text", "runtime_lite", "both"],
+        choices=[
+            "baseline_text",
+            "baseline_stress_full_broadcast",
+            "baseline_bounded_nl_framework",
+            "runtime_lite",
+            "both",
+            "fair",
+            "stress",
+            "all",
+        ],
         default="both",
     )
     parser.add_argument("--max-retries", type=int, default=None)
@@ -72,9 +92,7 @@ def main() -> int:
         output_root = PROJECT_ROOT / "runs" / f"v5.0-competition-{args.provider}-{stamp}"
     output_root.mkdir(parents=True, exist_ok=True)
 
-    modes: list[Mode] = (
-        ["baseline_text", "runtime_lite"] if args.mode == "both" else [args.mode]
-    )
+    modes: list[Mode] = MODE_PRESETS.get(args.mode, [args.mode])
     llm_config = load_llm_config(
         args.config,
         timeout_seconds=args.timeout_seconds,

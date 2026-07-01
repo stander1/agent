@@ -1044,6 +1044,49 @@ class MemoryStoreLite:
     def ref_to_dict(self, memory_ref: MemoryRef) -> dict:
         return asdict(memory_ref)
 
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "memories": [
+                asdict(item)
+                for item in sorted(
+                    self._memories.values(), key=lambda memory: memory.created_at
+                )
+            ],
+            "claim_cards": [
+                asdict(item)
+                for item in sorted(
+                    self._claims.values(), key=lambda claim: claim.created_at
+                )
+            ],
+            "memory_views": [
+                asdict(item)
+                for item in sorted(
+                    self._views.values(), key=lambda view: view.created_at
+                )
+            ],
+            "promotion_views": [
+                asdict(item)
+                for item in sorted(
+                    self._promotion_views.values(),
+                    key=lambda view: view.promotion_view_id,
+                )
+            ],
+            "memory_candidates": [
+                asdict(item)
+                for item in sorted(
+                    self._memory_candidates.values(),
+                    key=lambda candidate: candidate.created_at,
+                )
+            ],
+            "claim_candidates": [
+                asdict(item)
+                for item in sorted(
+                    self._claim_candidates.values(),
+                    key=lambda candidate: candidate.candidate_id,
+                )
+            ],
+        }
+
     def ref(self, memory: MemoryObject) -> MemoryRef:
         return MemoryRef(
             memory_id=memory.memory_id,

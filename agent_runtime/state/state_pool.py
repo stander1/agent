@@ -2,12 +2,58 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+
+def _io_path(path: Path | str) -> Path:
+    """Return a Windows long-path-safe Path for filesystem I/O."""
+
+    candidate = Path(path)
+    if os.name != "nt":
+        return candidate
+    raw = str(candidate)
+    if raw.startswith("\\\\?\\"):
+        return candidate
+    try:
+        resolved = candidate.resolve(strict=False)
+    except OSError:
+        resolved = candidate.absolute()
+    resolved_raw = str(resolved)
+    if resolved_raw.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + resolved_raw.lstrip("\\"))
+    return Path("\\\\?\\" + resolved_raw)
+
+
+def _write_text(path: Path | str, text: str) -> None:
+    target = Path(path)
+    _io_path(target.parent).mkdir(parents=True, exist_ok=True)
+    _io_path(target).write_text(text, encoding="utf-8")
+
+
+def _read_text(path: Path | str) -> str:
+    return _io_path(path).read_text(encoding="utf-8")
+
+
+def _read_bytes(path: Path | str) -> bytes:
+    return _io_path(path).read_bytes()
+
+
+def _exists(path: Path | str) -> bool:
+    return _io_path(path).exists()
+
+
+def _stat_size(path: Path | str) -> int:
+    return _io_path(path).stat().st_size
+
+
+def _unlink(path: Path | str) -> None:
+    _io_path(path).unlink()
 
 StateTier = str
 
@@ -347,14 +393,14 @@ class StatePoolLite:
         self.warm_dir = self.root_dir / "state_warm"
         self.cold_dir = self.root_dir / "state_cold"
         self.tombstone_dir = self.root_dir / "state_tombstones"
-        for path in (
+        self._storage_dirs = (
             self.payload_dir,
             self.hot_dir,
             self.warm_dir,
             self.cold_dir,
             self.tombstone_dir,
-        ):
-            path.mkdir(parents=True, exist_ok=True)
+        )
+        self._ensure_storage_dirs()
         self._states: dict[str, StateObject] = {}
         self._hot_payloads: dict[str, dict[str, Any]] = {}
         self._tombstones: dict[str, dict[str, Any]] = {}
@@ -371,6 +417,10 @@ class StatePoolLite:
         self._prefetch_queue: list[str] = []
         self._active_cold_reads = 0
         self.leases = LeaseRegistry()
+
+    def _ensure_storage_dirs(self) -> None:
+        for path in self._storage_dirs:
+            _io_path(path).mkdir(parents=True, exist_ok=True)
 
     def write_state(
         self,
@@ -405,7 +455,7 @@ class StatePoolLite:
         if audit_payload is not None:
             audit_path = self.cold_dir / f"{state_id}.audit.json"
             audit_encoded = json.dumps(audit_payload, ensure_ascii=False, indent=2)
-            audit_path.write_text(audit_encoded, encoding="utf-8")
+            _write_text(audit_path, audit_encoded)
             audit_payload_ref = str(audit_path)
             audit_size_bytes = len(audit_encoded.encode("utf-8"))
             payload_to_store["audit_payload_ref"] = audit_payload_ref
@@ -443,11 +493,11 @@ class StatePoolLite:
             if audit_payload_ref:
                 payload_to_store["audit_payload_ref"] = audit_payload_ref
                 payload_to_store["audit_payload_hash"] = hashlib.sha256(
-                    Path(audit_payload_ref).read_bytes()
+                    _read_bytes(audit_payload_ref)
                 ).hexdigest()
         encoded = json.dumps(payload_to_store, ensure_ascii=False, indent=2)
         path = self._tier_dir(tier) / f"{state_id}.json"
-        path.write_text(encoded, encoding="utf-8")
+        _write_text(path, encoded)
         content_hash = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
         size_bytes = len(encoded.encode("utf-8")) + audit_size_bytes
 
@@ -672,7 +722,7 @@ class StatePoolLite:
         state = self._states[state_ref.state_id]
         self._mark_accessed(state)
         with self.leases.read_lease(state.state_id, owner="audit_view"):
-            payload = json.loads(Path(state.payload_ref).read_text(encoding="utf-8"))
+            payload = json.loads(_read_text(state.payload_ref))
             rendered = {
                 "state_id": state.state_id,
                 "state_type": state.state_type,
@@ -690,7 +740,7 @@ class StatePoolLite:
             return None
         self._mark_accessed(state)
         with self.leases.read_lease(state.state_id, owner="audit_payload"):
-            return json.loads(Path(state.audit_payload_ref).read_text(encoding="utf-8"))
+            return json.loads(_read_text(state.audit_payload_ref))
 
     def request_cold_access(
         self,
@@ -708,7 +758,7 @@ class StatePoolLite:
                 reason="state_deleted",
                 budget_remaining=0,
             )
-        if not state.audit_payload_ref or not Path(state.audit_payload_ref).exists():
+        if not state.audit_payload_ref or not _exists(state.audit_payload_ref):
             return ColdAccessReport(
                 state_id=state.state_id,
                 allowed=False,
@@ -735,7 +785,7 @@ class StatePoolLite:
 
         cached = self._raw_view_cache.get(state.state_id)
         if cached is None:
-            payload_bytes = Path(state.audit_payload_ref).stat().st_size
+            payload_bytes = _stat_size(state.audit_payload_ref)
         else:
             payload_bytes = cached[0]
         raw_view_tokens = max(1, (payload_bytes + 3) // 4)
@@ -768,9 +818,7 @@ class StatePoolLite:
             self._active_cold_reads += 1
             try:
                 with self.leases.read_lease(state.state_id, owner="cold_access"):
-                    payload = json.loads(
-                        Path(state.audit_payload_ref).read_text(encoding="utf-8")
-                    )
+                    payload = json.loads(_read_text(state.audit_payload_ref))
                 self._raw_view_cache[state.state_id] = (payload_bytes, payload)
             finally:
                 self._active_cold_reads = max(0, self._active_cold_reads - 1)
@@ -958,8 +1006,8 @@ class StatePoolLite:
         evicted.sort(key=lambda item: item.evicted_at or item.created_at)
         for state in evicted[:max_swept]:
             for payload_ref in [state.payload_ref, state.audit_payload_ref]:
-                if payload_ref and Path(payload_ref).exists():
-                    Path(payload_ref).unlink()
+                if payload_ref and _exists(payload_ref):
+                    _unlink(payload_ref)
             old = state.lifecycle
             state.lifecycle = "deleted"
             state.version += 1
@@ -1142,6 +1190,45 @@ class StatePoolLite:
             and self._states[state_id].task_id != task_id
         ]
 
+    def snapshot(self) -> dict[str, Any]:
+        states = []
+        for state in sorted(self._states.values(), key=lambda item: item.created_at):
+            states.append(
+                {
+                    "state_id": state.state_id,
+                    "state_type": state.state_type,
+                    "task_id": state.task_id,
+                    "source_agent": state.source_agent,
+                    "created_at": state.created_at,
+                    "payload_ref": state.payload_ref,
+                    "payload_kind": state.payload_kind,
+                    "contains_embedding_refs": state.contains_embedding_refs,
+                    "summary": state.summary,
+                    "size_bytes": state.size_bytes,
+                    "tier": state.tier,
+                    "lifecycle": state.lifecycle,
+                    "content_hash": state.content_hash,
+                    "access_policy": state.access_policy,
+                    "audit_payload_ref": state.audit_payload_ref,
+                    "version": state.version,
+                    "dependency_ref_count": state.dependency_ref_count,
+                    "retry_ref_count": state.retry_ref_count,
+                    "superseded_by": state.superseded_by,
+                    "gc_policy": state.gc_policy,
+                    "fallback_summary": state.fallback_summary,
+                    "replacement_state_id": state.replacement_state_id,
+                    "evicted_at": state.evicted_at,
+                    "active_readers": self.leases.active_readers(state.state_id),
+                    "lineage_protected": state.state_id in self._lineage_state_ids,
+                }
+            )
+        return {
+            "states": states,
+            "tombstones": list(self._tombstones.values()),
+            "lineage_state_ids": sorted(self._lineage_state_ids),
+            "hot_payload_count": len(self._hot_payloads),
+        }
+
     def mark_lineage(self, state_ids: list[str]) -> None:
         self._lineage_state_ids.update(state_ids)
 
@@ -1149,10 +1236,10 @@ class StatePoolLite:
         self, state_ref: StateRef, *, chunk_chars: int = 1200
     ) -> list[RawChunk]:
         state = self._states[state_ref.state_id]
-        if not state.audit_payload_ref or not Path(state.audit_payload_ref).exists():
+        if not state.audit_payload_ref or not _exists(state.audit_payload_ref):
             self._raw_chunk_index[state.state_id] = []
             return []
-        payload = json.loads(Path(state.audit_payload_ref).read_text(encoding="utf-8"))
+        payload = json.loads(_read_text(state.audit_payload_ref))
         text = self._payload_to_text(payload)
         chunks: list[RawChunk] = []
         for index, start in enumerate(range(0, len(text), max(1, chunk_chars)), start=1):
@@ -1201,9 +1288,9 @@ class StatePoolLite:
                 cache_hit=True,
             )
         source_text = ""
-        if state.audit_payload_ref and Path(state.audit_payload_ref).exists():
+        if state.audit_payload_ref and _exists(state.audit_payload_ref):
             source_text = self._payload_to_text(
-                json.loads(Path(state.audit_payload_ref).read_text(encoding="utf-8"))
+                json.loads(_read_text(state.audit_payload_ref))
             )
         content = "\n".join(
             source_text[chunk.offset_start : chunk.offset_end] for chunk in selected
@@ -1258,7 +1345,7 @@ class StatePoolLite:
             "stage": "logical_eviction",
         }
         path = self.tombstone_dir / f"{state.state_id}.tombstone.json"
-        path.write_text(json.dumps(tombstone, ensure_ascii=False, indent=2), encoding="utf-8")
+        _write_text(path, json.dumps(tombstone, ensure_ascii=False, indent=2))
         self._tombstones[state.state_id] = tombstone
         state.lifecycle = "evicted"
         state.evicted_at = tombstone["evicted_at"]
@@ -1396,7 +1483,7 @@ class StatePoolLite:
             payload = self._hot_payloads.get(state.state_id)
             if payload is not None:
                 return dict(payload)
-        return json.loads(Path(state.payload_ref).read_text(encoding="utf-8"))
+        return json.loads(_read_text(state.payload_ref))
 
     def _next_state_id(
         self, task_id: str, source_agent: str, state_type: str, payload: dict[str, Any]

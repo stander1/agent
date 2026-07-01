@@ -1,0 +1,281 @@
+from __future__ import annotations
+
+import argparse
+import importlib
+import importlib.metadata
+import json
+import os
+import platform
+import subprocess
+import sys
+from pathlib import Path
+
+from agent_runtime.launcher import (
+    LaunchRequest,
+    ManagedProcessLauncher,
+    read_bootstrap_status,
+)
+
+
+PACKAGE_NAME = "multi-agent-collaboration-runtime"
+REWRITE_ENV_BY_PRESET = {
+    "off": {
+        "AGENTLITE_AUTOGEN_BROADCAST_MODE": "shadow-only",
+        "AGENTLITE_AUTOGEN_TEAM_REWRITE": "0",
+        "AGENTLITE_AUTOGEN_HANDOFF_REWRITE": "0",
+        "AGENTLITE_AUTOGEN_TOOL_SUMMARY_REWRITE": "0",
+    },
+    "agent": {
+        "AGENTLITE_AUTOGEN_BROADCAST_MODE": "real-rewrite",
+        "AGENTLITE_AUTOGEN_TEAM_REWRITE": "0",
+        "AGENTLITE_AUTOGEN_HANDOFF_REWRITE": "0",
+        "AGENTLITE_AUTOGEN_TOOL_SUMMARY_REWRITE": "0",
+    },
+    "team": {
+        "AGENTLITE_AUTOGEN_BROADCAST_MODE": "real-rewrite",
+        "AGENTLITE_AUTOGEN_TEAM_REWRITE": "1",
+        "AGENTLITE_AUTOGEN_HANDOFF_REWRITE": "0",
+        "AGENTLITE_AUTOGEN_TOOL_SUMMARY_REWRITE": "0",
+    },
+    "non-text": {
+        "AGENTLITE_AUTOGEN_BROADCAST_MODE": "real-rewrite",
+        "AGENTLITE_AUTOGEN_TEAM_REWRITE": "0",
+        "AGENTLITE_AUTOGEN_HANDOFF_REWRITE": "1",
+        "AGENTLITE_AUTOGEN_TOOL_SUMMARY_REWRITE": "1",
+    },
+    "all": {
+        "AGENTLITE_AUTOGEN_BROADCAST_MODE": "real-rewrite",
+        "AGENTLITE_AUTOGEN_TEAM_REWRITE": "1",
+        "AGENTLITE_AUTOGEN_HANDOFF_REWRITE": "1",
+        "AGENTLITE_AUTOGEN_TOOL_SUMMARY_REWRITE": "1",
+    },
+}
+BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="agentlite",
+        description="AgentLite managed multi-agent runtime launcher.",
+    )
+    subparsers = parser.add_subparsers(dest="subcommand", required=True)
+    run_parser = subparsers.add_parser(
+        "run",
+        aliases=["start"],
+        help="Run a command under an AgentLite framework driver.",
+    )
+    run_parser.add_argument("--framework", required=True)
+    run_parser.add_argument("--cwd", type=Path, default=Path.cwd())
+    run_parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path.home() / ".agentlite",
+    )
+    run_parser.add_argument("--runtime-endpoint")
+    run_parser.add_argument(
+        "--driver",
+        help="Override the built-in driver with a Python module path.",
+    )
+    run_parser.add_argument(
+        "--no-strict-bootstrap",
+        action="store_true",
+        help="Allow the target process to continue if bootstrap fails.",
+    )
+    run_parser.add_argument(
+        "command",
+        nargs=argparse.REMAINDER,
+        help="Command to run; place it after '--'.",
+    )
+    run_parser.add_argument(
+        "--rewrite",
+        choices=tuple(REWRITE_ENV_BY_PRESET),
+        help=(
+            "AutoGen rewrite preset. off=observe only; agent=rewrite simple "
+            "agent text inputs; team=rewrite Team task entry; non-text=rewrite "
+            "safe Handoff/ToolSummary content; all=enables every supported "
+            "v5.12 rewrite gate."
+        ),
+    )
+    run_parser.add_argument(
+        "--broadcast-mode",
+        choices=BROADCAST_MODES,
+        help=(
+            "Low-level AutoGen broadcast mode override. Usually prefer "
+            "--rewrite unless you need an exact diagnostic mode."
+        ),
+    )
+
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Check whether the current environment can run AgentLite.",
+    )
+    doctor_parser.add_argument(
+        "--framework",
+        choices=("autogen",),
+        help="Also check optional dependencies for a framework driver.",
+    )
+    doctor_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable diagnostics.",
+    )
+
+    subparsers.add_parser("version", help="Print AgentLite package version.")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.subcommand == "doctor":
+        return _doctor(framework=args.framework, json_output=args.json)
+    if args.subcommand == "version":
+        print(_package_version())
+        return 0
+    if args.subcommand not in {"run", "start"}:
+        return 2
+
+    command = list(args.command)
+    if command and command[0] == "--":
+        command = command[1:]
+    request = LaunchRequest(
+        framework=args.framework.strip().lower(),
+        command=command,
+        cwd=args.cwd.expanduser().resolve(),
+        data_dir=args.data_dir.expanduser().resolve(),
+        runtime_endpoint=args.runtime_endpoint,
+        driver_override=args.driver,
+        strict_bootstrap=not args.no_strict_bootstrap,
+    )
+    _print_launch_header(request)
+    launch_env = build_managed_environment_overlay(
+        framework=request.framework,
+        rewrite=args.rewrite,
+        broadcast_mode=args.broadcast_mode,
+        base=os.environ,
+    )
+    try:
+        result = ManagedProcessLauncher().launch(request, environ=launch_env)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        print(f"AgentLite launch failed: {exc}", file=sys.stderr)
+        return 2
+
+    status = read_bootstrap_status(result.status_file)
+    if status is None:
+        print(
+            "AgentLite bootstrap status was not produced; "
+            "the target may not be a Python process or startup injection was disabled.",
+            file=sys.stderr,
+        )
+        return result.returncode if result.returncode != 0 else 78
+
+    hook_state = "active" if status.get("hooks_active") else "inactive"
+    print(f"Bootstrap status: {status.get('driver_status', 'unknown')}")
+    print(f"Driver hooks: {hook_state}")
+    print(f"Session file: {result.status_file}")
+    return result.returncode
+
+
+def build_managed_environment_overlay(
+    *,
+    framework: str,
+    rewrite: str | None,
+    broadcast_mode: str | None,
+    base: os._Environ[str] | dict[str, str],
+) -> dict[str, str]:
+    env = dict(base)
+    if framework == "autogen" and rewrite:
+        env.update(REWRITE_ENV_BY_PRESET[rewrite])
+    if framework == "autogen" and broadcast_mode:
+        env["AGENTLITE_AUTOGEN_BROADCAST_MODE"] = broadcast_mode
+    return env
+
+
+def _print_launch_header(request: LaunchRequest) -> None:
+    print("AgentLite managed launch", flush=True)
+    print(f"Framework: {request.framework}", flush=True)
+    print(f"Working directory: {request.cwd}", flush=True)
+    print(f"Data directory: {request.data_dir}", flush=True)
+    print(
+        f"Command: {' '.join(request.command) if request.command else '(missing)'}",
+        flush=True,
+    )
+
+
+def _doctor(*, framework: str | None, json_output: bool) -> int:
+    checks = _doctor_checks(framework=framework)
+    ok = all(check["ok"] for check in checks)
+    payload = {
+        "ok": ok,
+        "package": PACKAGE_NAME,
+        "version": _package_version(),
+        "python": sys.executable,
+        "python_version": platform.python_version(),
+        "checks": checks,
+    }
+    if json_output:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"AgentLite {payload['version']}")
+        print(f"Python {payload['python_version']}: {payload['python']}")
+        for check in checks:
+            status = "ok" if check["ok"] else "fail"
+            detail = f" - {check['detail']}" if check.get("detail") else ""
+            print(f"[{status}] {check['name']}{detail}")
+    return 0 if ok else 1
+
+
+def _doctor_checks(*, framework: str | None) -> list[dict[str, object]]:
+    checks: list[dict[str, object]] = [
+        {
+            "name": "python>=3.11",
+            "ok": sys.version_info >= (3, 11),
+            "detail": platform.python_version(),
+        },
+        _module_check("tiktoken"),
+        _module_check("agent_runtime.launcher"),
+        _module_check("agent_runtime.bootstrap.startup"),
+    ]
+    if framework == "autogen":
+        checks.extend(
+            [
+                _module_check("autogen_agentchat"),
+                _module_check("autogen_core"),
+                _module_check("agent_runtime.drivers.autogen"),
+            ]
+        )
+    return checks
+
+
+def _module_check(module_name: str) -> dict[str, object]:
+    try:
+        module = importlib.import_module(module_name)
+    except Exception as exc:
+        return {
+            "name": f"import:{module_name}",
+            "ok": False,
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
+    version = getattr(module, "__version__", "")
+    return {
+        "name": f"import:{module_name}",
+        "ok": True,
+        "detail": str(version or getattr(module, "__file__", "")),
+    }
+
+
+def _package_version() -> str:
+    try:
+        from agent_runtime import __version__ as source_version
+    except Exception:
+        source_version = ""
+    try:
+        installed_version = importlib.metadata.version(PACKAGE_NAME)
+    except importlib.metadata.PackageNotFoundError:
+        return source_version or "editable-source"
+    if source_version and source_version != installed_version:
+        return source_version
+    return installed_version
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

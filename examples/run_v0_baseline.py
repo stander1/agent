@@ -19,7 +19,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rounds", type=int, default=10)
     parser.add_argument(
         "--mode",
-        choices=["baseline_text", "runtime_stub", "runtime_lite", "both", "all"],
+        choices=[
+            "baseline_text",
+            "baseline_stress_full_broadcast",
+            "baseline_bounded_nl_framework",
+            "runtime_stub",
+            "runtime_lite",
+            "both",
+            "fair",
+            "stress",
+            "all",
+        ],
         default="both",
     )
     parser.add_argument(
@@ -47,9 +57,18 @@ def main() -> int:
     ]
     modes: list[Mode]
     if args.mode == "both":
-        modes = ["baseline_text", "runtime_lite"]
+        modes = ["baseline_bounded_nl_framework", "runtime_lite"]
+    elif args.mode == "fair":
+        modes = ["baseline_bounded_nl_framework", "runtime_lite"]
+    elif args.mode == "stress":
+        modes = ["baseline_stress_full_broadcast", "runtime_lite"]
     elif args.mode == "all":
-        modes = ["baseline_text", "runtime_stub", "runtime_lite"]
+        modes = [
+            "baseline_stress_full_broadcast",
+            "baseline_bounded_nl_framework",
+            "runtime_stub",
+            "runtime_lite",
+        ]
     else:
         modes = [args.mode]
 

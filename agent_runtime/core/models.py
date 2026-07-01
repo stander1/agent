@@ -4,7 +4,13 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 
-Mode = Literal["baseline_text", "runtime_stub", "runtime_lite"]
+Mode = Literal[
+    "baseline_text",
+    "baseline_stress_full_broadcast",
+    "baseline_bounded_nl_framework",
+    "runtime_stub",
+    "runtime_lite",
+]
 
 
 @dataclass(slots=True)

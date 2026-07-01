@@ -1,7 +1,15 @@
 from __future__ import annotations
 
+import re
+
 from agent_runtime.core.models import AgentOutput, TaskSpec
 from agent_runtime.llm.client import OpenAICompatibleChatClient
+
+
+def is_final_task(task: TaskSpec) -> bool:
+    title = task.title.strip().lower()
+    explicit_final_id = re.search(r"(?:^|[^0-9])10$", task.task_id) is not None
+    return explicit_final_id or title.startswith("\u6700\u7ec8") or title.startswith("final")
 
 
 class LlmAgent:
@@ -19,6 +27,27 @@ class LlmAgent:
         self.role = role
         self.instruction = instruction
         self.client = client
+
+    def _role_specific_final_instruction(self, task: TaskSpec) -> str:
+        if not is_final_task(task):
+            return ""
+        if self.agent_id == "writer":
+            return (
+                "\n当前任务是最终收束任务。你必须输出可直接交付给用户的完整 final_answer 正文，"
+                "不要只写摘要、复用要点或审查意见。"
+            )
+        if self.agent_id == "reviewer":
+            return (
+                "\n当前任务是最终收束任务。你的职责是输出 review_report 审查报告："
+                "检查 Writer 的 final_answer 是否缺字段、是否有冲突、是否需要修正。"
+                "不要把审查报告写成新的最终正文。"
+            )
+        if self.agent_id == "memory_manager":
+            return (
+                "\n当前任务是最终收束任务。你的职责是提炼可复用记忆候选，"
+                "不要替代 Writer 输出最终交付正文。"
+            )
+        return ""
 
     def run(self, task: TaskSpec, context: list[AgentOutput]) -> AgentOutput:
         runtime_prompt = context[-1].content if context else task.prompt
@@ -52,7 +81,7 @@ class LlmAgent:
                 "</ARTIFACT>\n"
                 "控制头必须是合法 JSON；长正文只能放在 ARTIFACT 中。"
             )
-        if task.task_id.endswith("10") or "最终" in task.title:
+        if is_final_task(task):
             final_task_instruction = (
                 "\n当前任务是最终收束任务：必须输出可直接交付的完整结果，"
                 "不要只输出方法论摘要。若上下文包含 Deliverable View，"
@@ -63,6 +92,11 @@ class LlmAgent:
             length_instruction = (
                 "5. 最终收束任务必须完整输出可交付结果，不设置人工长度上限；"
                 "如果内容较长，也必须优先保证字段完整、证据链完整和决策日志完整。\n"
+            )
+        role_final_instruction = self._role_specific_final_instruction(task)
+        if role_final_instruction:
+            final_task_instruction = (
+                f"{final_task_instruction}\n{role_final_instruction}"
             )
         system_prompt = (
             f"你是 {self.role}，正在参与一个多 Agent 连续协作任务。\n"

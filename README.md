@@ -2,7 +2,7 @@
 
 本仓库用于迭代实现一个面向多 Agent 协作的跨框架运行时工具层，目标是在多 Agent 任务中通过结构化通信、非文本状态传递和共享记忆复用降低协作开销。
 
-当前版本：`v5.9 audit-remediated cross-task runtime lite`
+当前版本：`v5.12z package release gate`
 
 实验结果记录见：
 
@@ -19,6 +19,138 @@
 - [docs/experiments/v4.0-cost-lifecycle-results.md](docs/experiments/v4.0-cost-lifecycle-results.md)
 - [docs/experiments/v4.0-full-ab-results.md](docs/experiments/v4.0-full-ab-results.md)
 - [docs/experiments/v5.9-mimo-cross-task-results.md](docs/experiments/v5.9-mimo-cross-task-results.md)
+- [docs/experiments/v5.12a-kernel-boundary-results.md](docs/experiments/v5.12a-kernel-boundary-results.md)
+- [docs/experiments/v5.12b-launcher-results.md](docs/experiments/v5.12b-launcher-results.md)
+- [docs/experiments/v5.12c-autogen-driver-results.md](docs/experiments/v5.12c-autogen-driver-results.md)
+- [docs/experiments/v5.12d-autogen-native-results.md](docs/experiments/v5.12d-autogen-native-results.md)
+- [docs/experiments/v5.12e-autogen-codec-results.md](docs/experiments/v5.12e-autogen-codec-results.md)
+- [docs/experiments/v5.12f-autogen-shp-shadow-results.md](docs/experiments/v5.12f-autogen-shp-shadow-results.md)
+- [docs/experiments/v5.12g-autogen-long-shadow-results.md](docs/experiments/v5.12g-autogen-long-shadow-results.md)
+- [docs/experiments/v5.12h-autogen-handoff-tool-results.md](docs/experiments/v5.12h-autogen-handoff-tool-results.md)
+- [docs/experiments/v5.12i-autogen-broadcast-shadow-results.md](docs/experiments/v5.12i-autogen-broadcast-shadow-results.md)
+- [docs/experiments/v5.12j-autogen-broadcast-dry-run-results.md](docs/experiments/v5.12j-autogen-broadcast-dry-run-results.md)
+- [docs/experiments/v5.12k-autogen-real-rewrite-results.md](docs/experiments/v5.12k-autogen-real-rewrite-results.md)
+- [docs/experiments/v5.12l-autogen-rewrite-echo-results.md](docs/experiments/v5.12l-autogen-rewrite-echo-results.md)
+- [docs/experiments/v5.12m-autogen-rewrite-fallback-results.md](docs/experiments/v5.12m-autogen-rewrite-fallback-results.md)
+- [docs/experiments/v5.12n-autogen-rewrite-fallback-matrix-results.md](docs/experiments/v5.12n-autogen-rewrite-fallback-matrix-results.md)
+- [docs/experiments/v5.12o-autogen-handoff-tool-guard-results.md](docs/experiments/v5.12o-autogen-handoff-tool-guard-results.md)
+- [docs/experiments/v5.12p-autogen-handoff-typed-candidate-results.md](docs/experiments/v5.12p-autogen-handoff-typed-candidate-results.md)
+- [docs/experiments/v5.12q-autogen-handoff-rewrite-switch-results.md](docs/experiments/v5.12q-autogen-handoff-rewrite-switch-results.md)
+- [docs/experiments/v5.12r-autogen-handoff-rewrite-matrix-results.md](docs/experiments/v5.12r-autogen-handoff-rewrite-matrix-results.md)
+- [docs/experiments/v5.12s-autogen-tool-summary-candidate-results.md](docs/experiments/v5.12s-autogen-tool-summary-candidate-results.md)
+- [docs/experiments/v5.12t-autogen-tool-summary-matrix-results.md](docs/experiments/v5.12t-autogen-tool-summary-matrix-results.md)
+- [docs/experiments/v5.12u-autogen-tool-summary-rewrite-switch-results.md](docs/experiments/v5.12u-autogen-tool-summary-rewrite-switch-results.md)
+- [docs/experiments/v5.12u-autogen-integrated-rewrite-results.md](docs/experiments/v5.12u-autogen-integrated-rewrite-results.md)
+- [docs/experiments/v5.12v-autogen-team-rewrite-results.md](docs/experiments/v5.12v-autogen-team-rewrite-results.md)
+- [docs/experiments/v5.12w-autogen-team-rewrite-matrix-results.md](docs/experiments/v5.12w-autogen-team-rewrite-matrix-results.md)
+- [docs/experiments/v5.12x-autogen-team-benchmark-results.md](docs/experiments/v5.12x-autogen-team-benchmark-results.md)
+- [docs/experiments/v5.12y-release-cli-results.md](docs/experiments/v5.12y-release-cli-results.md)
+- [docs/experiments/v5.12z-package-release-gate-results.md](docs/experiments/v5.12z-package-release-gate-results.md)
+- [docs/release/v5.12z-final-release-notes.md](docs/release/v5.12z-final-release-notes.md)
+
+## v5.12z Current Note
+
+`v5.12z` hardens the package release path around the validated v5.12y CLI. The wheel can be built, installed into an isolated target site, and used from outside the source tree to run `agentlite run --framework autogen --rewrite all -- python app.py`.
+
+Latest package gate evidence: installed package version `0.5.12.post3`, installed import path under target site, AutoGen doctor passed, first Team input was replaced with an AgentLite packet, `native_marker_count=0`, `rewrite_applied=true`, `fallback_reasons=[]`, native full broadcast cost `6213` tokens, wire plus Prompt View cost `882` tokens, and quality score `12/12`.
+
+Final local release artifacts are generated under `dist/`:
+
+```text
+multi_agent_collaboration_runtime-0.5.12.post3-py3-none-any.whl
+multi_agent_collaboration_runtime-0.5.12.post3.tar.gz
+```
+
+## AgentLite 托管启动
+
+安装仓库后可以使用统一命令入口：
+
+```powershell
+agentlite run --framework autogen -- python app.py
+```
+
+也支持等价别名：
+
+```powershell
+agentlite start --framework autogen -- python app.py
+```
+
+开启真实改写推荐使用 CLI 预设：
+
+```powershell
+agentlite run --framework autogen --rewrite all -- python app.py
+```
+
+`--rewrite` 可选值：
+
+```text
+off       仅观察与影子审计，不真实改写
+agent     改写简单 agent 文本输入
+team      改写 AutoGen Team 入口长 task
+non-text  改写安全的 Handoff / ToolSummary content
+all       启用当前 v5.12 支持的全部真实改写门控
+```
+
+环境自检：
+
+```powershell
+agentlite doctor --framework autogen
+agentlite version
+```
+
+发布门禁：
+
+```powershell
+python .\examples\run_release_gate.py
+```
+
+`v5.12c` 已实现 AutoGen Driver 的托管导入钩子。用户脚本不需要显式导入 AgentLite；在 `agentlite run --framework autogen -- python app.py` 下，Driver 会在用户脚本导入 AutoGen 前安装受控 patch，并把 AgentChat / Runtime 调用事件桥接到 `CollaborationKernel`、trace 和 session-local StatePool。
+
+```text
+Bootstrap status: active
+Driver hooks: active
+```
+
+`v5.12d` 已在独立 `agentlite-autogen` conda 环境中验证真实 AutoGen `0.7.5` Python 代码端最小样例。原生样例只导入 AutoGen，不导入 AgentLite；托管启动后能够产生 AgentLite trace 和 session-local StatePool `artifact_state`。
+
+`v5.12e` 已补充 AutoGen Message Codec，覆盖 `TextMessage`、`HandoffMessage`、`ToolCallRequestEvent`、`ToolCallExecutionEvent` 和 `ToolCallSummaryMessage` 的稳定映射，并将解码结果写入 trace。
+
+`v5.12f` 已在不改变 AutoGen 原生消息和返回值的前提下，将 codec 输出、StatePool `state_ref` 与 `CollaborationKernel.build_handoff` 接通，生成 SHP handoff 影子包；trace 同时记录完整审计包和紧凑 wire 包，通信 token 口径使用紧凑 wire 包。
+
+`v5.12g` 新增长内容 AutoGen 原生任务，在影子模式下对比原生长文本、紧凑 SHP wire 包、以及 `state_ref + Prompt View` 的端到端 token 成本。最近一次长内容 smoke 中，原生输出文本为 `38227` tokens，`SHP wire + Prompt View` 为 `1885` tokens，摘要读取口径下降约 `95.1%`。
+
+`v5.12h` 增加真实 AutoGen `HandoffMessage`、`ToolCallRequestEvent`、`ToolCallExecutionEvent` 和 `ToolCallSummaryMessage` 覆盖。最近一次 handoff/tool-call smoke 中，`decoded_message_kinds` 覆盖 `handoff`、`tool_call`、`tool_result`、`tool_summary`，并记录 `autogen_transport_input_state: 2`，原生输出文本为 `36948` tokens，`SHP wire + Prompt View` 为 `2764` tokens，下降约 `92.5%`。
+
+`v5.12i` 增加 AutoGen Team 广播替换前的影子计划。Driver 会从真实 `RoundRobinGroupChat` 中提取参与者列表，为每个接收方生成 per-receiver SHP wire 包并统计 Prompt View 成本。最近一次三 Agent smoke 中，原生全文广播口径为 `42858` tokens，per-receiver `SHP wire + Prompt View` 为 `2368` tokens，下降约 `94.5%`。
+
+`v5.12j` 增加广播替换安全开关和 dry-run 改写审计。`AGENTLITE_AUTOGEN_BROADCAST_MODE` 支持 `shadow-only`、`dry-run-rewrite` 和 `real-rewrite`；当前真实改写仍会回退。最近一次 dry-run smoke 中，候选改写 `rewrite_safe_count=2`、`fallback_required_count=0`、`real_message_mutation_count=0`，原生全文广播口径为 `42858` tokens，dry-run `SHP wire + Prompt View` 为 `2350` tokens，下降约 `94.5%`。
+
+`v5.12k` 在 `real-rewrite` 模式下增加简单 `TextMessage` 的 agent 输入层真实改写。最近一次真实 AutoGen smoke 中，Team 层广播策略仍安全回退，但 `planner`、`writer`、`reviewer` 三个 agent 的输入均发生真实替换，`real_message_mutation_count=3`，输入 token 从 `17124` 降到 `1073`。
+
+`v5.12l` 增加 EchoAgent 三模式对照，直接验证 agent 实际读到的内容。最近一次 smoke 中，`shadow-only` 和 `dry-run-rewrite` 下 agent 仍看到 `8372` 字符原生长文本；`real-rewrite` 下 agent 看到包含 `AGENTLITE_REAL_REWRITE v1`、`state_refs` 和 `prompt_view` 的紧凑内容，字符数降到 `1124`，token 从 `4160` 降到 `338`，`rewrite_attempt_count=1`、`rewrite_applied_count=1`、`rewrite_fallback_count=0`。
+
+`v5.12m` 增加真实改写失败分桶和失败样例 smoke。当前不支持真实改写的 `HandoffMessage` 会安全回退，agent 仍收到原生消息；trace 记录 `fallback_reasons=['non_text_message_present']`、`fallback_buckets=['unsupported_message_type']`、`fallback_count=1`、`real_message_mutation_count=0`。同时，简单 `TextMessage` 成功改写回归仍通过，token 从 `4160` 降到 `336`。
+
+`v5.12n` 将失败样例扩展为回退矩阵，覆盖空消息、空文本、短文本成本门控失败、非 TextMessage 四类场景。最近一次矩阵 smoke 中，`fallback_count=4`、`applied_count=0`、`real_message_mutation_count=0`，分桶覆盖 `input_contract_empty`、`empty_payload`、`cost_gate_failed`、`unsupported_message_type`。简单 `TextMessage` 成功改写回归仍通过，token 从 `4160` 降到 `341`。
+
+`v5.12o` 在不扩大真实改写范围的前提下，为 `HandoffMessage` 和 `ToolCallSummaryMessage` 增加最小安全守卫审计。最近一次 guard smoke 中，`fallback_count=2`、`real_message_mutation_count=0`，安全审计记录 `handoff_rewrite_requires_target_preservation`、`tool_rewrite_requires_call_lineage`、`tool_rewrite_requires_result_lineage`，并保留 `handoff_targets=['guard']`、`tool_call_ids=['call_guard_1']`、`tool_result_call_ids=['call_guard_1']`。简单 `TextMessage` 成功改写回归仍通过，token 从 `2147` 降到 `299`。
+
+`v5.12p` 增加 `HandoffMessage` typed rewrite candidate。最近一次 candidate smoke 中，候选合约为 `autogen_handoff_typed_rewrite_candidate.v1`，`candidate_safe_count=1`、`mutation_applied_count=0`，并验证 `message_type/source/target/id/metadata/context/content` 均保持正确；Handoff candidate token 从 `618` 降到 `304`。简单 `TextMessage` 成功改写回归仍通过，token 从 `2147` 降到 `300`。
+
+`v5.12q` 增加受控 HandoffMessage 真实改写开关 `AGENTLITE_AUTOGEN_HANDOFF_REWRITE`。默认关闭时只生成 typed candidate，`mutation_applied_count=0`；开关开启时，在 candidate 语义安全、SHP schema 有效、Prompt View 可用、token 确实降低的条件下，只替换 `HandoffMessage.content`，并保留 `source/target/id/metadata/context`。最近一次开启 smoke 中，`mutation_applied_count=1`、`applied_count=1`、`fallback_count=1`，Handoff candidate token 从 `618` 降到 `300`。
+
+`v5.12r` 增加 Handoff rewrite 压测矩阵。矩阵覆盖开关关闭、单条长 Handoff、短内容成本门、多条 Handoff、带 `context` 的 Handoff 五类边界；最近一次矩阵 smoke 中，关闭模式 `applied_count=0`，开启模式 4 个 Handoff 调用里只改写 2 个安全候选，短内容因 `token_reduced=false` 回退，多 Handoff 保持原生消息，带 `context` 的 Handoff 在 `context_count=2` 时仍能保留控制字段并完成改写。
+
+`v5.12s` 增加 `ToolCallSummaryMessage` typed rewrite candidate。该版本仍不真实改写 ToolCallSummary；agent 实际收到的仍是 AutoGen 原生消息，但 trace 中会记录 `autogen_tool_summary_typed_rewrite_candidate.v1` 候选，验证 `tool_calls.id/name`、`results.call_id/name/is_error` 等工具调用链路字段完整保留。最近一次 smoke 中，`candidate_safe_count=1`、`mutation_applied_count=0`，候选 token 从 `1082` 降到 `333`。
+
+`v5.12t` 增加 `ToolCallSummaryMessage` rewrite matrix。矩阵覆盖正常 `call_id` 对齐、`call_id` 不匹配、多工具调用、多工具结果、短内容不降成本、`is_error=true` 错误结果保留等边界；最近一次 matrix 中，5 个候选全部记录，`candidate_safe_count=4`、`mutation_applied_count=0`，不匹配链路触发 `tool_result_lineage_complete=false`，短内容触发 `token_reduced=false`，所有 agent 仍收到原生 ToolCallSummary。
+
+`v5.12u` 增加 `ToolCallSummaryMessage` 真实改写开关 `AGENTLITE_AUTOGEN_TOOL_SUMMARY_REWRITE`。关闭时只记录 typed candidate，不改 AutoGen 原生消息；开启且 `tool_calls/results` 链路、schema、Prompt View、`token_reduced` 全部通过时，只替换 `content` 字段。最近一次 switch smoke 中，开启模式 `applied_count=1`、`fallback_count=0`、`mutation_applied_count=1`，输入 token 从 `1371` 降到 `327`，并保留 `tool_call_ids/tool_result_call_ids=['call_tool_switch_1']`。
+`v5.12u` 同时增加综合 AutoGen-only 用户脚本验证：脚本只导入 AutoGen，不导入 AgentLite；托管启动后，`TextMessage`、`HandoffMessage`、`ToolCallSummaryMessage` 三类消息在 agent 输入层均完成真实替换，`applied_count=3`、`fallback_count=0`，输入 token 从 `3930` 降到 `942`，并保留 ToolCallSummary 的工具调用链路。
+`v5.12v` 增加 AutoGen Team 入口层真实改写开关 `AGENTLITE_AUTOGEN_TEAM_REWRITE`。开启后，`RoundRobinGroupChat.run_stream(task=长文本)` 会在 AutoGen 原生分发前，把长任务写入 StatePool，并将传入 Team 的 task 替换成 `AGENTLITE_TEAM_REAL_REWRITE v1` 广播清单和接收方 Prompt Views。最近一次 Team rewrite smoke 中，`applied_count=1`、`fallback_count=0`，原始 task token 从 `1596` 降到 `1044`，按三接收方广播口径从 `4788` 降到 `899`。
+`v5.12w` 增加 Team rewrite 边界矩阵。矩阵验证：开关关闭时保留原生任务；长 `task: str` 可真实替换；短 task 因成本门控安全回退；`TextMessage task` 和 `list task` 因类型暂不支持安全回退；`task=None` 因缺少任务参数安全回退；`RoundRobinGroupChat.run(...)` 间接路径仍会触发 `run_stream` 改写。最近一次 matrix 中，off 组 `applied_count=0`、`fallback_count=1`，on 组 `applied_count=2`、`fallback_count=4`，task token 总下降 `1519`。
+
+当前仍未接入 AutoGen Studio 网页端，也未重写 AutoGen 所有 Team 内部私有消息队列；Team 层真实替换目前只覆盖 `task: str` 的入口场景。
 
 核心安装仅需要 `tiktoken`：
 
@@ -30,6 +162,18 @@ python -m pip install -e .
 
 ```powershell
 python -m pip install -e ".[transformers]"
+```
+
+只有在验证真实 AutoGen 接入时才安装 AutoGen 可选依赖：
+
+```powershell
+python -m pip install -e ".[autogen]"
+```
+
+安装后可运行原生 AutoGen smoke：
+
+```powershell
+python .\examples\run_autogen_native_smoke.py
 ```
 
 版本切换与 GitHub 浏览方式见：[docs/versioning.md](docs/versioning.md)

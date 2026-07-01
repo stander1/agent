@@ -14,13 +14,33 @@ from agent_runtime.core.models import Mode
 from agent_runtime.eval.llm_benchmark_runner import run_llm_benchmark
 from agent_runtime.llm.config import load_llm_config
 
+MODE_PRESETS: dict[str, list[Mode]] = {
+    "both": ["baseline_bounded_nl_framework", "runtime_lite"],
+    "fair": ["baseline_bounded_nl_framework", "runtime_lite"],
+    "stress": ["baseline_stress_full_broadcast", "runtime_lite"],
+    "all": [
+        "baseline_stress_full_broadcast",
+        "baseline_bounded_nl_framework",
+        "runtime_lite",
+    ],
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run v2 LLM evaluation benchmark.")
     parser.add_argument("--rounds", type=int, default=1)
     parser.add_argument(
         "--mode",
-        choices=["baseline_text", "runtime_lite", "both"],
+        choices=[
+            "baseline_text",
+            "baseline_stress_full_broadcast",
+            "baseline_bounded_nl_framework",
+            "runtime_lite",
+            "both",
+            "fair",
+            "stress",
+            "all",
+        ],
         default="both",
     )
     parser.add_argument(
@@ -56,9 +76,7 @@ def main() -> int:
     suites = args.task_suite or [
         PROJECT_ROOT / "benchmarks" / "travel_task_group_a.json"
     ]
-    modes: list[Mode] = (
-        ["baseline_text", "runtime_lite"] if args.mode == "both" else [args.mode]
-    )
+    modes: list[Mode] = MODE_PRESETS.get(args.mode, [args.mode])
     output_dir = args.output_dir
     if output_dir is None:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")

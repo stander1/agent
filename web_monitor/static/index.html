@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Multi-Agent Workflow Monitor</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="topbar">
+        <div class="brand">
+          <h1>Multi-Agent Workflow Monitor</h1>
+          <span id="statusBadge" class="status idle">idle</span>
+        </div>
+        <div class="run-controls">
+          <select id="runSelect" aria-label="Run history"></select>
+          <button id="refreshRunsBtn" type="button" title="Refresh runs">Refresh</button>
+        </div>
+      </section>
+
+      <section class="launcher">
+        <input id="titleInput" value="User task" aria-label="Task title" />
+        <textarea id="promptInput" aria-label="User prompt">Analyze a multi-agent collaboration task and show how each stage hands off to the next agent.</textarea>
+        <div class="launcher-actions">
+          <select id="engineSelect" aria-label="Experiment engine">
+            <option value="deterministic">deterministic</option>
+          </select>
+          <input id="roundsInput" type="number" min="1" max="5" value="1" aria-label="Rounds" />
+          <button id="startBtn" type="button">Start baseline vs runtime</button>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <div class="mode-column">
+          <div class="section-head">
+            <h2>baseline_text</h2>
+            <span id="baselineMeta"></span>
+          </div>
+          <div id="baselineFlow" class="flow"></div>
+        </div>
+        <div class="mode-column">
+          <div class="section-head">
+            <h2>runtime_lite</h2>
+            <span id="runtimeMeta"></span>
+          </div>
+          <div id="runtimeFlow" class="flow"></div>
+        </div>
+        <aside class="detail">
+          <div class="section-head">
+            <h2>Details</h2>
+            <span id="detailType">agent</span>
+          </div>
+          <div id="detailBody" class="detail-body"></div>
+        </aside>
+      </section>
+
+      <section class="pools">
+        <div class="state-panel">
+          <div class="section-head">
+            <h2>State Pool</h2>
+            <span id="stateCount">0 states</span>
+          </div>
+          <div id="statePool" class="state-grid"></div>
+        </div>
+        <div class="memory-panel">
+          <div class="section-head">
+            <h2>Memory Knowledge Graph</h2>
+            <span id="memoryCount">0 nodes</span>
+          </div>
+          <svg id="memoryGraph" viewBox="0 0 960 360" role="img" aria-label="Memory knowledge graph"></svg>
+        </div>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

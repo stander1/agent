@@ -90,6 +90,12 @@ class TaskMetricRow:
     background_memory_completed_count: int = 0
     background_memory_error_count: int = 0
     background_memory_wait_ms: float = 0.0
+    summary_update_count: int = 0
+    summary_update_prompt_tokens: int = 0
+    summary_update_completion_tokens: int = 0
+    summary_update_total_tokens: int = 0
+    summary_update_estimated_tokens: int = 0
+    summary_update_method: str = ""
     stale_read_detected_count: int = 0
     preflight_validation_count: int = 0
     preflight_block_count: int = 0
@@ -116,9 +122,35 @@ class TaskMetricRow:
     tokenizer_version: str = ""
 
 
+@dataclass(slots=True)
+class AgentMetricRow:
+    task_id: str
+    round_id: int
+    mode: str
+    agent: str
+    role: str = ""
+    prompt_chars: int = 0
+    prompt_tokens: int = 0
+    output_chars: int = 0
+    llm_call_count: int = 0
+    llm_prompt_tokens: int = 0
+    llm_completion_tokens: int = 0
+    llm_total_tokens: int = 0
+    llm_wall_time_ms: float = 0.0
+    ttft_ms: float = 0.0
+    tokens_per_second: float = 0.0
+    local_state_read_ms: float = 0.0
+    local_memory_search_ms: float = 0.0
+    artifact_digest_ms: float = 0.0
+    schema_check_ms: float = 0.0
+    retry_count: int = 0
+    raw_access_count: int = 0
+
+
 class MetricsCollector:
     def __init__(self) -> None:
         self._rows: dict[tuple[str, int, str], TaskMetricRow] = {}
+        self._agent_rows: dict[tuple[str, int, str, str], AgentMetricRow] = {}
         self._tokenizer_meta: dict[str, str] = {}
 
     def record_message(
@@ -367,13 +399,15 @@ class MetricsCollector:
         prompt: str,
         token_counter: TokenCounter,
     ) -> None:
-        del agent_id
         row = self._row(task_id, round_id, mode)
         token_count = token_counter.count(prompt)
         row.prompt_chars += len(prompt)
         row.prompt_tokens += token_count.token_count
         row.prompt_view_tokens += token_count.token_count
         self._apply_token_meta(row, token_count)
+        agent_row = self._agent_row(task_id, round_id, mode, agent_id)
+        agent_row.prompt_chars += len(prompt)
+        agent_row.prompt_tokens += token_count.token_count
 
     def record_llm_call(
         self,
@@ -383,6 +417,9 @@ class MetricsCollector:
         mode: Mode,
         usage: dict[str, int],
         latency_ms: float,
+        agent_id: str = "",
+        output_chars: int = 0,
+        ttft_ms: float = 0.0,
     ) -> None:
         row = self._row(task_id, round_id, mode)
         row.llm_call_count += 1
@@ -390,6 +427,18 @@ class MetricsCollector:
         row.llm_completion_tokens += int(usage.get("completion_tokens", 0) or 0)
         row.llm_total_tokens += int(usage.get("total_tokens", 0) or 0)
         row.llm_latency_ms += latency_ms
+        if agent_id:
+            agent_row = self._agent_row(task_id, round_id, mode, agent_id)
+            agent_row.llm_call_count += 1
+            agent_row.llm_prompt_tokens += int(usage.get("prompt_tokens", 0) or 0)
+            agent_row.llm_completion_tokens += int(
+                usage.get("completion_tokens", 0) or 0
+            )
+            agent_row.llm_total_tokens += int(usage.get("total_tokens", 0) or 0)
+            agent_row.llm_wall_time_ms += latency_ms
+            agent_row.ttft_ms += ttft_ms
+            agent_row.output_chars += output_chars
+            self._refresh_agent_tokens_per_second(agent_row)
 
     def record_provider_guard(
         self,
@@ -398,6 +447,7 @@ class MetricsCollector:
         round_id: int,
         mode: Mode,
         provider_guard: dict[str, Any] | None,
+        agent_id: str = "",
     ) -> None:
         if not provider_guard:
             return
@@ -410,6 +460,14 @@ class MetricsCollector:
         row.provider_response_retry_count += int(
             provider_guard.get("retry_attempts", 0) or 0
         )
+        if agent_id:
+            self.record_agent_retry(
+                task_id=task_id,
+                round_id=round_id,
+                mode=mode,
+                agent_id=agent_id,
+                retry_count=int(provider_guard.get("retry_attempts", 0) or 0),
+            )
         if provider_guard.get("schema_errors"):
             row.malformed_provider_response_count += 1
 
@@ -420,6 +478,7 @@ class MetricsCollector:
         round_id: int,
         mode: Mode,
         contract_report: dict[str, Any],
+        agent_id: str = "",
     ) -> None:
         row = self._row(task_id, round_id, mode)
         row.contract_guard_checked_count += 1
@@ -433,11 +492,65 @@ class MetricsCollector:
         ):
             row.contract_retry_count += 1
             row.context_pruned_retry_count += 1
+            if agent_id:
+                self.record_agent_retry(
+                    task_id=task_id,
+                    round_id=round_id,
+                    mode=mode,
+                    agent_id=agent_id,
+                )
             if status == "repaired":
                 row.format_retry_success_count += 1
         if status == "degraded_fallback":
             row.contract_violation_count += 1
             row.fallback_count += 1
+
+    def record_agent_role(
+        self,
+        *,
+        task_id: str,
+        round_id: int,
+        mode: Mode,
+        agent_id: str,
+        role: str = "",
+    ) -> None:
+        row = self._agent_row(task_id, round_id, mode, agent_id)
+        if role and not row.role:
+            row.role = role
+
+    def record_agent_local_timing(
+        self,
+        *,
+        task_id: str,
+        round_id: int,
+        mode: Mode,
+        agent_id: str,
+        local_state_read_ms: float = 0.0,
+        local_memory_search_ms: float = 0.0,
+        artifact_digest_ms: float = 0.0,
+        schema_check_ms: float = 0.0,
+        raw_access_count: int = 0,
+    ) -> None:
+        row = self._agent_row(task_id, round_id, mode, agent_id)
+        row.local_state_read_ms += local_state_read_ms
+        row.local_memory_search_ms += local_memory_search_ms
+        row.artifact_digest_ms += artifact_digest_ms
+        row.schema_check_ms += schema_check_ms
+        row.raw_access_count += raw_access_count
+
+    def record_agent_retry(
+        self,
+        *,
+        task_id: str,
+        round_id: int,
+        mode: Mode,
+        agent_id: str,
+        retry_count: int = 1,
+    ) -> None:
+        if retry_count <= 0:
+            return
+        row = self._agent_row(task_id, round_id, mode, agent_id)
+        row.retry_count += retry_count
 
     def record_preflight_validation(
         self,
@@ -490,6 +603,32 @@ class MetricsCollector:
         row.background_memory_error_count += error_count
         row.background_memory_wait_ms += wait_ms
 
+    def record_summary_update(
+        self,
+        *,
+        task_id: str,
+        round_id: int,
+        mode: Mode,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        total_tokens: int = 0,
+        estimated_tokens: int = 0,
+        method: str = "",
+    ) -> None:
+        row = self._row(task_id, round_id, mode)
+        row.summary_update_count += 1
+        row.summary_update_prompt_tokens += prompt_tokens
+        row.summary_update_completion_tokens += completion_tokens
+        row.summary_update_total_tokens += total_tokens
+        row.summary_update_estimated_tokens += estimated_tokens
+        if method:
+            row.summary_update_method = (
+                method
+                if not row.summary_update_method
+                or row.summary_update_method == method
+                else "mixed"
+            )
+
     def finish_task(
         self,
         task_id: str,
@@ -515,10 +654,15 @@ class MetricsCollector:
             + row.retrieved_memory_tokens
             + row.control_llm_tokens
             + row.retry_tokens
+            + row.summary_update_total_tokens
+            + row.summary_update_estimated_tokens
         )
 
     def rows(self) -> list[TaskMetricRow]:
         return list(self._rows.values())
+
+    def agent_rows(self) -> list[AgentMetricRow]:
+        return list(self._agent_rows.values())
 
     def summary(self) -> dict[str, Any]:
         by_mode: dict[str, dict[str, Any]] = defaultdict(
@@ -594,6 +738,12 @@ class MetricsCollector:
                 "background_memory_completed_count": 0,
                 "background_memory_error_count": 0,
                 "background_memory_wait_ms": 0.0,
+                "summary_update_count": 0,
+                "summary_update_prompt_tokens": 0,
+                "summary_update_completion_tokens": 0,
+                "summary_update_total_tokens": 0,
+                "summary_update_estimated_tokens": 0,
+                "summary_update_method": "",
                 "stale_read_detected_count": 0,
                 "preflight_validation_count": 0,
                 "preflight_block_count": 0,
@@ -706,6 +856,20 @@ class MetricsCollector:
             )
             bucket["background_memory_error_count"] += row.background_memory_error_count
             bucket["background_memory_wait_ms"] += row.background_memory_wait_ms
+            bucket["summary_update_count"] += row.summary_update_count
+            bucket["summary_update_prompt_tokens"] += row.summary_update_prompt_tokens
+            bucket["summary_update_completion_tokens"] += (
+                row.summary_update_completion_tokens
+            )
+            bucket["summary_update_total_tokens"] += row.summary_update_total_tokens
+            bucket["summary_update_estimated_tokens"] += (
+                row.summary_update_estimated_tokens
+            )
+            if row.summary_update_method:
+                if not bucket["summary_update_method"]:
+                    bucket["summary_update_method"] = row.summary_update_method
+                elif bucket["summary_update_method"] != row.summary_update_method:
+                    bucket["summary_update_method"] = "mixed"
             bucket["stale_read_detected_count"] += row.stale_read_detected_count
             bucket["preflight_validation_count"] += row.preflight_validation_count
             bucket["preflight_block_count"] += row.preflight_block_count
@@ -757,19 +921,108 @@ class MetricsCollector:
                 else 0.0
             )
 
-        return {"by_mode": dict(by_mode), "tokenizer": self._tokenizer_meta}
+        return {
+            "by_mode": dict(by_mode),
+            "by_agent": self.agent_summary(),
+            "tokenizer": self._tokenizer_meta,
+        }
+
+    def agent_summary(self) -> dict[str, Any]:
+        by_mode_agent: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+        for row in self.agent_rows():
+            agent_bucket = by_mode_agent[row.mode].setdefault(
+                row.agent,
+                {
+                    "agent": row.agent,
+                    "role": row.role,
+                    "rows": 0,
+                    "prompt_chars": 0,
+                    "prompt_tokens": 0,
+                    "output_chars": 0,
+                    "llm_call_count": 0,
+                    "llm_prompt_tokens": 0,
+                    "llm_completion_tokens": 0,
+                    "llm_total_tokens": 0,
+                    "llm_wall_time_ms": 0.0,
+                    "ttft_ms": 0.0,
+                    "tokens_per_second": 0.0,
+                    "local_state_read_ms": 0.0,
+                    "local_memory_search_ms": 0.0,
+                    "artifact_digest_ms": 0.0,
+                    "schema_check_ms": 0.0,
+                    "retry_count": 0,
+                    "raw_access_count": 0,
+                    "total_wall_time_ms": 0.0,
+                },
+            )
+            agent_bucket["rows"] += 1
+            if row.role and not agent_bucket["role"]:
+                agent_bucket["role"] = row.role
+            agent_bucket["prompt_chars"] += row.prompt_chars
+            agent_bucket["prompt_tokens"] += row.prompt_tokens
+            agent_bucket["output_chars"] += row.output_chars
+            agent_bucket["llm_call_count"] += row.llm_call_count
+            agent_bucket["llm_prompt_tokens"] += row.llm_prompt_tokens
+            agent_bucket["llm_completion_tokens"] += row.llm_completion_tokens
+            agent_bucket["llm_total_tokens"] += row.llm_total_tokens
+            agent_bucket["llm_wall_time_ms"] += row.llm_wall_time_ms
+            agent_bucket["ttft_ms"] += row.ttft_ms
+            agent_bucket["local_state_read_ms"] += row.local_state_read_ms
+            agent_bucket["local_memory_search_ms"] += row.local_memory_search_ms
+            agent_bucket["artifact_digest_ms"] += row.artifact_digest_ms
+            agent_bucket["schema_check_ms"] += row.schema_check_ms
+            agent_bucket["retry_count"] += row.retry_count
+            agent_bucket["raw_access_count"] += row.raw_access_count
+
+        for agent_buckets in by_mode_agent.values():
+            for bucket in agent_buckets.values():
+                llm_seconds = bucket["llm_wall_time_ms"] / 1000.0
+                bucket["tokens_per_second"] = (
+                    bucket["llm_completion_tokens"] / llm_seconds
+                    if llm_seconds > 0
+                    else 0.0
+                )
+                bucket["total_wall_time_ms"] = (
+                    bucket["llm_wall_time_ms"]
+                    + bucket["local_state_read_ms"]
+                    + bucket["local_memory_search_ms"]
+                    + bucket["artifact_digest_ms"]
+                    + bucket["schema_check_ms"]
+                )
+        return {mode: dict(agents) for mode, agents in by_mode_agent.items()}
 
     def export(self, output_dir: Path) -> None:
         output_dir.mkdir(parents=True, exist_ok=True)
         rows = [asdict(row) for row in self.rows()]
+        agent_rows = [asdict(row) for row in self.agent_rows()]
         fieldnames = list(TaskMetricRow.__dataclass_fields__.keys())
+        agent_fieldnames = list(AgentMetricRow.__dataclass_fields__.keys())
 
         with (output_dir / "metrics.csv").open("w", newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(fh, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(rows)
 
-        payload = {"rows": rows, "summary": self.summary()}
+        with (output_dir / "agent_metrics.csv").open(
+            "w", newline="", encoding="utf-8"
+        ) as fh:
+            writer = csv.DictWriter(fh, fieldnames=agent_fieldnames)
+            writer.writeheader()
+            writer.writerows(agent_rows)
+
+        agent_payload = {
+            "rows": agent_rows,
+            "summary": self.agent_summary(),
+            "note": "ttft_ms is 0 for the current non-streaming client.",
+        }
+        with (output_dir / "agent_metrics.json").open("w", encoding="utf-8") as fh:
+            json.dump(agent_payload, fh, ensure_ascii=False, indent=2)
+
+        payload = {
+            "rows": rows,
+            "summary": self.summary(),
+            "agent_rows": agent_rows,
+        }
         with (output_dir / "metrics.json").open("w", encoding="utf-8") as fh:
             json.dump(payload, fh, ensure_ascii=False, indent=2)
 
@@ -778,6 +1031,22 @@ class MetricsCollector:
         if key not in self._rows:
             self._rows[key] = TaskMetricRow(task_id=task_id, round_id=round_id, mode=mode)
         return self._rows[key]
+
+    def _agent_row(
+        self, task_id: str, round_id: int, mode: Mode, agent_id: str
+    ) -> AgentMetricRow:
+        key = (task_id, round_id, mode, agent_id)
+        if key not in self._agent_rows:
+            self._agent_rows[key] = AgentMetricRow(
+                task_id=task_id, round_id=round_id, mode=mode, agent=agent_id
+            )
+        return self._agent_rows[key]
+
+    def _refresh_agent_tokens_per_second(self, row: AgentMetricRow) -> None:
+        llm_seconds = row.llm_wall_time_ms / 1000.0
+        row.tokens_per_second = (
+            row.llm_completion_tokens / llm_seconds if llm_seconds > 0 else 0.0
+        )
 
     def _apply_token_meta(self, row: TaskMetricRow, token_count: Any) -> None:
         row.token_count_method = token_count.token_count_method

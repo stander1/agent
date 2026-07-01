@@ -13,7 +13,11 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from agent_runtime.core.models import Mode
 from agent_runtime.eval.benchmark_runner import run_v0_benchmark
-from examples.run_cross_task_eval import build_cross_task_report, render_markdown_report
+from examples.run_cross_task_eval import (
+    MODE_PRESETS,
+    render_markdown_report,
+    build_cross_task_report,
+)
 
 
 SUITE_PRESETS = {
@@ -33,7 +37,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rounds", type=int, default=1)
     parser.add_argument(
         "--mode",
-        choices=["baseline_text", "runtime_lite", "both"],
+        choices=[
+            "baseline_text",
+            "baseline_stress_full_broadcast",
+            "baseline_bounded_nl_framework",
+            "runtime_lite",
+            "both",
+            "fair",
+            "stress",
+            "all",
+        ],
         default="both",
     )
     parser.add_argument("--output-dir", type=Path, default=None)
@@ -56,9 +69,7 @@ def main() -> int:
     args = parse_args()
     suites = args.suite or ["A", "B"]
     suite_paths = [SUITE_PRESETS[item] for item in suites]
-    modes: list[Mode] = (
-        ["baseline_text", "runtime_lite"] if args.mode == "both" else [args.mode]
-    )
+    modes: list[Mode] = MODE_PRESETS.get(args.mode, [args.mode])
     output_dir = args.output_dir
     if output_dir is None:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
