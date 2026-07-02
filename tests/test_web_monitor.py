@@ -5,7 +5,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from web_monitor.parser import build_run_snapshot, list_runs
+from web_monitor.parser import (
+    build_run_snapshot,
+    build_session_snapshot,
+    list_runs,
+    list_sessions,
+)
 
 
 class WebMonitorParserTest(unittest.TestCase):
@@ -189,6 +194,85 @@ class WebMonitorParserTest(unittest.TestCase):
 
             runs = list_runs(runs_dir)
             self.assertEqual([item["run_id"] for item in runs], ["run-a"])
+
+    def test_agentlite_session_snapshot_exposes_autogen_trace_and_state_pool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            session_dir = data_dir / "sessions" / "launch_sample"
+            trace_dir = session_dir / "autogen_driver"
+            trace_dir.mkdir(parents=True)
+            (session_dir / "bootstrap_status.json").write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "framework": "autogen",
+                        "session_id": "launch_sample",
+                        "driver": "autogen",
+                        "driver_status": "active",
+                        "hooks_active": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            events = [
+                {
+                    "ts": "2026-07-02T00:00:00+00:00",
+                    "event_type": "autogen_agent_receive",
+                    "payload": {
+                        "agent_id": "RoundRobinGroupChat",
+                        "role": "team",
+                        "method": "run_stream",
+                        "input_chars": 1000,
+                    },
+                },
+                {
+                    "ts": "2026-07-02T00:00:01+00:00",
+                    "event_type": "state_written",
+                    "payload": {
+                        "state": {
+                            "state_id": "state_session",
+                            "state_type": "artifact_state",
+                            "source_agent": "RoundRobinGroupChat",
+                            "tier": "cold",
+                            "lifecycle": "active",
+                            "summary": "session state",
+                        }
+                    },
+                },
+                {
+                    "ts": "2026-07-02T00:00:02+00:00",
+                    "event_type": "autogen_team_input_real_rewrite",
+                    "payload": {
+                        "agent_id": "RoundRobinGroupChat",
+                        "rewrite_applied_count": 1,
+                        "rewrite_fallback_count": 0,
+                        "token_delta_native_broadcast_minus_rewrite": 321,
+                        "state_refs": [{"state_id": "state_session"}],
+                    },
+                },
+            ]
+            (trace_dir / "trace.jsonl").write_text(
+                "\n".join(json.dumps(item) for item in events),
+                encoding="utf-8",
+            )
+
+            sessions = list_sessions(data_dir)
+            self.assertEqual(sessions[0]["session_id"], "launch_sample")
+            snapshot = build_session_snapshot(session_dir)
+            runtime = snapshot["modes"]["runtime_lite"]
+            self.assertEqual(snapshot["session_id"], "launch_sample")
+            self.assertEqual(snapshot["status"], "succeeded")
+            self.assertTrue(snapshot["summary"]["hooks_active"])
+            self.assertEqual(runtime["state_pool"][0]["state_id"], "state_session")
+            self.assertTrue(
+                any(agent["agent_id"] == "RoundRobinGroupChat" for agent in runtime["agents"])
+            )
+            self.assertTrue(
+                any(
+                    "Team task rewritten" in message["summary"]
+                    for message in runtime["messages"]
+                )
+            )
 
 
 if __name__ == "__main__":

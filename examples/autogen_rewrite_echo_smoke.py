@@ -78,7 +78,7 @@ class EchoAgent(BaseChatAgent):
 def _long_task() -> str:
     paragraph = (
         "NATIVE_LONG_CONTEXT_MARKER section {idx}: this simulates the long "
-        "native AutoGen context that an agent would normally receive. v5.12x "
+        "native AutoGen context that an agent would normally receive. v5.13h "
         "must prove that real-rewrite mode moves the payload to StatePool and "
         "delivers a compact SHP wire plus Prompt View instead of repeating the "
         "full native paragraph inside the agent input."

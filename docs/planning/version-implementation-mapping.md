@@ -2791,3 +2791,1216 @@ error_count: 0
 native_full_broadcast_tokens: 6213
 wire_plus_prompt_view_tokens: 882
 ```
+
+## 37. v5.13a AutoGen Core Runtime 通信覆盖
+
+### 37.1 本轮解决的问题
+
+v5.12z 已经证明：
+
+```text
+agentlite run --framework autogen -- python app.py
+```
+
+可以在 Python 代码端启动 AutoGen 应用，并对 AgentChat / Team 层的消息入口做透明接管；其中 Team 输入已经支持真实替换。
+
+但这仍然不是“所有 AutoGen 通信过程”的完整接管，因为 AutoGen 还有更底层的 Core Runtime 通信入口：
+
+```text
+autogen_core.SingleThreadedAgentRuntime.send_message()
+autogen_core.SingleThreadedAgentRuntime.publish_message()
+```
+
+如果只覆盖 AgentChat / Team，那么直接使用 AutoGen Core 的应用、工具调用链路、发布订阅链路仍可能绕过 AgentLite。
+
+v5.13a 的目标是先把这一层纳入观测与低开销协议化路径。
+
+### 37.2 本轮实现内容
+
+新增 Core Runtime transport shadow 覆盖：
+
+```text
+send_message    -> StatePool 写入 -> SHP shadow envelope -> receiver Prompt View -> trace 指标
+publish_message -> StatePool 写入 -> SHP shadow envelope -> receiver Prompt View -> trace 指标
+```
+
+新增或修改的关键文件：
+
+```text
+agent_runtime/drivers/autogen.py
+agent_runtime/eval/trace_logger.py
+examples/autogen_core_transport_smoke.py
+examples/run_autogen_core_transport_smoke.py
+docs/experiments/v5.13a-autogen-core-transport-results.md
+```
+
+新增 trace 事件：
+
+```text
+autogen_transport_input_state
+autogen_core_transport_shadow
+```
+
+其中 `autogen_core_transport_shadow` 记录：
+
+```text
+method
+sender
+declared_receiver
+state_refs
+shadow_wire_envelope
+schema_valid
+prompt_view_available
+native_transport_tokens
+shp_shadow_envelope_tokens
+prompt_view_tokens
+wire_plus_prompt_view_tokens
+token_delta_native_minus_wire_plus_prompt_view
+communication_gate
+```
+
+### 37.3 验证结果
+
+命令：
+
+```text
+F:\software\anaconda\envs\agentlite-autogen\python.exe .\examples\run_autogen_core_transport_smoke.py --output-dir .\runs\v5.13a-autogen-core-transport-20260702-003
+```
+
+结果：
+
+```text
+passed: true
+driver_phase_v5_13a: true
+direct_and_publish_received: true
+transport_state_event_count: 2
+core_transport_shadow_event_count: 2
+core_transport_methods: publish_message, send_message
+core_transport_receivers: agent_direct_agent_default, topic_core-topic_default
+core_transport_state_ref_count: 2
+core_transport_schema_valid_count: 2
+core_transport_prompt_view_count: 2
+core_transport_token_delta: 2222
+```
+
+回归验证：
+
+```text
+F:\software\anaconda\envs\agentlite-autogen\python.exe -m unittest discover -s tests
+
+Ran 117 tests in 23.032s
+OK
+```
+
+### 37.4 当前边界
+
+可以表述为：
+
+```text
+AgentLite 的 AutoGen 接管范围已经从 AgentChat / Team 层下探到 AutoGen Core Runtime 的 send_message / publish_message 入口；
+Core Runtime 直接消息和发布订阅消息已经可以写入状态池、生成紧凑 SHP 影子包、渲染接收方 Prompt View，并产生成本与结构化 trace 指标。
+```
+
+仍不能表述为：
+
+```text
+已经真实替换所有 AutoGen Core 用户自定义消息对象；
+已经接管 AutoGen Studio / 网页端进程；
+已经覆盖分布式运行时、远程 runtime、所有第三方封装和所有自定义序列化协议。
+```
+
+原因是 AutoGen Core 的 handler 通常按 Python 消息类型分发。任意把用户自定义 dataclass / pydantic 消息替换成通用 SHP 对象，可能导致 handler 类型匹配失败。
+
+因此，下一步更稳的方向不是“粗暴替换所有对象”，而是做类型保持的真实改写：
+
+```text
+当 Core 消息对象含有 content / body / text 等可替换字段时，
+保持原 Python 类型不变，只把长文本字段替换为 SHP state_ref wire packet，
+从而既不破坏 AutoGen Core 的类型分发，也能真正减少底层传输文本。
+```
+
+## 38. v5.13b AutoGen Core 类型保持真实改写
+
+### 38.1 本轮解决的问题
+
+v5.13a 解决的是 Core Runtime 通信入口能被 AgentLite 看到并协议化：
+
+```text
+send_message / publish_message -> StatePool -> SHP shadow -> Prompt View -> trace
+```
+
+但 v5.13a 仍然没有改变真实传输给 AutoGen Core handler 的消息对象。也就是说，它能证明“看见并生成低开销替代包”，但不能证明“真实替换底层传输内容”。
+
+v5.13b 补的是这一层：
+
+```text
+当 Core message 含有 content / body / text 字符串字段时，
+保持原 Python message 类型不变，
+只把该长文本字段替换为 AgentLite SHP state_ref wire packet + Prompt View。
+```
+
+这避免了粗暴替换整个对象导致 AutoGen Core handler 类型分发失败的问题。
+
+### 38.2 本轮实现内容
+
+新增环境开关：
+
+```text
+AGENTLITE_AUTOGEN_CORE_CONTENT_REWRITE=1
+```
+
+`agentlite run --framework autogen --rewrite all -- python app.py` 的现有命令形式不变；`--rewrite all` 现在会开启：
+
+```text
+AGENTLITE_AUTOGEN_BROADCAST_MODE=real-rewrite
+AGENTLITE_AUTOGEN_TEAM_REWRITE=1
+AGENTLITE_AUTOGEN_HANDOFF_REWRITE=1
+AGENTLITE_AUTOGEN_TOOL_SUMMARY_REWRITE=1
+AGENTLITE_AUTOGEN_CORE_CONTENT_REWRITE=1
+```
+
+新增 trace 事件：
+
+```text
+autogen_core_content_real_rewrite
+```
+
+它记录：
+
+```text
+method
+transport_metadata
+native_message_type
+rewritten_field
+state_refs
+schema_valid
+prompt_view_available
+native_content_tokens
+rewritten_content_tokens
+token_delta_native_minus_rewrite
+semantic_checks
+fallback_reasons
+```
+
+新增或修改的关键文件：
+
+```text
+agent_runtime/drivers/autogen.py
+agent_runtime/cli.py
+examples/autogen_core_transport_smoke.py
+examples/run_autogen_core_content_rewrite_smoke.py
+docs/experiments/v5.13b-autogen-core-transport-results.md
+docs/experiments/v5.13b-autogen-core-content-rewrite-results.md
+```
+
+### 38.3 验证结果
+
+真实改写 smoke：
+
+```text
+命令：F:\software\anaconda\envs\agentlite-autogen\python.exe .\examples\run_autogen_core_content_rewrite_smoke.py --output-dir .\runs\v5.13b-autogen-core-rewrite-20260702-001
+
+passed: true
+driver_phase_v5_13b: true
+core_content_rewrite_enabled: true
+native_type_preserved_at_receiver: true
+payload_kind_preserved_at_receiver: true
+rewrite_marker_received: true
+content_shortened_at_receiver: true
+send_and_publish_rewritten: true
+rewrite_applied_without_fallback: true
+schema_valid: true
+prompt_view_available: true
+token_reduced: true
+```
+
+核心指标：
+
+```text
+autogen_core_content_real_rewrite: 2
+rewrite_applied_count: 2
+rewrite_fallback_count: 0
+methods: publish_message, send_message
+state_ref_count: 2
+token_delta_native_minus_rewrite: 2158
+```
+
+接收方证据：
+
+```text
+received message type: CorePayload
+payload_kind: core_transport_state
+direct content chars: 3420 -> 1291
+publish content chars: 3926 -> 1289
+```
+
+默认 shadow 回归：
+
+```text
+命令：F:\software\anaconda\envs\agentlite-autogen\python.exe .\examples\run_autogen_core_transport_smoke.py --output-dir .\runs\v5.13b-autogen-core-transport-20260702-001
+
+passed: true
+core_transport_shadow_event_count: 2
+agentlite_rewrite_marker: false
+```
+
+这说明真实改写受开关控制，不会默认改变所有 Core 消息行为。
+
+### 38.4 当前边界
+
+可以表述为：
+
+```text
+AgentLite 已经能在 AutoGen Core Runtime 的 send_message / publish_message 入口，
+对含有 content / body / text 文本字段的 Core 消息做类型保持真实改写。
+```
+
+仍不能表述为：
+
+```text
+已经无条件接管所有任意 Python 对象；
+已经接管 AutoGen Studio / 网页端后端进程；
+已经覆盖分布式 runtime、远程 runtime、跨进程 transport 和所有第三方 AutoGen 封装。
+```
+
+下一步应继续补：
+
+```text
+1. receiver 侧 Prompt View 透明解析 / 还原策略；
+2. AutoGen Studio / 网页端后端进程的启动注入验证；
+3. 更多 Core message 结构的安全改写矩阵，例如 dataclass、pydantic、dict、namedtuple、普通可变对象。
+```
+
+## 39. v5.13c AutoGen Core 接收端 Prompt View Hydration
+
+### 39.1 本轮解决的问题
+
+v5.13b 已经可以在 AutoGen Core Runtime 的 `send_message` / `publish_message` 入口做类型保持真实改写：
+
+```text
+CorePayload(content=长文本)
+-> CorePayload(content=AGENTLITE_CORE_CONTENT_REWRITE + shp_wire + prompt_view)
+```
+
+但这还不够“无痛”，因为用户 handler 会直接看到 AgentLite wire marker，需要自己理解 `shp_wire`。
+
+v5.13c 补的是接收端透明转换：
+
+```text
+BaseAgent.on_message(message, ctx)
+-> 检测 message.content 是否为 AgentLite Core rewrite wire
+-> 从 StatePool 渲染 Prompt View
+-> 保持原 Python message 类型不变
+-> 只把 content 替换为 Prompt View
+-> 再进入用户 handler
+```
+
+这样 handler 不需要自己解析 `shp_wire`。
+
+### 39.2 本轮实现内容
+
+新增 patch target：
+
+```text
+core_agent: BaseAgent.on_message
+```
+
+新增环境变量：
+
+```text
+AGENTLITE_AUTOGEN_CORE_RECEIVER_HYDRATE=prompt-view
+```
+
+`agentlite run --framework autogen --rewrite all -- python app.py` 的命令形式不变；`--rewrite all` 现在额外打开：
+
+```text
+AGENTLITE_AUTOGEN_CORE_RECEIVER_HYDRATE=prompt-view
+```
+
+新增 trace 事件：
+
+```text
+autogen_core_receiver_hydration
+```
+
+它记录：
+
+```text
+native_message_type
+hydrated_field
+state_refs
+prompt_view_available
+wire_marker_removed
+original_rewritten_tokens
+hydrated_content_tokens
+semantic_checks
+fallback_reasons
+```
+
+新增或修改的关键文件：
+
+```text
+agent_runtime/drivers/autogen.py
+agent_runtime/cli.py
+examples/autogen_core_transport_smoke.py
+examples/run_autogen_core_content_rewrite_smoke.py
+tests/test_autogen_core_rewrite.py
+docs/experiments/v5.13c-autogen-core-transport-results.md
+docs/experiments/v5.13c-autogen-core-content-rewrite-results.md
+```
+
+### 39.3 验证结果
+
+真实改写 + 接收端 hydration smoke：
+
+```text
+命令：F:\software\anaconda\envs\agentlite-autogen\python.exe .\examples\run_autogen_core_content_rewrite_smoke.py --output-dir .\runs\v5.13c-autogen-core-hydration-20260702-001
+
+passed: true
+driver_phase_v5_13c: true
+core_content_rewrite_enabled: true
+core_receiver_hydrate_prompt_view: true
+native_type_preserved_at_receiver: true
+payload_kind_preserved_at_receiver: true
+rewrite_marker_not_leaked_to_receiver: true
+prompt_view_received: true
+content_shortened_at_receiver: true
+send_and_publish_rewritten: true
+rewrite_applied_without_fallback: true
+receiver_hydration_applied_without_fallback: true
+```
+
+核心指标：
+
+```text
+autogen_core_content_real_rewrite: 2
+autogen_core_receiver_hydration: 2
+rewrite_applied_count: 2
+rewrite_fallback_count: 0
+hydration_applied_count: 2
+hydration_fallback_count: 0
+token_delta_native_minus_rewrite: 2166
+```
+
+接收方证据：
+
+```text
+received message type: CorePayload
+payload_kind: core_transport_state
+direct content chars: 3420 -> 352
+publish content chars: 3926 -> 352
+agentlite_rewrite_marker: false
+agentlite_prompt_view: true
+```
+
+默认 shadow 回归：
+
+```text
+命令：F:\software\anaconda\envs\agentlite-autogen\python.exe .\examples\run_autogen_core_transport_smoke.py --output-dir .\runs\v5.13c-autogen-core-transport-20260702-001
+
+passed: true
+core_receiver_hydrate_mode: off
+agentlite_rewrite_marker: false
+agentlite_prompt_view: false
+```
+
+### 39.4 当前边界
+
+可以表述为：
+
+```text
+AgentLite 已经覆盖 AutoGen Core 的发送端 send_message / publish_message 和接收端 BaseAgent.on_message；
+对于含有 content / body / text 文本字段的消息，已经可以做到类型保持真实改写，并在接收端自动转换为 Prompt View。
+```
+
+仍不能表述为：
+
+```text
+已经自动接管 AutoGen Studio / 网页端后端进程；
+已经覆盖分布式 runtime、远程 runtime、跨进程 transport；
+已经对所有任意 Python 对象保证语义等价；
+已经证明真实 LLM agent 在 Prompt View 下质量不下降。
+```
+
+下一步应继续补：
+
+```text
+1. Core message 结构矩阵：dataclass / dict / pydantic / namedtuple / mutable object；
+2. AutoGen Studio 或网页端后端进程注入验证；
+3. AssistantAgent / GroupChat / Core 混合端到端链路。
+```
+
+## 40. v5.13d AutoGen Core 消息结构矩阵
+
+### 40.1 本轮解决的问题
+
+v5.13c 已经证明单一 `CorePayload.content` 可以完成：
+
+```text
+send_message / publish_message 发送端真实改写；
+BaseAgent.on_message 接收端 Prompt View hydration；
+原 Python 类型保持不变；
+用户 handler 不直接看到 AgentLite wire。
+```
+
+但真实框架和网页端后端不一定都使用名为 `content` 的 dataclass 消息。常见情况还包括：
+
+```text
+body 字段；
+text 字段；
+Pydantic BaseModel；
+publish_message 广播路径；
+其他适配器传入 dict / namedtuple / 普通对象。
+```
+
+v5.13d 的目标是证明当前 Core 接管机制不是只对一个 demo 类有效。
+
+### 40.2 本轮实现内容
+
+新增真实 AutoGen Core matrix smoke：
+
+```text
+examples/autogen_core_message_matrix_smoke.py
+examples/run_autogen_core_message_matrix_smoke.py
+```
+
+真实 AutoGen smoke 覆盖：
+
+```text
+dataclass + content
+dataclass + body
+dataclass + text
+pydantic BaseModel + content
+publish_message + content
+```
+
+helper 单测扩展覆盖：
+
+```text
+dict + body
+namedtuple + body
+pydantic BaseModel + content
+dataclass + content
+普通可变对象 + text
+```
+
+说明：
+
+```text
+真实 AutoGen Core handler 不支持裸 dict 作为 handler 消息类型；
+本地验证时 AutoGen 会报 ValueError: No serializers found for type <class 'dict'>。
+因此 dict 不放进真实 AutoGen smoke，而放进底层 helper 单测。
+```
+
+### 40.3 验证结果
+
+命令：
+
+```text
+F:\software\anaconda\envs\agentlite-autogen\python.exe .\examples\run_autogen_core_message_matrix_smoke.py --output-dir .\runs\v5.13d-autogen-core-matrix-20260702-001
+```
+
+结果：
+
+```text
+passed: true
+driver_phase_v5_13d: true
+all_cases_received: true
+direct_and_publish_received: true
+expected_fields_received: true
+expected_types_received: true
+rewrite_events_for_all_messages: true
+hydration_events_for_all_messages: true
+rewrite_applied_without_fallback: true
+hydration_applied_without_fallback: true
+rewrite_types_cover_matrix: true
+hydration_types_cover_matrix: true
+rewrite_fields_cover_matrix: true
+hydration_fields_cover_matrix: true
+wire_marker_not_leaked: true
+prompt_view_received: true
+content_shortened_at_receiver: true
+token_reduced: true
+```
+
+矩阵覆盖：
+
+```text
+received_cases:
+  dataclass_body
+  dataclass_content
+  dataclass_content_publish
+  dataclass_text
+  pydantic_content
+
+received_types:
+  MatrixBodyPayload
+  MatrixContentPayload
+  MatrixPydanticPayload
+  MatrixTextPayload
+
+received_fields:
+  body
+  content
+  text
+```
+
+核心指标：
+
+```text
+autogen_core_content_real_rewrite: 5
+autogen_core_receiver_hydration: 5
+rewrite_applied_count: 5
+rewrite_fallback_count: 0
+hydration_applied_count: 5
+hydration_fallback_count: 0
+autogen_core_transport_shadow: 5
+token_delta_native_minus_rewrite: 2870
+```
+
+### 40.4 当前边界
+
+可以表述为：
+
+```text
+AgentLite 的 AutoGen Core 接管已经不局限于单一 content dataclass；
+对 AutoGen Core 支持的 dataclass / Pydantic 消息，以及 content / body / text 字段，
+已经能完成发送端真实改写和接收端 Prompt View hydration。
+```
+
+仍不能表述为：
+
+```text
+已经自动接管 AutoGen Studio / 网页端后端进程；
+已经覆盖分布式 runtime、远程 runtime、跨进程 transport；
+已经对所有任意 Python 对象保证真实 AutoGen handler 支持；
+已经证明真实 LLM agent 在 Prompt View 输入下质量不下降。
+```
+
+下一步应继续补：
+
+```text
+1. AutoGen Studio / 网页端后端进程注入验证；
+2. AssistantAgent / GroupChat / Core 混合端到端链路；
+3. 真实 LLM agent 的质量和成本对比。
+```
+
+## 44. v5.13h 安装包级 AutoGen 混合接管门禁
+
+### 44.1 本轮解决的问题
+
+v5.13g 已经证明源码目录内可以完成：
+
+```text
+RoundRobinGroupChat.run_stream(task=...)
+-> BaseChatAgent.on_messages()
+-> SingleThreadedAgentRuntime.send_message(sender=...)
+-> Core worker
+-> Team final output
+```
+
+但这仍不能证明用户安装 AgentLite 后，在普通项目目录里用 CLI 启动 AutoGen 脚本也能生效。v5.13h 的目标是补上“安装包级别”的工程门禁。
+
+### 44.2 本轮实现内容
+
+新增 package gate 检查项：
+
+```text
+1. 构建 multi_agent_collaboration_runtime-0.5.13.dev0 wheel；
+2. 检查 wheel metadata、entry point、必需运行时模块；
+3. 确认 wheel 内没有 runs/dist/build/.git 等本地产物；
+4. 安装到隔离 target_site；
+5. 从源码目录外执行 python -m agent_runtime.cli version / doctor；
+6. 从安装包环境执行 Team rewrite smoke；
+7. 增加 `agentlite autogen -- ...` 专用入口；
+8. 从安装包环境通过 `agentlite autogen -- ...` 执行 mixed Team/Core smoke。
+```
+
+核心修改：
+
+```text
+pyproject.toml: version = 0.5.13.dev0
+agent_runtime/__init__.py: __version__ = 0.5.13.dev0
+agent_runtime/drivers/autogen.py: DRIVER_PHASE = v5.13h
+agent_runtime/cli.py: 增加 agentlite autogen 专用子命令，默认 rewrite=all
+examples/run_package_release_gate.py: 增加 installed_agentlite_cli_mixed_team_core 检查，并使用 agentlite autogen 入口
+```
+
+新增实验文档：
+
+```text
+docs/experiments/v5.13h-package-gate-results.md
+```
+
+### 44.3 验证结果
+
+命令：
+
+```text
+F:\software\anaconda\envs\agentlite-autogen\python.exe .\examples\run_package_release_gate.py --output-dir .\runs\v5.13h-package-gate-20260702-002
+```
+
+总结果：
+
+```text
+passed: true
+wheel: runs\v5.13h-package-gate-20260702-002\wheelhouse\multi_agent_collaboration_runtime-0.5.13.dev0-py3-none-any.whl
+```
+
+wheel 检查：
+
+```text
+inspect_wheel: passed
+metadata name: true
+metadata version_dev0: true
+requires_tiktoken: true
+requires_python >=3.11: true
+entry_point agentlite: true
+missing_members: []
+forbidden_members: []
+```
+
+安装包检查：
+
+```text
+verify_installed_wheel: passed
+installed version: 0.5.13.dev0
+installed import path under target_site: true
+doctor autogen: true
+```
+
+Team 改写证据：
+
+```text
+installed_agentlite_cli_rewrite: passed
+agentlite_active: true
+contains_team_rewrite_marker: true
+contains_state_pool_marker: true
+contains_broadcast_manifest: true
+contains_receiver_prompt_views: true
+native_marker_count: 0
+```
+
+Team/Core 混合链路证据：
+
+```text
+installed_agentlite_cli_mixed_team_core: passed
+command entry: python -m agent_runtime.cli autogen -- python examples\autogen_mixed_team_core_smoke.py
+agentlite_active: true
+
+bridge_seen_first_message:
+  contains_team_rewrite_marker: true
+  contains_state_pool_marker: true
+  contains_broadcast_manifest: true
+  contains_receiver_prompt_views: true
+  contains_team_native_marker: false
+
+core_received_first:
+  message_type: MixedCoreRequest
+  agentlite_prompt_view: true
+  contains_core_request_native_marker: false
+  contains_core_rewrite_marker: false
+
+core_caller_reply_first:
+  message_type: MixedCoreReply
+  agentlite_prompt_view: true
+  contains_core_reply_native_marker: false
+  contains_core_rewrite_marker: false
+
+final_message:
+  contains_done_token: true
+  contains_team_rewrite_marker: false
+  contains_state_pool_marker: false
+  contains_broadcast_manifest: false
+```
+
+### 44.4 当前边界
+
+可以表述为：
+
+```text
+AgentLite 已经具备安装包级别的 AutoGen 单进程接管能力。用户通过 CLI 启动普通 AutoGen Python 脚本时，Team 入口消息、AgentChat Agent 输入、Core request、Core response 可以被 AgentLite 改写为状态引用和 Prompt View，最终输出不会泄漏 AgentLite wire marker。
+```
+
+仍不能表述为：
+
+```text
+已经自动注入 AutoGen Studio / 网页端后端进程；
+已经覆盖分布式 runtime、远程 runtime、跨进程 transport；
+已经完成真实 LLM agent 的质量不下降实验。
+```
+
+下一步应继续补：
+
+```text
+1. AutoGen Studio / 网页端后端进程注入验证；
+2. 分布式 / 远程 runtime transport 的边界调研；
+3. 真实 LLM agent 在 Prompt View 输入下的质量、成本、延迟对比。
+```
+
+## 45. v5.13h AutoGen Web 后端进程接管补充验证
+
+### 45.1 本轮解决的问题
+
+`agentlite autogen -- python app.py` 已经证明可以托管普通 AutoGen 脚本，但用户的目标还包括“网页端使用 AutoGen 框架时，底层协作也能被接管”。在真正接入 AutoGen Studio 前，需要先验证一个更基础的问题：
+
+```text
+如果 AutoGen 不是在脚本入口立刻运行，而是在 Web 后端收到 HTTP 请求后才创建和运行，AgentLite 的进程级注入是否仍然有效？
+```
+
+### 45.2 本轮实现内容
+
+新增 Web 后端 smoke：
+
+```text
+examples/autogen_web_backend_smoke.py
+examples/run_autogen_web_backend_smoke.py
+docs/experiments/v5.13h-autogen-web-backend-results.md
+```
+
+验证形态：
+
+```text
+1. 使用 agentlite autogen 启动一个 Python HTTP 后端；
+2. 后端启动后监听本地端口；
+3. runner 向 /run 发送 HTTP 请求；
+4. HTTP handler 内部创建 AutoGen RoundRobinGroupChat；
+5. Team task 仍被改写为 StatePool 引用和 Prompt View；
+6. 最终 HTTP 响应不泄漏 AgentLite wire marker。
+```
+
+### 45.3 验证结果
+
+命令：
+
+```text
+F:\software\anaconda\envs\agentlite-autogen\python.exe .\examples\run_autogen_web_backend_smoke.py --output-dir .\runs\v5.13h-autogen-web-backend-20260702-001
+```
+
+结果：
+
+```text
+passed: true
+returncode: 0
+driver_phase: v5.13h
+```
+
+检查项：
+
+```text
+agentlite_autogen_command_returncode_zero: true
+bootstrap_status_present: true
+bootstrap_ok: true
+hooks_active: true
+driver_phase_v5_13h: true
+app_output_written: true
+http_status_ok: true
+agentlite_active_in_web_backend: true
+web_request_path_recorded: true
+team_rewrite_env_enabled: true
+first_http_task_rewritten: true
+native_http_task_removed: true
+team_rewrite_event_recorded: true
+team_rewrite_applied: true
+team_rewrite_no_fallback: true
+final_output_contains_done: true
+final_output_not_agentlite_wire: true
+```
+
+核心指标：
+
+```text
+native_task_tokens: 1869
+rewritten_task_tokens: 1048
+token_delta_native_task_minus_rewrite: 821
+native_full_broadcast_tokens: 5607
+wire_plus_prompt_view_tokens: 903
+token_delta_native_broadcast_minus_rewrite: 4704
+fallback_count: 0
+```
+
+### 45.4 当前边界
+
+可以表述为：
+
+```text
+AgentLite 能接管由 agentlite autogen 启动的 Python Web 后端进程；即使 AutoGen Team 是在后续 HTTP 请求 handler 内创建的，也仍然会被改写。
+```
+
+仍不能表述为：
+
+```text
+已经能附着到未通过 agentlite 启动的、已经运行中的 Web 后端进程；
+已经自动识别并接管 AutoGen Studio 的具体启动命令；
+已经覆盖多 worker、多进程、远程 runtime 或分布式 transport。
+```
+
+## 42. v5.13f AutoGen Core 最终输出通道保护
+
+### 42.1 本轮解决的问题
+
+v5.13e 补上了 Core `send_message()` 的返回路径，但它也暴露出一个边界风险：
+
+```text
+如果所有 send_message 返回值都被压缩成 Prompt View，
+那么最终用户交付物也可能被压缩，
+这会和“最终交付内容必须完整输出”的系统要求冲突。
+```
+
+v5.13f 的核心修正是区分两类路径：
+
+```text
+有 sender 的 send_message：视为 Agent-to-Agent 内部通信，可以低开销化；
+无 sender 的 send_message：视为外部调用或最终输出边界，返回值保持原始完整内容。
+```
+
+### 42.2 本轮实现内容
+
+driver 修改：
+
+```text
+1. Runtime.send_message 进入时检查 sender；
+2. 只有 sender 存在时，才开启 Core response rewrite 计数；
+3. BaseAgent.on_message 返回值只在内部通信链路中被改写；
+4. 无 sender 的外部调用仍可压缩请求输入，但返回值不压缩；
+5. 最终输出完整内容继续由用户代码直接获得。
+```
+
+新增验证：
+
+```text
+examples/autogen_core_final_output_guard_smoke.py
+examples/run_autogen_core_final_output_guard_smoke.py
+docs/experiments/v5.13f-autogen-core-final-output-guard-results.md
+```
+
+同时更新内部 response smoke，使它注册 `caller` Agent 并通过 `sender=AgentId("caller", "default")` 明确模拟 Agent-to-Agent 通信。
+
+### 42.3 验证结果
+
+内部通信返回路径：
+
+```text
+F:\software\anaconda\envs\agentlite-autogen\python.exe .\examples\run_autogen_core_response_rewrite_smoke.py --output-dir .\runs\v5.13f-autogen-core-response-20260702-002
+
+passed: true
+driver_phase_v5_13f: true
+request_rewrite_event_count: 4
+request_hydration_event_count: 4
+response_rewrite_event_count: 4
+response_hydration_event_count: 4
+request_token_delta_native_minus_rewrite: 1977
+response_token_delta_native_minus_rewrite: 2035
+```
+
+最终输出保护：
+
+```text
+F:\software\anaconda\envs\agentlite-autogen\python.exe .\examples\run_autogen_core_final_output_guard_smoke.py --output-dir .\runs\v5.13f-autogen-core-final-20260702-001
+
+passed: true
+driver_phase_v5_13f: true
+request_rewrite_event_count: 1
+request_hydration_event_count: 1
+response_rewrite_event_count: 0
+response_hydration_event_count: 0
+native_final_chars: 3322
+reply_content_chars: 3322
+reply_full_native_preserved: true
+```
+
+回归验证：
+
+```text
+Core transport shadow: passed, token_delta 2188
+Core receiver hydration: passed, token_delta 2164
+Core message matrix: passed, rewrite 5, hydration 5, token_delta 2884
+unittest discover -s tests: 125 tests OK
+```
+
+### 42.4 当前边界
+
+可以表述为：
+
+```text
+AgentLite 已经能在单进程 AutoGen Core 中区分内部协作消息和最终输出边界；
+内部协作消息可以低开销化；
+最终输出返回值保持完整原文。
+```
+
+仍不能表述为：
+
+```text
+已经自动接管 AutoGen Studio / 网页端后端进程；
+已经覆盖分布式 runtime、远程 runtime、跨进程 transport；
+已经完成真实 LLM agent 的质量对比；
+已经对所有任意 Python 对象和所有 AutoGen 扩展类型提供无条件语义等价保证。
+```
+
+下一步建议：
+
+```text
+1. 做 AgentChat / Team / Core 混合链路端到端 smoke；
+2. 再进入 AutoGen Studio / 网页端后端进程注入验证；
+3. 最后做真实 LLM agent 质量与成本对比。
+```
+
+## 43. v5.13g AgentChat / Team / Core 混合链路
+
+### 43.1 本轮解决的问题
+
+v5.13f 已经分别证明：
+
+```text
+Team 入口可以真实改写；
+Core 请求/返回可以真实改写和 Prompt View hydration；
+最终输出边界可以保持完整原文。
+```
+
+但这些还属于分开验证。v5.13g 需要证明：当一个真实 AutoGen 用户脚本同时使用 `RoundRobinGroupChat`、`BaseChatAgent` 和 `SingleThreadedAgentRuntime` 时，AgentLite 的多层 hook 不会互相冲突。
+
+### 43.2 本轮实现内容
+
+新增混合链路 smoke：
+
+```text
+examples/autogen_mixed_team_core_smoke.py
+examples/run_autogen_mixed_team_core_smoke.py
+docs/experiments/v5.13g-autogen-mixed-team-core-results.md
+```
+
+验证链路：
+
+```text
+RoundRobinGroupChat.run_stream(task=长文本)
+-> Team 入口 rewrite
+-> MixedBridgeAgent.on_messages()
+-> Agent 内部调用 SingleThreadedAgentRuntime.send_message(sender=...)
+-> Core request rewrite + receiver hydration
+-> Core response rewrite + caller hydration
+-> MixedBridgeAgent 返回 DONE_MIXED
+-> Team final output 不泄漏 AgentLite wire
+```
+
+本轮还修正了一个工程问题：
+
+```text
+Team 入口 rewrite 生成的 AgentLite 包进入 AgentChat Agent 后，
+AgentChat 输入层不应再次把它包成 AGENTLITE_REAL_REWRITE。
+v5.13g 增加 already_agentlite_rewritten 保护，遇到已有 AgentLite rewrite marker 的消息时跳过二次改写。
+```
+
+### 43.3 验证结果
+
+命令：
+
+```text
+F:\software\anaconda\envs\agentlite-autogen\python.exe .\examples\run_autogen_mixed_team_core_smoke.py --output-dir .\runs\v5.13g-autogen-mixed-team-core-20260702-002
+```
+
+结果：
+
+```text
+passed: true
+driver_phase_v5_13g: true
+team_rewrite_event_recorded: true
+team_rewrite_applied: true
+team_rewrite_no_fallback: true
+team_rewrite_reduces_tokens: true
+bridge_agent_saw_team_packet: true
+core_worker_saw_prompt_view_request: true
+core_caller_saw_prompt_view_reply: true
+core_request_rewrite_and_hydration_recorded: true
+core_response_rewrite_and_hydration_recorded: true
+core_request_no_fallback: true
+core_response_no_fallback: true
+team_final_output_contains_done: true
+team_final_output_not_agentlite_wire: true
+```
+
+核心指标：
+
+```text
+team native task chars: 9758
+bridge seen team packet chars: 1636
+team token_delta_native_broadcast_minus_rewrite: 1409
+
+core native request chars: 6678
+core worker received request chars: 352
+core_request_rewrite_event_count: 1
+core_request_hydration_event_count: 1
+core_request_token_delta_native_minus_rewrite: 818
+
+core native reply chars: 7442
+core caller received reply chars: 350
+core_response_rewrite_event_count: 1
+core_response_hydration_event_count: 1
+core_response_token_delta_native_minus_rewrite: 966
+```
+
+回归验证：
+
+```text
+Core final output guard: passed
+Core response rewrite: passed
+Core message matrix: passed
+Core receiver hydration: passed
+Core transport shadow: passed
+Team rewrite smoke: passed
+AgentChat integrated rewrite: passed
+unittest discover -s tests: 125 tests OK
+```
+
+### 43.4 当前边界
+
+可以表述为：
+
+```text
+AgentLite 已经能在一个 AutoGen Python 进程中同时接管 Team 入口、AgentChat Agent 输入、Core request/response，并保护最终输出。
+```
+
+仍不能表述为：
+
+```text
+已经自动注入 AutoGen Studio / 网页端后端进程；
+已经覆盖分布式 runtime、远程 runtime、跨进程 transport；
+已经完成真实 LLM agent 的质量对比。
+```
+
+下一步建议：
+
+```text
+1. 进入 AutoGen Studio / 网页端后端进程注入验证；
+2. 或先做 package gate，确认 v5.13g 能以安装包方式从源码外运行；
+3. 再做真实 LLM agent 质量与成本对比。
+```
+
+## 41. v5.13e AutoGen Core 请求-响应返回路径接管
+
+### 41.1 本轮解决的问题
+
+v5.13d 证明了 Core 请求消息可以完成：
+
+```text
+Runtime.send_message / publish_message 发送端真实改写；
+BaseAgent.on_message 接收端 Prompt View hydration；
+用户 handler 不直接看到 AgentLite wire。
+```
+
+但 `send_message()` 在 AutoGen Core 中常常是 RPC 风格调用：接收方 handler 会返回一个消息对象给调用方。这个返回对象如果很长，本质上也是 Agent 间通信。v5.13e 补上了这条反向通信路径。
+
+### 41.2 本轮实现内容
+
+新增 driver 能力：
+
+```text
+1. Runtime.send_message 运行期间记录 Core 请求-响应链路；
+2. BaseAgent.on_message 的 handler 返回值如果包含 content/body/text 长文本字段，则写入 StatePool；
+3. handler 返回给 Runtime 的对象保持原 Python 类型，但文本字段替换为 SHP state_ref wire；
+4. Runtime.send_message 返回给调用方前，再将 wire 水化为 Prompt View；
+5. 调用方拿到的仍是原 Python 返回类型，看不到 AgentLite wire marker。
+```
+
+新增实现文件：
+
+```text
+examples/autogen_core_response_rewrite_smoke.py
+examples/run_autogen_core_response_rewrite_smoke.py
+docs/experiments/v5.13e-autogen-core-response-rewrite-results.md
+```
+
+相关 driver 事件：
+
+```text
+autogen_core_response_real_rewrite
+autogen_core_response_hydration
+```
+
+### 41.3 验证结果
+
+命令：
+
+```text
+F:\software\anaconda\envs\agentlite-autogen\python.exe .\examples\run_autogen_core_response_rewrite_smoke.py --output-dir .\runs\v5.13e-autogen-core-response-20260702-002
+```
+
+结果：
+
+```text
+passed: true
+driver_phase_v5_13e: true
+all_requests_received: true
+all_replies_returned: true
+reply_fields_cover_matrix: true
+reply_types_cover_matrix: true
+request_rewrite_events_for_all_messages: true
+request_hydration_events_for_all_messages: true
+response_rewrite_events_for_all_replies: true
+response_hydration_events_for_all_replies: true
+request_wire_marker_not_leaked: true
+reply_wire_marker_not_leaked: true
+reply_prompt_view_returned: true
+reply_content_shortened: true
+request_token_reduced: true
+response_token_reduced: true
+```
+
+核心指标：
+
+```text
+autogen_core_content_real_rewrite: 4
+autogen_core_receiver_hydration: 4
+autogen_core_response_real_rewrite: 4
+autogen_core_response_hydration: 4
+request_rewrite_fallback_count: 0
+request_hydration_fallback_count: 0
+response_rewrite_fallback_count: 0
+response_hydration_fallback_count: 0
+request_token_delta_native_minus_rewrite: 1983
+response_token_delta_native_minus_rewrite: 2057
+```
+
+调用方返回对象证据：
+
+```text
+reply_types:
+  ResponseBodyReply
+  ResponseContentReply
+  ResponsePydanticReply
+  ResponseTextReply
+
+reply_fields:
+  body
+  content
+  text
+
+native reply max chars: 4346
+caller reply chars after hydration: 348, 342, 342, 350
+agentlite_rewrite_marker: false
+agentlite_prompt_view: true
+```
+
+### 41.4 当前边界
+
+可以表述为：
+
+```text
+AgentLite 已经在单进程 AutoGen Core SingleThreadedAgentRuntime 中覆盖 send_message 请求方向、publish_message 广播方向、BaseAgent.on_message 接收方向，以及 send_message 返回方向。
+```
+
+仍不能表述为：
+
+```text
+已经自动接管 AutoGen Studio / 网页端后端进程；
+已经覆盖分布式 runtime、远程 runtime、跨进程 transport；
+已经对所有任意 Python 对象保证真实 AutoGen handler 支持；
+已经证明真实 LLM agent 在 Prompt View 输入下质量不下降。
+```
+
+下一步应继续补：
+
+```text
+1. AutoGen Studio / 网页端后端进程注入验证；
+2. AssistantAgent / GroupChat / Core 混合端到端链路；
+3. 真实 LLM agent 的质量和成本对比。
+```

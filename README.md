@@ -2,7 +2,9 @@
 
 本仓库用于迭代实现一个面向多 Agent 协作的跨框架运行时工具层，目标是在多 Agent 任务中通过结构化通信、非文本状态传递和共享记忆复用降低协作开销。
 
-当前版本：`v5.12z package release gate`
+当前开发版本：`v5.13h package gate + AutoGen web backend smoke`
+
+最新发行包门禁版本：`v5.13h package release gate`
 
 实验结果记录见：
 
@@ -46,13 +48,37 @@
 - [docs/experiments/v5.12x-autogen-team-benchmark-results.md](docs/experiments/v5.12x-autogen-team-benchmark-results.md)
 - [docs/experiments/v5.12y-release-cli-results.md](docs/experiments/v5.12y-release-cli-results.md)
 - [docs/experiments/v5.12z-package-release-gate-results.md](docs/experiments/v5.12z-package-release-gate-results.md)
+- [docs/experiments/v5.13f-autogen-core-transport-results.md](docs/experiments/v5.13f-autogen-core-transport-results.md)
+- [docs/experiments/v5.13f-autogen-core-content-rewrite-results.md](docs/experiments/v5.13f-autogen-core-content-rewrite-results.md)
+- [docs/experiments/v5.13f-autogen-core-message-matrix-results.md](docs/experiments/v5.13f-autogen-core-message-matrix-results.md)
+- [docs/experiments/v5.13f-autogen-core-response-rewrite-results.md](docs/experiments/v5.13f-autogen-core-response-rewrite-results.md)
+- [docs/experiments/v5.13f-autogen-core-final-output-guard-results.md](docs/experiments/v5.13f-autogen-core-final-output-guard-results.md)
+- [docs/experiments/v5.13g-autogen-mixed-team-core-results.md](docs/experiments/v5.13g-autogen-mixed-team-core-results.md)
+- [docs/experiments/v5.13h-package-gate-results.md](docs/experiments/v5.13h-package-gate-results.md)
+- [docs/experiments/v5.13h-autogen-web-backend-results.md](docs/experiments/v5.13h-autogen-web-backend-results.md)
 - [docs/release/v5.12z-final-release-notes.md](docs/release/v5.12z-final-release-notes.md)
 
-## v5.12z Current Note
+## v5.13h Current Note
+
+`v5.13h` builds on the v5.13g mixed-link takeover, which extends AutoGen coverage from AgentChat / Team entry points down to `autogen_core.SingleThreadedAgentRuntime.send_message()` and `publish_message()`. Core runtime direct and publish messages are now written to StatePool, converted into compact SHP shadow wire packets, rendered as receiver Prompt Views, and measured in trace.
+
+With `AGENTLITE_AUTOGEN_CORE_CONTENT_REWRITE=1`, v5.13g also supports type-preserving real rewrite for Core messages that expose a string `content`, `body`, or `text` field. The receiver still gets the original Python message type, while the long text field is replaced by an AgentLite SHP state-ref packet plus Prompt View.
+
+With `AGENTLITE_AUTOGEN_CORE_RECEIVER_HYDRATE=prompt-view`, the receiving `BaseAgent.on_message()` path now converts AgentLite wire content into a Prompt View before the user's Core handler runs.
+
+Latest smoke evidence: the new mixed Team/Core smoke passed through `RoundRobinGroupChat.run_stream(task=...) -> BaseChatAgent.on_messages() -> SingleThreadedAgentRuntime.send_message(sender=...) -> Core worker -> Team final output`. Team rewrite applied with broadcast token delta `1409`; the Bridge Agent saw the Team packet directly without a second AgentChat rewrite; Core request rewrite/hydration was `1/1` with token delta `818`; Core response rewrite/hydration was `1/1` with token delta `966`; final Team output contained `DONE_MIXED` and did not leak AgentLite wire.
+
+v5.13h adds the package gate for this mixed takeover path. The wheel `multi_agent_collaboration_runtime-0.5.13.dev0-py3-none-any.whl` was built, installed into an isolated target site, and verified from outside the source tree. Installed `agentlite autogen -- python app.py` passed the mixed Team/Core rewrite check: Team packets carried state refs and Prompt Views, Core request/response arrived as Prompt Views, native markers did not leak, and final Team output did not expose AgentLite wire. The generic `agentlite run --framework autogen --rewrite all -- python app.py` path remains supported and passed the Team rewrite package check.
+
+The web backend smoke also passed: a stdlib HTTP backend started by `agentlite autogen -- python web_backend.py` handled a `/run` request, created AutoGen Team objects inside the request handler, and still had the Team task rewritten into StatePool refs and Prompt Views. This proves process-lifetime injection for a web-style backend started under AgentLite.
+
+This is not yet universal replacement for arbitrary AutoGen Core objects, distributed/remote runtime transport, automatic AutoGen Studio process injection, or attachment to an already-running backend process.
+
+## v5.12z Historical Release Note
 
 `v5.12z` hardens the package release path around the validated v5.12y CLI. The wheel can be built, installed into an isolated target site, and used from outside the source tree to run `agentlite run --framework autogen --rewrite all -- python app.py`.
 
-Latest package gate evidence: installed package version `0.5.12.post3`, installed import path under target site, AutoGen doctor passed, first Team input was replaced with an AgentLite packet, `native_marker_count=0`, `rewrite_applied=true`, `fallback_reasons=[]`, native full broadcast cost `6213` tokens, wire plus Prompt View cost `882` tokens, and quality score `12/12`.
+v5.12z package gate evidence: installed package version `0.5.12.post3`, installed import path under target site, AutoGen doctor passed, first Team input was replaced with an AgentLite packet, `native_marker_count=0`, `rewrite_applied=true`, `fallback_reasons=[]`, native full broadcast cost `6213` tokens, wire plus Prompt View cost `882` tokens, and quality score `12/12`.
 
 Final local release artifacts are generated under `dist/`:
 
@@ -63,7 +89,13 @@ multi_agent_collaboration_runtime-0.5.12.post3.tar.gz
 
 ## AgentLite 托管启动
 
-安装仓库后可以使用统一命令入口：
+安装仓库后可以使用 AutoGen 专用入口，默认启用当前支持的全部 AutoGen 改写门控：
+
+```powershell
+agentlite autogen -- python app.py
+```
+
+也可以使用统一命令入口：
 
 ```powershell
 agentlite run --framework autogen -- python app.py

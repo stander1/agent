@@ -74,7 +74,7 @@ def main() -> int:
     if output_dir is None:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         output_dir = (
-            PROJECT_ROOT / "runs" / f"v5.12x-autogen-rewrite-fallback-matrix-{stamp}"
+            PROJECT_ROOT / "runs" / f"v5.13h-autogen-rewrite-fallback-matrix-{stamp}"
         )
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -137,7 +137,7 @@ def run_matrix_smoke(*, output_dir: Path, python: str) -> dict[str, Any]:
     checks = {
         "target_returncode_zero": result.returncode == 0,
         "bootstrap_ok": bool(status.get("ok")),
-        "driver_phase_v5_12x": details.get("phase") == "v5.12x",
+        "driver_phase_v5_13h": details.get("phase") == "v5.13h",
         "four_cases_recorded": len(cases) == 4,
         "four_fallback_events_recorded": int(rewrite_summary.get("event_count", 0) or 0)
         == 4,

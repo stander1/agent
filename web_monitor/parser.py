@@ -146,6 +146,112 @@ def list_runs(runs_dir: Path) -> list[dict[str, Any]]:
     return runs
 
 
+def list_sessions(data_dir: Path) -> list[dict[str, Any]]:
+    sessions_dir = data_dir / "sessions"
+    if not sessions_dir.exists():
+        return []
+    sessions = []
+    for path in sessions_dir.iterdir():
+        if not path.is_dir():
+            continue
+        status_path = path / "bootstrap_status.json"
+        launch_path = path / "launch.json"
+        trace_path = path / "autogen_driver" / "trace.jsonl"
+        if not status_path.exists() and not trace_path.exists():
+            continue
+        status = _read_json(status_path, default={})
+        launch = _read_json(launch_path, default={})
+        updated_at = max(
+            item.stat().st_mtime
+            for item in (path, status_path, launch_path, trace_path)
+            if item.exists()
+        )
+        session_id = str(status.get("session_id") or launch.get("session_id") or path.name)
+        sessions.append(
+            {
+                "session_id": session_id,
+                "path": str(path),
+                "framework": status.get("framework") or launch.get("framework") or "",
+                "driver": status.get("driver") or "",
+                "driver_status": status.get("driver_status") or "",
+                "hooks_active": bool(status.get("hooks_active")),
+                "has_trace": trace_path.exists(),
+                "has_status": status_path.exists(),
+                "updated_at": updated_at,
+            }
+        )
+    sessions.sort(key=lambda item: item["updated_at"], reverse=True)
+    return sessions
+
+
+def build_session_snapshot(
+    session_dir: Path,
+    *,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    status = _read_json(session_dir / "bootstrap_status.json", default={})
+    launch = _read_json(session_dir / "launch.json", default={})
+    trace_path = session_dir / "autogen_driver" / "trace.jsonl"
+    trace_events = _read_jsonl(trace_path)
+    session_id = session_id or str(
+        status.get("session_id") or launch.get("session_id") or session_dir.name
+    )
+    mode_view = _empty_mode_snapshot()
+    mode_view["task"] = {
+        "task_id": session_id,
+        "round_id": 1,
+        "title": f"AgentLite AutoGen session {session_id}",
+    }
+    state_pool: list[dict[str, Any]] = []
+    event_counts: dict[str, int] = {}
+    for event in trace_events:
+        event_type = str(event.get("event_type", ""))
+        event_counts[event_type] = event_counts.get(event_type, 0) + 1
+        mode_view["timeline"].append(_timeline_item(event))
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        if event_type == "state_written":
+            state = payload.get("state")
+            if isinstance(state, dict):
+                state_pool.append(state)
+            continue
+        if event_type in {
+            "autogen_agent_receive",
+            "autogen_agent_output",
+            "autogen_team_input_real_rewrite",
+            "autogen_core_content_real_rewrite",
+            "autogen_core_response_real_rewrite",
+            "autogen_transport_input_state",
+            "autogen_core_transport_shadow",
+        }:
+            _apply_autogen_event(mode_view, event)
+
+    mode_view["state_pool"] = state_pool
+    mode_view["memory_graph"] = _state_only_graph(state_pool)
+    _finalize_agents(mode_view)
+    return {
+        "run_id": session_id,
+        "session_id": session_id,
+        "status": _session_status(status, trace_events),
+        "output_dir": str(session_dir),
+        "modes": {
+            "baseline_text": _empty_mode_snapshot(),
+            "runtime_lite": mode_view,
+        },
+        "summary": {
+            "kind": "agentlite_autogen_session",
+            "framework": status.get("framework") or launch.get("framework") or "",
+            "driver": status.get("driver") or "",
+            "driver_status": status.get("driver_status") or "",
+            "hooks_active": bool(status.get("hooks_active")),
+            "event_counts": event_counts,
+            "trace_path": str(trace_path) if trace_path.exists() else "",
+        },
+        "errors": [status.get("error", "")] if status.get("error") else [],
+        "bootstrap_status": status,
+        "launch": launch,
+    }
+
+
 def _empty_mode_snapshot() -> dict[str, Any]:
     return {
         "task": {},
@@ -155,6 +261,122 @@ def _empty_mode_snapshot() -> dict[str, Any]:
         "state_pool": [],
         "memory_graph": {"nodes": [], "edges": [], "fallback": False},
     }
+
+
+def _apply_autogen_event(mode_view: dict[str, Any], event: dict[str, Any]) -> None:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    event_type = str(event.get("event_type", ""))
+    agent_id = str(
+        payload.get("agent_id")
+        or payload.get("role")
+        or payload.get("sender")
+        or payload.get("method")
+        or "autogen"
+    )
+    agent = _agent(mode_view, agent_id)
+    agent["status"] = "done"
+    if payload.get("input_chars") is not None:
+        agent["prompt_chars"] = payload.get("input_chars", 0)
+    summary = _autogen_event_summary(event)
+    if event_type.endswith("_receive"):
+        agent["received_summary"] = summary
+    else:
+        agent["output_summary"] = summary
+    if payload.get("state_refs"):
+        agent["state_refs"] = payload.get("state_refs", [])
+    if payload.get("memory_refs"):
+        agent["memory_refs"] = payload.get("memory_refs", [])
+    mode_view["messages"].append(
+        {
+            "ts": event.get("ts"),
+            "sender": payload.get("sender") or payload.get("role") or "autogen",
+            "receiver": payload.get("declared_receiver")
+            or payload.get("receiver")
+            or agent_id,
+            "handoff_to": payload.get("declared_receiver") or "",
+            "content": summary,
+            "summary": summary,
+            "state_refs": payload.get("state_refs", []),
+            "memory_refs": payload.get("memory_refs", []),
+            "event_type": event_type,
+            "payload": payload,
+        }
+    )
+
+
+def _autogen_event_summary(event: dict[str, Any]) -> str:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    event_type = str(event.get("event_type", ""))
+    if event_type == "autogen_agent_receive":
+        return (
+            f"{payload.get('agent_id')} received via {payload.get('method')}; "
+            f"input_chars={payload.get('input_chars', 0)}"
+        )
+    if event_type == "autogen_agent_output":
+        return (
+            f"{payload.get('agent_id')} output; "
+            f"output_chars={payload.get('output_chars', payload.get('content_chars', 0))}"
+        )
+    if event_type == "autogen_team_input_real_rewrite":
+        return (
+            "Team task rewritten; "
+            f"applied={payload.get('rewrite_applied_count', 0)}, "
+            f"fallback={payload.get('rewrite_fallback_count', 0)}, "
+            f"delta={payload.get('token_delta_native_broadcast_minus_rewrite', 0)}"
+        )
+    if event_type in {
+        "autogen_core_content_real_rewrite",
+        "autogen_core_response_real_rewrite",
+    }:
+        return (
+            f"{payload.get('method')} rewrite; "
+            f"applied={payload.get('rewrite_applied_count', 0)}, "
+            f"fallback={payload.get('rewrite_fallback_count', 0)}, "
+            f"delta={payload.get('token_delta_native_minus_rewrite', 0)}"
+        )
+    if event_type == "autogen_transport_input_state":
+        return (
+            f"{payload.get('agent_id')} transported "
+            f"{', '.join(payload.get('message_kinds', []) or [])}; "
+            f"state_refs={len(payload.get('state_refs', []) or [])}"
+        )
+    if event_type == "autogen_core_transport_shadow":
+        return (
+            f"Core shadow {payload.get('method')} -> "
+            f"{payload.get('declared_receiver', '')}; "
+            f"delta={payload.get('token_delta_native_minus_wire_plus_prompt_view', 0)}"
+        )
+    return _event_summary(event)
+
+
+def _state_only_graph(state_pool: list[dict[str, Any]]) -> dict[str, Any]:
+    nodes = []
+    for state in state_pool:
+        state_id = state.get("state_id")
+        if not state_id:
+            continue
+        nodes.append(
+            {
+                "id": state_id,
+                "type": "StateObject",
+                "label": state_id,
+                "summary": state.get("summary", ""),
+                "status": state.get("lifecycle", ""),
+            }
+        )
+    return {"nodes": nodes, "edges": [], "fallback": False}
+
+
+def _session_status(status: dict[str, Any], trace_events: list[dict[str, Any]]) -> str:
+    if status.get("error"):
+        return "failed"
+    if status.get("ok") is False:
+        return "failed"
+    if trace_events:
+        return "succeeded"
+    if status.get("ok"):
+        return "active"
+    return "unknown"
 
 
 def _timeline_item(event: dict[str, Any]) -> dict[str, Any]:

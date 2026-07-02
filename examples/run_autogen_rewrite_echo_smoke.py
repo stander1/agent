@@ -71,7 +71,7 @@ def main() -> int:
     output_dir = args.output_dir
     if output_dir is None:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        output_dir = PROJECT_ROOT / "runs" / f"v5.12x-autogen-rewrite-echo-{stamp}"
+        output_dir = PROJECT_ROOT / "runs" / f"v5.13h-autogen-rewrite-echo-{stamp}"
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -172,8 +172,8 @@ def build_comparison_report(
             int(report.get("returncode", 1)) == 0 for report in mode_reports
         ),
         "all_bootstrap_ok": all(bool(report.get("bootstrap_ok")) for report in mode_reports),
-        "all_driver_phase_v5_12x": all(
-            report.get("driver_phase") == "v5.12x" for report in mode_reports
+        "all_driver_phase_v5_13h": all(
+            report.get("driver_phase") == "v5.13h" for report in mode_reports
         ),
         "shadow_agent_sees_native_content": bool(
             shadow.get("seen_contains_native_marker")

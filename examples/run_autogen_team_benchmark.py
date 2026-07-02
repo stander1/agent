@@ -33,7 +33,7 @@ from run_autogen_team_rewrite_smoke import (  # noqa: E402
     summarize_team_rewrite_events,
 )
 
-EXPECTED_PHASE = "v5.12x"
+EXPECTED_PHASE = "v5.13h"
 USER_SCRIPT = PROJECT_ROOT / "examples" / "autogen_team_benchmark_app.py"
 NATIVE_MARKER = "TEAM_BENCH_NATIVE_MARKER"
 TEAM_REWRITE_MARKER = "AGENTLITE_TEAM_REAL_REWRITE v1"
@@ -74,7 +74,7 @@ def main() -> int:
     output_dir = args.output_dir
     if output_dir is None:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        output_dir = PROJECT_ROOT / "runs" / f"v5.12x-autogen-team-benchmark-{stamp}"
+        output_dir = PROJECT_ROOT / "runs" / f"v5.13h-autogen-team-benchmark-{stamp}"
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -281,7 +281,7 @@ def build_checks(
         "managed_returncode_zero": int(managed.get("returncode", 1)) == 0,
         "managed_bootstrap_ok": bool(managed.get("bootstrap_ok")),
         "managed_hooks_active": bool(managed.get("hooks_active")),
-        "driver_phase_v5_12x": managed.get("driver_phase") == EXPECTED_PHASE,
+        "driver_phase_v5_13h": managed.get("driver_phase") == EXPECTED_PHASE,
         "managed_real_rewrite_mode": managed.get("broadcast_mode") == "real-rewrite",
         "managed_team_rewrite_enabled": bool(managed.get("team_rewrite_enabled")),
         "user_script_does_not_import_agentlite": (
@@ -337,7 +337,7 @@ def build_checks(
 
 def render_markdown(report: dict[str, Any]) -> str:
     lines = [
-        "# v5.12x AutoGen Team Benchmark Report",
+        "# v5.13h AutoGen Team Benchmark Report",
         "",
         f"passed: `{str(report.get('passed')).lower()}`",
         "",

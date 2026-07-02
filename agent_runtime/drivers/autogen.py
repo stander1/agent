@@ -9,7 +9,9 @@ import json
 import os
 import sys
 import threading
-from dataclasses import dataclass
+from copy import copy as shallow_copy
+from dataclasses import dataclass, field, is_dataclass
+from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, Iterable
@@ -26,7 +28,7 @@ from agent_runtime.drivers.loader import DriverActivation
 from agent_runtime.eval.metrics import MetricsCollector
 from agent_runtime.eval.token_counter import TokenCounter
 from agent_runtime.eval.trace_logger import TraceLogger
-from agent_runtime.state.state_pool import StatePoolLite
+from agent_runtime.state.state_pool import StatePoolLite, StateRef
 
 if TYPE_CHECKING:
     from agent_runtime.bootstrap.startup import BootstrapContext
@@ -41,22 +43,33 @@ PATCH_TARGETS = {
     "agentchat_agent": ("on_messages", "on_messages_stream"),
     "agentchat_team": ("run", "run_stream"),
     "core_runtime": ("send_message", "publish_message"),
+    "core_agent": ("on_message",),
 }
 BROADCAST_MODE_ENV = "AGENTLITE_AUTOGEN_BROADCAST_MODE"
 TEAM_REWRITE_ENV = "AGENTLITE_AUTOGEN_TEAM_REWRITE"
 HANDOFF_REWRITE_ENV = "AGENTLITE_AUTOGEN_HANDOFF_REWRITE"
 TOOL_SUMMARY_REWRITE_ENV = "AGENTLITE_AUTOGEN_TOOL_SUMMARY_REWRITE"
+CORE_CONTENT_REWRITE_ENV = "AGENTLITE_AUTOGEN_CORE_CONTENT_REWRITE"
+CORE_RECEIVER_HYDRATE_ENV = "AGENTLITE_AUTOGEN_CORE_RECEIVER_HYDRATE"
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
-DRIVER_PHASE = "v5.12x"
+CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
+DRIVER_PHASE = "v5.13h"
 TEAM_REAL_REWRITE_DISABLED_REASON = (
     "team_level_real_rewrite_not_enabled_for_guarded_agent_input"
 )
+CORE_REAL_REWRITE_DISABLED_REASON = (
+    "core_content_real_rewrite_not_enabled_for_guarded_runtime_input"
+)
+CORE_REWRITE_FIELDS = ("content", "body", "text")
+CORE_REWRITE_MARKER = "AGENTLITE_CORE_CONTENT_REWRITE v1"
+CORE_PROMPT_VIEW_MARKER = "AGENTLITE_CORE_PROMPT_VIEW v1"
 FALLBACK_REASON_BUCKETS = {
     "missing_messages_argument": "input_contract_missing",
     "messages_not_sequence": "input_contract_invalid",
     "empty_messages": "input_contract_empty",
     "non_text_message_present": "unsupported_message_type",
     "empty_text_payload": "empty_payload",
+    "already_agentlite_rewritten": "agentlite_packet_already_rewritten",
     "missing_state_refs": "state_ref_unavailable",
     "schema_invalid": "schema_guard_failed",
     "prompt_view_missing": "prompt_view_unavailable",
@@ -75,6 +88,30 @@ FALLBACK_REASON_BUCKETS = {
     "empty_team_task_payload": "empty_payload",
     "missing_team_participants": "team_participant_missing",
     "team_task_token_not_reduced": "cost_gate_failed",
+    CORE_REAL_REWRITE_DISABLED_REASON: "core_rewrite_env_guard",
+    "missing_core_message_argument": "core_message_contract_missing",
+    "unsupported_core_message_content_field": "core_message_contract_invalid",
+    "already_core_rewritten": "core_message_already_rewritten",
+    "empty_core_message_payload": "empty_payload",
+    "core_message_clone_failed": "message_clone_failed",
+    "core_message_type_not_preserved": "typed_rewrite_type_guard",
+    "core_message_field_not_replaced": "typed_rewrite_content_guard",
+    "core_message_token_not_reduced": "cost_gate_failed",
+    "missing_core_response_result": "core_response_contract_missing",
+    "unsupported_core_response_content_field": "core_response_contract_invalid",
+    "already_core_response_rewritten": "core_response_already_rewritten",
+    "empty_core_response_payload": "empty_payload",
+    "core_response_clone_failed": "message_clone_failed",
+    "core_response_type_not_preserved": "typed_rewrite_type_guard",
+    "core_response_field_not_replaced": "typed_rewrite_content_guard",
+    "core_response_token_not_reduced": "cost_gate_failed",
+    "core_hydration_disabled": "core_hydration_env_guard",
+    "core_hydration_marker_missing": "core_hydration_not_applicable",
+    "core_hydration_state_ref_missing": "state_ref_unavailable",
+    "core_hydration_prompt_view_missing": "prompt_view_unavailable",
+    "core_hydration_clone_failed": "message_clone_failed",
+    "core_hydration_type_not_preserved": "typed_rewrite_type_guard",
+    "core_hydration_field_not_replaced": "typed_rewrite_content_guard",
 }
 
 _MANAGER: AutoGenHookManager | None = None
@@ -89,6 +126,7 @@ class HookCallContext:
     method_name: str
     target_kind: str
     team_participants: tuple[str, ...] = ()
+    transport_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class AutoGenHookManager:
@@ -111,6 +149,12 @@ class AutoGenHookManager:
         )
         self.tool_summary_rewrite_enabled = _truthy_env(
             os.getenv(TOOL_SUMMARY_REWRITE_ENV, "")
+        )
+        self.core_content_rewrite_enabled = _truthy_env(
+            os.getenv(CORE_CONTENT_REWRITE_ENV, "")
+        )
+        self.core_receiver_hydrate_mode = _resolve_core_receiver_hydrate_mode(
+            os.getenv(CORE_RECEIVER_HYDRATE_ENV, "")
         )
         self.kernel = CollaborationKernel(
             agents=[],
@@ -135,6 +179,7 @@ class AutoGenHookManager:
         )
         self._sequence = 0
         self._lock = threading.Lock()
+        self._core_response_rewrite_depth = 0
         self._patched_methods: set[str] = set()
         self._patched_modules: set[str] = set()
         self._import_finder = AutoGenImportFinder(self)
@@ -146,6 +191,25 @@ class AutoGenHookManager:
     @property
     def patched_modules(self) -> list[str]:
         return sorted(self._patched_modules)
+
+    def _enter_core_send_message(self, *, response_rewrite_enabled: bool) -> None:
+        if not response_rewrite_enabled:
+            return
+        with self._lock:
+            self._core_response_rewrite_depth += 1
+
+    def _exit_core_send_message(self, *, response_rewrite_enabled: bool) -> None:
+        if not response_rewrite_enabled:
+            return
+        with self._lock:
+            self._core_response_rewrite_depth = max(
+                0,
+                self._core_response_rewrite_depth - 1,
+            )
+
+    def _core_response_rewrite_active(self) -> bool:
+        with self._lock:
+            return self._core_response_rewrite_depth > 0
 
     def install(self) -> None:
         if not any(item is self._import_finder for item in sys.meta_path):
@@ -218,6 +282,21 @@ class AutoGenHookManager:
                 instance,
                 target_kind=target_kind,
             ),
+            transport_metadata=(
+                _core_transport_metadata(
+                    method_name=method_name,
+                    args=args,
+                    kwargs=kwargs,
+                )
+                if target_kind == "core_runtime"
+                else _core_agent_receive_metadata(
+                    method_name=method_name,
+                    args=args,
+                    kwargs=kwargs,
+                )
+                if target_kind == "core_agent"
+                else {}
+            ),
         )
         self._safe_kernel_call(
             "before_agent_receive",
@@ -240,6 +319,7 @@ class AutoGenHookManager:
                 "input_chars": len(prompt),
                 "input_preview": _preview(prompt),
                 "team_participants": list(hook_context.team_participants),
+                "transport_metadata": hook_context.transport_metadata,
                 "decoded_messages": [
                     message.to_dict() for message in decoded_messages
                 ],
@@ -432,8 +512,6 @@ class AutoGenHookManager:
         }
         if context.target_kind != "core_runtime":
             return
-        if not (message_kinds & {"tool_call", "tool_result"}):
-            return
         if not _has_semantic_payload(decoded_messages, native_text):
             return
         state_refs = self._safe_kernel_call(
@@ -450,8 +528,9 @@ class AutoGenHookManager:
                         "framework": "autogen",
                         "target_kind": context.target_kind,
                         "method": context.method_name,
-                        "native_result_type": "transport_input",
+                        "native_result_type": "core_transport_input",
                         "transport_input_state": True,
+                        "core_transport_metadata": context.transport_metadata,
                         "autogen_decoded_messages": [
                             message.to_dict() for message in decoded_messages
                         ],
@@ -477,15 +556,897 @@ class AutoGenHookManager:
                 "message_kinds": sorted(message_kinds),
                 "input_chars": len(native_text),
                 "input_preview": _preview(native_text),
+                "transport_metadata": context.transport_metadata,
                 "state_refs": state_ref_payload,
             },
         )
-        self._record_shadow_handoff(
+        self._record_core_transport_shadow(
             context=context,
             decoded_messages=decoded_messages,
             native_text=native_text,
             state_refs=list(state_refs or []),
             state_ref_payload=state_ref_payload,
+        )
+
+    def _record_core_transport_shadow(
+        self,
+        *,
+        context: HookCallContext,
+        decoded_messages: list[Any],
+        native_text: str,
+        state_refs: list[Any],
+        state_ref_payload: list[dict[str, Any]],
+    ) -> None:
+        if not state_refs:
+            return
+        route = context.transport_metadata
+        receiver = str(route.get("declared_receiver") or "autogen_runtime_peer")
+        sender = str(route.get("sender") or context.agent.agent_id)
+        summary = _build_core_transport_summary(
+            sender=sender,
+            method_name=context.method_name,
+            receiver=receiver,
+            message_kinds=[
+                str(getattr(message, "message_kind", "") or "")
+                for message in decoded_messages
+            ],
+            native_text=native_text,
+        )
+        envelope_json = self._safe_kernel_call(
+            "autogen_build_core_transport_shadow",
+            lambda: self.kernel.build_handoff(
+                task=context.task,
+                round_id=1,
+                mode="runtime_lite",
+                sender=sender,
+                declared_receiver=receiver,
+                summary=summary,
+                state_refs=state_refs,
+                memory_refs=[],
+            ),
+        )
+        if not isinstance(envelope_json, str) or not envelope_json:
+            return
+        gate = self._safe_kernel_call(
+            "autogen_core_transport_shadow_gate",
+            lambda: self.kernel.handoff_gate(envelope_json),
+        )
+        envelope_payload = _json_object_or_empty(envelope_json)
+        wire_envelope = _build_shadow_wire_envelope(envelope_payload)
+        wire_envelope_json = json.dumps(
+            wire_envelope, ensure_ascii=False, separators=(",", ":")
+        )
+        prompt_views = []
+        for state_ref in state_refs:
+            view = self._safe_kernel_call(
+                "autogen_core_transport_prompt_view",
+                lambda ref=state_ref: self.kernel.state_pool.render_prompt_view(
+                    ref,
+                    receiver,
+                ),
+            )
+            if isinstance(view, str) and view:
+                prompt_views.append(view)
+        prompt_view_text = "\n".join(prompt_views)
+        native_tokens = _count_tokens(self.token_counter, native_text)
+        wire_tokens = _count_tokens(self.token_counter, wire_envelope_json)
+        prompt_view_tokens = _count_tokens(self.token_counter, prompt_view_text)
+        wire_plus_prompt_view_tokens = wire_tokens + prompt_view_tokens
+        token_delta = native_tokens - wire_plus_prompt_view_tokens
+        reduction_ratio = (
+            token_delta / native_tokens if native_tokens > 0 else 0.0
+        )
+        self.trace.write(
+            "autogen_core_transport_shadow",
+            {
+                "call_id": context.call_id,
+                "agent_id": context.agent.agent_id,
+                "role": context.agent.role,
+                "target_kind": context.target_kind,
+                "method": context.method_name,
+                "transport_metadata": route,
+                "sender": sender,
+                "declared_receiver": receiver,
+                "message_kinds": sorted(
+                    {
+                        str(getattr(message, "message_kind", "") or "")
+                        for message in decoded_messages
+                    }
+                ),
+                "state_refs": state_ref_payload,
+                "state_ref_count": len(state_ref_payload),
+                "shadow_envelope": envelope_payload,
+                "shadow_wire_envelope": wire_envelope,
+                "schema_valid": _wire_envelope_schema_valid(wire_envelope),
+                "prompt_view_available": bool(prompt_view_text.strip()),
+                "prompt_view_preview": _preview(prompt_view_text),
+                "native_transport_tokens": native_tokens,
+                "shp_shadow_envelope_tokens": wire_tokens,
+                "prompt_view_tokens": prompt_view_tokens,
+                "wire_plus_prompt_view_tokens": wire_plus_prompt_view_tokens,
+                "token_delta_native_minus_wire_plus_prompt_view": token_delta,
+                "token_reduction_ratio": round(reduction_ratio, 6),
+                "cost_scope": (
+                    "core_runtime_native_transport_text_vs_compact_shadow_wire_"
+                    "plus_prompt_view"
+                ),
+                "communication_gate": gate if isinstance(gate, dict) else {},
+            },
+        )
+
+    def _rewrite_core_message_if_safe(
+        self,
+        context: HookCallContext,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> tuple[tuple[Any, ...], dict[str, Any]] | None:
+        message, source = _extract_core_message_argument(args, kwargs)
+        field_name, native_content = _core_message_text_field(message)
+        native_type = type(message).__name__ if message is not None else ""
+        fallback_reasons: list[str] = []
+        if not self.core_content_rewrite_enabled:
+            fallback_reasons.append(CORE_REAL_REWRITE_DISABLED_REASON)
+        if message is None:
+            fallback_reasons.append("missing_core_message_argument")
+        if message is not None and not field_name:
+            fallback_reasons.append("unsupported_core_message_content_field")
+        if native_content and CORE_REWRITE_MARKER in native_content:
+            fallback_reasons.append("already_core_rewritten")
+        if field_name and not native_content.strip():
+            fallback_reasons.append("empty_core_message_payload")
+        if fallback_reasons:
+            self._record_core_rewrite_audit(
+                context=context,
+                applied=False,
+                fallback_reasons=fallback_reasons,
+                native_type=native_type,
+                field_name=field_name,
+                native_text=native_content,
+            )
+            return None
+
+        receiver = str(
+            context.transport_metadata.get("declared_receiver")
+            or "autogen_runtime_peer"
+        )
+        sender = str(
+            context.transport_metadata.get("sender")
+            or context.agent.agent_id
+        )
+        decoded_messages = self.codec.decode_many(message)
+        state_refs = self._safe_kernel_call(
+            "write_autogen_core_content_real_rewrite_state",
+            lambda: self.kernel.write_agent_state(
+                task=context.task,
+                round_id=1,
+                mode="runtime_lite",
+                agent=context.agent,
+                output=AgentOutput(
+                    agent_id=context.agent.agent_id,
+                    content=native_content,
+                    metadata={
+                        "framework": "autogen",
+                        "target_kind": context.target_kind,
+                        "method": context.method_name,
+                        "native_result_type": "core_content_real_rewrite_input",
+                        "core_content_real_rewrite": True,
+                        "core_message_native_type": native_type,
+                        "core_message_field": field_name,
+                        "core_transport_metadata": context.transport_metadata,
+                        "autogen_decoded_messages": [
+                            message.to_dict() for message in decoded_messages
+                        ],
+                    },
+                ),
+            ),
+        )
+        state_refs = list(state_refs or [])
+        state_ref_payload = []
+        for state_ref in state_refs:
+            ref_payload = self._safe_kernel_call(
+                "core_content_real_rewrite_state_ref_to_dict",
+                lambda ref=state_ref: self.kernel.state_pool.ref_to_dict(ref),
+            )
+            if isinstance(ref_payload, dict):
+                state_ref_payload.append(ref_payload)
+        prompt_views = []
+        for state_ref in state_refs:
+            view = self._safe_kernel_call(
+                "core_content_real_rewrite_prompt_view",
+                lambda ref=state_ref: self.kernel.state_pool.render_prompt_view(
+                    ref,
+                    receiver,
+                ),
+            )
+            if isinstance(view, str) and view:
+                prompt_views.append(view)
+        prompt_view_text = "\n".join(prompt_views)
+        envelope_json = self._safe_kernel_call(
+            "autogen_build_core_content_real_rewrite_handoff",
+            lambda: self.kernel.build_handoff(
+                task=context.task,
+                round_id=1,
+                mode="runtime_lite",
+                sender=sender,
+                declared_receiver=receiver,
+                summary=(
+                    "AutoGen Core message text field moved to StatePool while "
+                    "preserving the native Python message type"
+                ),
+                state_refs=state_refs,
+                memory_refs=[],
+            ),
+        )
+        envelope_payload = (
+            _json_object_or_empty(envelope_json)
+            if isinstance(envelope_json, str)
+            else {}
+        )
+        wire_envelope = _build_shadow_wire_envelope(envelope_payload)
+        rewritten_content = _build_core_content_rewrite_content(
+            wire_envelope=wire_envelope,
+            prompt_view_text=prompt_view_text,
+        )
+        replacement_message = _clone_message_with_text_field(
+            message,
+            field_name=field_name,
+            content=rewritten_content,
+        )
+        replacement_field = (
+            _field_value(replacement_message, field_name)
+            if replacement_message is not None
+            else ""
+        )
+        semantic_checks = {
+            "message_type_preserved": bool(
+                replacement_message is not None
+                and type(replacement_message) is type(message)
+            ),
+            "content_field_preserved": field_name in CORE_REWRITE_FIELDS,
+            "content_replaced_only": replacement_field == rewritten_content,
+            "state_ref_available": bool(state_refs),
+            "schema_valid": _wire_envelope_schema_valid(wire_envelope),
+            "prompt_view_available": bool(prompt_view_text.strip()),
+        }
+        if not state_refs:
+            fallback_reasons.append("missing_state_refs")
+        if not semantic_checks["schema_valid"]:
+            fallback_reasons.append("schema_invalid")
+        if not semantic_checks["prompt_view_available"]:
+            fallback_reasons.append("prompt_view_missing")
+        if replacement_message is None:
+            fallback_reasons.append("core_message_clone_failed")
+        if not semantic_checks["message_type_preserved"]:
+            fallback_reasons.append("core_message_type_not_preserved")
+        if not semantic_checks["content_replaced_only"]:
+            fallback_reasons.append("core_message_field_not_replaced")
+        native_tokens = _count_tokens(self.token_counter, native_content)
+        rewritten_tokens = _count_tokens(self.token_counter, rewritten_content)
+        if native_tokens <= rewritten_tokens:
+            fallback_reasons.append("core_message_token_not_reduced")
+        if fallback_reasons:
+            self._record_core_rewrite_audit(
+                context=context,
+                applied=False,
+                fallback_reasons=fallback_reasons,
+                native_type=native_type,
+                field_name=field_name,
+                native_text=native_content,
+                rewritten_content=rewritten_content,
+                state_refs=state_ref_payload,
+                wire_envelope=wire_envelope,
+                prompt_view_text=prompt_view_text,
+                semantic_checks=semantic_checks,
+            )
+            return None
+
+        new_args, new_kwargs = _replace_core_message_argument(
+            args,
+            kwargs,
+            source=source,
+            replacement=replacement_message,
+        )
+        self._record_core_rewrite_audit(
+            context=context,
+            applied=True,
+            fallback_reasons=[],
+            native_type=native_type,
+            field_name=field_name,
+            native_text=native_content,
+            rewritten_content=rewritten_content,
+            state_refs=state_ref_payload,
+            wire_envelope=wire_envelope,
+            prompt_view_text=prompt_view_text,
+            semantic_checks=semantic_checks,
+        )
+        return new_args, new_kwargs
+
+    def _record_core_rewrite_audit(
+        self,
+        *,
+        context: HookCallContext,
+        applied: bool,
+        fallback_reasons: list[str],
+        native_type: str = "",
+        field_name: str = "",
+        native_text: str = "",
+        rewritten_content: str = "",
+        state_refs: list[dict[str, Any]] | None = None,
+        wire_envelope: dict[str, Any] | None = None,
+        prompt_view_text: str = "",
+        semantic_checks: dict[str, Any] | None = None,
+    ) -> None:
+        native_tokens = _count_tokens(self.token_counter, native_text)
+        rewritten_tokens = _count_tokens(self.token_counter, rewritten_content)
+        fallback_buckets = _fallback_buckets(fallback_reasons)
+        self.trace.write(
+            "autogen_core_content_real_rewrite",
+            {
+                "call_id": context.call_id,
+                "agent_id": context.agent.agent_id,
+                "role": context.agent.role,
+                "target_kind": context.target_kind,
+                "method": context.method_name,
+                "transport_metadata": context.transport_metadata,
+                "broadcast_mode": self.broadcast_mode,
+                "core_content_rewrite_enabled": self.core_content_rewrite_enabled,
+                "candidate_generated": bool(rewritten_content),
+                "rewrite_attempt_count": 1,
+                "rewrite_applied_count": 1 if applied else 0,
+                "rewrite_fallback_count": 0 if applied else 1,
+                "rewrite_applied": applied,
+                "real_message_mutation": applied,
+                "fallback_required": not applied,
+                "fallback_reasons": sorted(set(fallback_reasons)),
+                "fallback_buckets": fallback_buckets,
+                "fallback_bucket_counts": _count_values(fallback_buckets),
+                "native_message_type": native_type,
+                "rewritten_field": field_name,
+                "state_refs": state_refs or [],
+                "state_ref_count": len(state_refs or []),
+                "shadow_wire_envelope": wire_envelope or {},
+                "schema_valid": _wire_envelope_schema_valid(wire_envelope or {}),
+                "prompt_view_available": bool(prompt_view_text.strip()),
+                "native_content_tokens": native_tokens,
+                "rewritten_content_tokens": rewritten_tokens,
+                "token_delta_native_minus_rewrite": native_tokens - rewritten_tokens,
+                "rewritten_preview": _preview(rewritten_content),
+                "semantic_checks": semantic_checks or {},
+            },
+        )
+
+    def _hydrate_core_agent_message_if_needed(
+        self,
+        context: HookCallContext,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> tuple[tuple[Any, ...], dict[str, Any]] | None:
+        message, source = _extract_core_message_argument(args, kwargs)
+        field_name, content = _core_message_text_field(message)
+        if not field_name or CORE_REWRITE_MARKER not in content:
+            return None
+        native_type = type(message).__name__ if message is not None else ""
+        fallback_reasons: list[str] = []
+        if self.core_receiver_hydrate_mode == "off":
+            fallback_reasons.append("core_hydration_disabled")
+
+        wire_envelope = _extract_core_rewrite_wire_envelope(content)
+        state_refs = _state_refs_from_wire_envelope(wire_envelope)
+        prompt_views = []
+        if self.core_receiver_hydrate_mode == "prompt-view":
+            for state_ref in state_refs:
+                view = self._safe_kernel_call(
+                    "core_receiver_hydrate_prompt_view",
+                    lambda ref=state_ref: self.kernel.state_pool.render_prompt_view(
+                        ref,
+                        context.agent.agent_id,
+                    ),
+                )
+                if isinstance(view, str) and view:
+                    prompt_views.append(view)
+        embedded_prompt_view = _extract_core_embedded_prompt_view(content)
+        hydrated_content = "\n".join(prompt_views).strip() or embedded_prompt_view
+        if not state_refs:
+            fallback_reasons.append("core_hydration_state_ref_missing")
+        if not hydrated_content.strip():
+            fallback_reasons.append("core_hydration_prompt_view_missing")
+
+        replacement_message = _clone_message_with_text_field(
+            message,
+            field_name=field_name,
+            content=hydrated_content,
+        )
+        replacement_field = (
+            _field_value(replacement_message, field_name)
+            if replacement_message is not None
+            else ""
+        )
+        semantic_checks = {
+            "message_type_preserved": bool(
+                replacement_message is not None
+                and type(replacement_message) is type(message)
+            ),
+            "content_field_preserved": field_name in CORE_REWRITE_FIELDS,
+            "content_replaced_with_prompt_view": replacement_field == hydrated_content,
+            "state_ref_available": bool(state_refs),
+            "prompt_view_available": bool(hydrated_content.strip()),
+            "wire_marker_removed": CORE_REWRITE_MARKER not in str(replacement_field),
+        }
+        if replacement_message is None:
+            fallback_reasons.append("core_hydration_clone_failed")
+        if not semantic_checks["message_type_preserved"]:
+            fallback_reasons.append("core_hydration_type_not_preserved")
+        if not semantic_checks["content_replaced_with_prompt_view"]:
+            fallback_reasons.append("core_hydration_field_not_replaced")
+        if fallback_reasons:
+            self._record_core_hydration_audit(
+                context=context,
+                applied=False,
+                fallback_reasons=fallback_reasons,
+                native_type=native_type,
+                field_name=field_name,
+                wire_envelope=wire_envelope,
+                state_refs=[self.kernel.state_pool.ref_to_dict(ref) for ref in state_refs],
+                original_rewritten_content=content,
+                hydrated_content=hydrated_content,
+                semantic_checks=semantic_checks,
+            )
+            return None
+
+        new_args, new_kwargs = _replace_core_message_argument(
+            args,
+            kwargs,
+            source=source,
+            replacement=replacement_message,
+        )
+        self._record_core_hydration_audit(
+            context=context,
+            applied=True,
+            fallback_reasons=[],
+            native_type=native_type,
+            field_name=field_name,
+            wire_envelope=wire_envelope,
+            state_refs=[self.kernel.state_pool.ref_to_dict(ref) for ref in state_refs],
+            original_rewritten_content=content,
+            hydrated_content=hydrated_content,
+            semantic_checks=semantic_checks,
+        )
+        return new_args, new_kwargs
+
+    def _record_core_hydration_audit(
+        self,
+        *,
+        context: HookCallContext,
+        applied: bool,
+        fallback_reasons: list[str],
+        native_type: str = "",
+        field_name: str = "",
+        wire_envelope: dict[str, Any] | None = None,
+        state_refs: list[dict[str, Any]] | None = None,
+        original_rewritten_content: str = "",
+        hydrated_content: str = "",
+        semantic_checks: dict[str, Any] | None = None,
+    ) -> None:
+        fallback_buckets = _fallback_buckets(fallback_reasons)
+        self.trace.write(
+            "autogen_core_receiver_hydration",
+            {
+                "call_id": context.call_id,
+                "agent_id": context.agent.agent_id,
+                "role": context.agent.role,
+                "target_kind": context.target_kind,
+                "method": context.method_name,
+                "core_receiver_hydrate_mode": self.core_receiver_hydrate_mode,
+                "candidate_detected": bool(original_rewritten_content),
+                "hydration_attempt_count": 1,
+                "hydration_applied_count": 1 if applied else 0,
+                "hydration_fallback_count": 0 if applied else 1,
+                "hydration_applied": applied,
+                "fallback_required": not applied,
+                "fallback_reasons": sorted(set(fallback_reasons)),
+                "fallback_buckets": fallback_buckets,
+                "fallback_bucket_counts": _count_values(fallback_buckets),
+                "native_message_type": native_type,
+                "hydrated_field": field_name,
+                "state_refs": state_refs or [],
+                "state_ref_count": len(state_refs or []),
+                "shadow_wire_envelope": wire_envelope or {},
+                "prompt_view_available": bool(hydrated_content.strip()),
+                "wire_marker_removed": CORE_REWRITE_MARKER not in hydrated_content,
+                "original_rewritten_tokens": _count_tokens(
+                    self.token_counter,
+                    original_rewritten_content,
+                ),
+                "hydrated_content_tokens": _count_tokens(
+                    self.token_counter,
+                    hydrated_content,
+                ),
+                "hydrated_preview": _preview(hydrated_content),
+                "semantic_checks": semantic_checks or {},
+            },
+        )
+
+    def _rewrite_core_response_if_safe(
+        self,
+        context: HookCallContext,
+        result: Any,
+    ) -> Any | None:
+        field_name, native_content = _core_message_text_field(result)
+        native_type = type(result).__name__ if result is not None else ""
+        fallback_reasons: list[str] = []
+        if not self.core_content_rewrite_enabled:
+            fallback_reasons.append(CORE_REAL_REWRITE_DISABLED_REASON)
+        if result is None:
+            fallback_reasons.append("missing_core_response_result")
+        if result is not None and not field_name:
+            fallback_reasons.append("unsupported_core_response_content_field")
+        if native_content and CORE_REWRITE_MARKER in native_content:
+            fallback_reasons.append("already_core_response_rewritten")
+        if field_name and not native_content.strip():
+            fallback_reasons.append("empty_core_response_payload")
+        if fallback_reasons:
+            self._record_core_response_rewrite_audit(
+                context=context,
+                applied=False,
+                fallback_reasons=fallback_reasons,
+                native_type=native_type,
+                field_name=field_name,
+                native_text=native_content,
+            )
+            return None
+
+        sender = context.agent.agent_id
+        receiver = str(
+            context.transport_metadata.get("sender")
+            or context.transport_metadata.get("sender_raw")
+            or "autogen_runtime_caller"
+        )
+        decoded_messages = self.codec.decode_many(result)
+        state_refs = self._safe_kernel_call(
+            "write_autogen_core_response_real_rewrite_state",
+            lambda: self.kernel.write_agent_state(
+                task=context.task,
+                round_id=1,
+                mode="runtime_lite",
+                agent=context.agent,
+                output=AgentOutput(
+                    agent_id=context.agent.agent_id,
+                    content=native_content,
+                    metadata={
+                        "framework": "autogen",
+                        "target_kind": context.target_kind,
+                        "method": context.method_name,
+                        "native_result_type": "core_response_real_rewrite_output",
+                        "core_response_real_rewrite": True,
+                        "core_response_native_type": native_type,
+                        "core_response_field": field_name,
+                        "core_response_receiver": receiver,
+                        "core_receive_metadata": context.transport_metadata,
+                        "autogen_decoded_messages": [
+                            message.to_dict() for message in decoded_messages
+                        ],
+                    },
+                ),
+            ),
+        )
+        state_refs = list(state_refs or [])
+        state_ref_payload = []
+        for state_ref in state_refs:
+            ref_payload = self._safe_kernel_call(
+                "core_response_real_rewrite_state_ref_to_dict",
+                lambda ref=state_ref: self.kernel.state_pool.ref_to_dict(ref),
+            )
+            if isinstance(ref_payload, dict):
+                state_ref_payload.append(ref_payload)
+        prompt_views = []
+        for state_ref in state_refs:
+            view = self._safe_kernel_call(
+                "core_response_real_rewrite_prompt_view",
+                lambda ref=state_ref: self.kernel.state_pool.render_prompt_view(
+                    ref,
+                    receiver,
+                ),
+            )
+            if isinstance(view, str) and view:
+                prompt_views.append(view)
+        prompt_view_text = "\n".join(prompt_views)
+        envelope_json = self._safe_kernel_call(
+            "autogen_build_core_response_real_rewrite_handoff",
+            lambda: self.kernel.build_handoff(
+                task=context.task,
+                round_id=1,
+                mode="runtime_lite",
+                sender=sender,
+                declared_receiver=receiver,
+                summary=(
+                    "AutoGen Core response text field moved to StatePool while "
+                    "preserving the native Python response type"
+                ),
+                state_refs=state_refs,
+                memory_refs=[],
+            ),
+        )
+        envelope_payload = (
+            _json_object_or_empty(envelope_json)
+            if isinstance(envelope_json, str)
+            else {}
+        )
+        wire_envelope = _build_shadow_wire_envelope(envelope_payload)
+        rewritten_content = _build_core_content_rewrite_content(
+            wire_envelope=wire_envelope,
+            prompt_view_text=prompt_view_text,
+        )
+        replacement_result = _clone_message_with_text_field(
+            result,
+            field_name=field_name,
+            content=rewritten_content,
+        )
+        replacement_field = (
+            _field_value(replacement_result, field_name)
+            if replacement_result is not None
+            else ""
+        )
+        semantic_checks = {
+            "response_type_preserved": bool(
+                replacement_result is not None
+                and type(replacement_result) is type(result)
+            ),
+            "content_field_preserved": field_name in CORE_REWRITE_FIELDS,
+            "content_replaced_only": replacement_field == rewritten_content,
+            "state_ref_available": bool(state_refs),
+            "schema_valid": _wire_envelope_schema_valid(wire_envelope),
+            "prompt_view_available": bool(prompt_view_text.strip()),
+        }
+        if not state_refs:
+            fallback_reasons.append("missing_state_refs")
+        if not semantic_checks["schema_valid"]:
+            fallback_reasons.append("schema_invalid")
+        if not semantic_checks["prompt_view_available"]:
+            fallback_reasons.append("prompt_view_missing")
+        if replacement_result is None:
+            fallback_reasons.append("core_response_clone_failed")
+        if not semantic_checks["response_type_preserved"]:
+            fallback_reasons.append("core_response_type_not_preserved")
+        if not semantic_checks["content_replaced_only"]:
+            fallback_reasons.append("core_response_field_not_replaced")
+        native_tokens = _count_tokens(self.token_counter, native_content)
+        rewritten_tokens = _count_tokens(self.token_counter, rewritten_content)
+        if native_tokens <= rewritten_tokens:
+            fallback_reasons.append("core_response_token_not_reduced")
+        if fallback_reasons:
+            self._record_core_response_rewrite_audit(
+                context=context,
+                applied=False,
+                fallback_reasons=fallback_reasons,
+                native_type=native_type,
+                field_name=field_name,
+                native_text=native_content,
+                rewritten_content=rewritten_content,
+                state_refs=state_ref_payload,
+                wire_envelope=wire_envelope,
+                prompt_view_text=prompt_view_text,
+                semantic_checks=semantic_checks,
+            )
+            return None
+
+        self._record_core_response_rewrite_audit(
+            context=context,
+            applied=True,
+            fallback_reasons=[],
+            native_type=native_type,
+            field_name=field_name,
+            native_text=native_content,
+            rewritten_content=rewritten_content,
+            state_refs=state_ref_payload,
+            wire_envelope=wire_envelope,
+            prompt_view_text=prompt_view_text,
+            semantic_checks=semantic_checks,
+        )
+        return replacement_result
+
+    def _record_core_response_rewrite_audit(
+        self,
+        *,
+        context: HookCallContext,
+        applied: bool,
+        fallback_reasons: list[str],
+        native_type: str = "",
+        field_name: str = "",
+        native_text: str = "",
+        rewritten_content: str = "",
+        state_refs: list[dict[str, Any]] | None = None,
+        wire_envelope: dict[str, Any] | None = None,
+        prompt_view_text: str = "",
+        semantic_checks: dict[str, Any] | None = None,
+    ) -> None:
+        native_tokens = _count_tokens(self.token_counter, native_text)
+        rewritten_tokens = _count_tokens(self.token_counter, rewritten_content)
+        fallback_buckets = _fallback_buckets(fallback_reasons)
+        self.trace.write(
+            "autogen_core_response_real_rewrite",
+            {
+                "call_id": context.call_id,
+                "agent_id": context.agent.agent_id,
+                "role": context.agent.role,
+                "target_kind": context.target_kind,
+                "method": context.method_name,
+                "transport_metadata": context.transport_metadata,
+                "broadcast_mode": self.broadcast_mode,
+                "core_content_rewrite_enabled": self.core_content_rewrite_enabled,
+                "candidate_generated": bool(rewritten_content),
+                "rewrite_attempt_count": 1,
+                "rewrite_applied_count": 1 if applied else 0,
+                "rewrite_fallback_count": 0 if applied else 1,
+                "rewrite_applied": applied,
+                "real_response_mutation": applied,
+                "fallback_required": not applied,
+                "fallback_reasons": sorted(set(fallback_reasons)),
+                "fallback_buckets": fallback_buckets,
+                "fallback_bucket_counts": _count_values(fallback_buckets),
+                "native_response_type": native_type,
+                "rewritten_field": field_name,
+                "state_refs": state_refs or [],
+                "state_ref_count": len(state_refs or []),
+                "shadow_wire_envelope": wire_envelope or {},
+                "schema_valid": _wire_envelope_schema_valid(wire_envelope or {}),
+                "prompt_view_available": bool(prompt_view_text.strip()),
+                "native_content_tokens": native_tokens,
+                "rewritten_content_tokens": rewritten_tokens,
+                "token_delta_native_minus_rewrite": native_tokens - rewritten_tokens,
+                "rewritten_preview": _preview(rewritten_content),
+                "semantic_checks": semantic_checks or {},
+            },
+        )
+
+    def _hydrate_core_runtime_response_if_needed(
+        self,
+        context: HookCallContext,
+        result: Any,
+    ) -> Any | None:
+        field_name, content = _core_message_text_field(result)
+        if not field_name or CORE_REWRITE_MARKER not in content:
+            return None
+        native_type = type(result).__name__ if result is not None else ""
+        fallback_reasons: list[str] = []
+        if self.core_receiver_hydrate_mode == "off":
+            fallback_reasons.append("core_hydration_disabled")
+
+        wire_envelope = _extract_core_rewrite_wire_envelope(content)
+        state_refs = _state_refs_from_wire_envelope(wire_envelope)
+        receiver = str(
+            context.transport_metadata.get("sender")
+            or context.transport_metadata.get("sender_raw")
+            or "autogen_runtime_caller"
+        )
+        prompt_views = []
+        if self.core_receiver_hydrate_mode == "prompt-view":
+            for state_ref in state_refs:
+                view = self._safe_kernel_call(
+                    "core_response_hydrate_prompt_view",
+                    lambda ref=state_ref: self.kernel.state_pool.render_prompt_view(
+                        ref,
+                        receiver,
+                    ),
+                )
+                if isinstance(view, str) and view:
+                    prompt_views.append(view)
+        embedded_prompt_view = _extract_core_embedded_prompt_view(content)
+        hydrated_content = "\n".join(prompt_views).strip() or embedded_prompt_view
+        if not state_refs:
+            fallback_reasons.append("core_hydration_state_ref_missing")
+        if not hydrated_content.strip():
+            fallback_reasons.append("core_hydration_prompt_view_missing")
+
+        replacement_result = _clone_message_with_text_field(
+            result,
+            field_name=field_name,
+            content=hydrated_content,
+        )
+        replacement_field = (
+            _field_value(replacement_result, field_name)
+            if replacement_result is not None
+            else ""
+        )
+        semantic_checks = {
+            "response_type_preserved": bool(
+                replacement_result is not None
+                and type(replacement_result) is type(result)
+            ),
+            "content_field_preserved": field_name in CORE_REWRITE_FIELDS,
+            "content_replaced_with_prompt_view": replacement_field == hydrated_content,
+            "state_ref_available": bool(state_refs),
+            "prompt_view_available": bool(hydrated_content.strip()),
+            "wire_marker_removed": CORE_REWRITE_MARKER not in str(replacement_field),
+        }
+        if replacement_result is None:
+            fallback_reasons.append("core_hydration_clone_failed")
+        if not semantic_checks["response_type_preserved"]:
+            fallback_reasons.append("core_hydration_type_not_preserved")
+        if not semantic_checks["content_replaced_with_prompt_view"]:
+            fallback_reasons.append("core_hydration_field_not_replaced")
+        state_ref_payload = [
+            self.kernel.state_pool.ref_to_dict(ref) for ref in state_refs
+        ]
+        if fallback_reasons:
+            self._record_core_response_hydration_audit(
+                context=context,
+                applied=False,
+                fallback_reasons=fallback_reasons,
+                native_type=native_type,
+                field_name=field_name,
+                wire_envelope=wire_envelope,
+                state_refs=state_ref_payload,
+                original_rewritten_content=content,
+                hydrated_content=hydrated_content,
+                semantic_checks=semantic_checks,
+            )
+            return None
+
+        self._record_core_response_hydration_audit(
+            context=context,
+            applied=True,
+            fallback_reasons=[],
+            native_type=native_type,
+            field_name=field_name,
+            wire_envelope=wire_envelope,
+            state_refs=state_ref_payload,
+            original_rewritten_content=content,
+            hydrated_content=hydrated_content,
+            semantic_checks=semantic_checks,
+        )
+        return replacement_result
+
+    def _record_core_response_hydration_audit(
+        self,
+        *,
+        context: HookCallContext,
+        applied: bool,
+        fallback_reasons: list[str],
+        native_type: str = "",
+        field_name: str = "",
+        wire_envelope: dict[str, Any] | None = None,
+        state_refs: list[dict[str, Any]] | None = None,
+        original_rewritten_content: str = "",
+        hydrated_content: str = "",
+        semantic_checks: dict[str, Any] | None = None,
+    ) -> None:
+        fallback_buckets = _fallback_buckets(fallback_reasons)
+        self.trace.write(
+            "autogen_core_response_hydration",
+            {
+                "call_id": context.call_id,
+                "agent_id": context.agent.agent_id,
+                "role": context.agent.role,
+                "target_kind": context.target_kind,
+                "method": context.method_name,
+                "core_receiver_hydrate_mode": self.core_receiver_hydrate_mode,
+                "candidate_detected": bool(original_rewritten_content),
+                "hydration_attempt_count": 1,
+                "hydration_applied_count": 1 if applied else 0,
+                "hydration_fallback_count": 0 if applied else 1,
+                "hydration_applied": applied,
+                "fallback_required": not applied,
+                "fallback_reasons": sorted(set(fallback_reasons)),
+                "fallback_buckets": fallback_buckets,
+                "fallback_bucket_counts": _count_values(fallback_buckets),
+                "native_response_type": native_type,
+                "hydrated_field": field_name,
+                "state_refs": state_refs or [],
+                "state_ref_count": len(state_refs or []),
+                "shadow_wire_envelope": wire_envelope or {},
+                "prompt_view_available": bool(hydrated_content.strip()),
+                "wire_marker_removed": CORE_REWRITE_MARKER not in hydrated_content,
+                "original_rewritten_tokens": _count_tokens(
+                    self.token_counter,
+                    original_rewritten_content,
+                ),
+                "hydrated_content_tokens": _count_tokens(
+                    self.token_counter,
+                    hydrated_content,
+                ),
+                "hydrated_preview": _preview(hydrated_content),
+                "semantic_checks": semantic_checks or {},
+            },
         )
 
     def rewrite_call_arguments_if_safe(
@@ -502,12 +1463,47 @@ class AutoGenHookManager:
         ):
             rewritten = self._rewrite_team_task_if_safe(context, args, kwargs)
             return rewritten if rewritten is not None else (args, kwargs)
+        if (
+            context.target_kind == "core_runtime"
+            and context.method_name in {"send_message", "publish_message"}
+        ):
+            rewritten = self._rewrite_core_message_if_safe(context, args, kwargs)
+            return rewritten if rewritten is not None else (args, kwargs)
+        if context.target_kind == "core_agent" and context.method_name == "on_message":
+            rewritten = self._hydrate_core_agent_message_if_needed(
+                context,
+                args,
+                kwargs,
+            )
+            return rewritten if rewritten is not None else (args, kwargs)
         if context.target_kind != "agentchat_agent":
             return args, kwargs
         if context.method_name not in {"on_messages", "on_messages_stream"}:
             return args, kwargs
         rewritten = self._rewrite_agent_text_messages(context, args, kwargs)
         return rewritten if rewritten is not None else (args, kwargs)
+
+    def rewrite_call_result_if_safe(
+        self,
+        context: HookCallContext,
+        result: Any,
+    ) -> Any:
+        if self.broadcast_mode != "real-rewrite":
+            return result
+        if (
+            context.target_kind == "core_agent"
+            and context.method_name == "on_message"
+            and self._core_response_rewrite_active()
+        ):
+            rewritten = self._rewrite_core_response_if_safe(context, result)
+            return rewritten if rewritten is not None else result
+        if (
+            context.target_kind == "core_runtime"
+            and context.method_name == "send_message"
+        ):
+            hydrated = self._hydrate_core_runtime_response_if_needed(context, result)
+            return hydrated if hydrated is not None else result
+        return result
 
     def _rewrite_team_task_if_safe(
         self,
@@ -844,6 +1840,14 @@ class AutoGenHookManager:
                 context=context,
                 applied=False,
                 fallback_reasons=["empty_text_payload"],
+            )
+            return None
+        if _contains_agentlite_rewrite_marker(native_text):
+            self._record_agent_rewrite_audit(
+                context=context,
+                applied=False,
+                fallback_reasons=["already_agentlite_rewritten"],
+                native_text=native_text,
             )
             return None
         state_refs = self._safe_kernel_call(
@@ -1968,6 +2972,8 @@ class AutoGenHookManager:
                 instance: object, *args: Any, **kwargs: Any
             ) -> Any:
                 context: HookCallContext | None = None
+                send_message_entered = False
+                response_rewrite_enabled = False
                 try:
                     context = self.record_call_start(
                         instance=instance,
@@ -1981,10 +2987,32 @@ class AutoGenHookManager:
                         args,
                         kwargs,
                     )
+                    if (
+                        context.target_kind == "core_runtime"
+                        and context.method_name == "send_message"
+                    ):
+                        response_rewrite_enabled = bool(
+                            context.transport_metadata.get("sender")
+                            or context.transport_metadata.get("sender_raw")
+                        )
+                        self._enter_core_send_message(
+                            response_rewrite_enabled=response_rewrite_enabled,
+                        )
+                        send_message_entered = True
                     result = await original(instance, *args, **kwargs)
+                    if send_message_entered:
+                        self._exit_core_send_message(
+                            response_rewrite_enabled=response_rewrite_enabled,
+                        )
+                        send_message_entered = False
+                    result = self.rewrite_call_result_if_safe(context, result)
                     self.record_call_end(context, result)
                     return result
                 except Exception as exc:
+                    if send_message_entered:
+                        self._exit_core_send_message(
+                            response_rewrite_enabled=response_rewrite_enabled,
+                        )
                     self.record_call_error(context, exc)
                     raise
 
@@ -2055,7 +3083,10 @@ class AutoGenHookManager:
         if module_name.startswith("autogen_agentchat.teams"):
             return {"agentchat_team": PATCH_TARGETS["agentchat_team"]}
         if module_name.startswith("autogen_core"):
-            return {"core_runtime": PATCH_TARGETS["core_runtime"]}
+            return {
+                "core_runtime": PATCH_TARGETS["core_runtime"],
+                "core_agent": PATCH_TARGETS["core_agent"],
+            }
         if module_name == "autogen":
             return {
                 "agentchat_agent": PATCH_TARGETS["agentchat_agent"],
@@ -2072,6 +3103,11 @@ class AutoGenHookManager:
             return "agentchat_team"
         if module_name.startswith("autogen_core") and "Runtime" in class_name:
             return "core_runtime"
+        if module_name.startswith("autogen_core") and class_name in {
+            "BaseAgent",
+            "RoutedAgent",
+        }:
+            return "core_agent"
         if module_name == "autogen":
             if "GroupChat" in class_name or "Team" in class_name:
                 return "agentchat_team"
@@ -2176,6 +3212,10 @@ def activate(context: BootstrapContext) -> DriverActivation:
             "handoff_rewrite_env": HANDOFF_REWRITE_ENV,
             "tool_summary_rewrite_enabled": manager.tool_summary_rewrite_enabled,
             "tool_summary_rewrite_env": TOOL_SUMMARY_REWRITE_ENV,
+            "core_content_rewrite_enabled": manager.core_content_rewrite_enabled,
+            "core_content_rewrite_env": CORE_CONTENT_REWRITE_ENV,
+            "core_receiver_hydrate_mode": manager.core_receiver_hydrate_mode,
+            "core_receiver_hydrate_env": CORE_RECEIVER_HYDRATE_ENV,
             "patched_modules": manager.patched_modules,
             "patched_methods": manager.patched_methods,
             "trace_path": str(manager.trace.path),
@@ -2205,6 +3245,8 @@ def _capabilities_for(target_kind: str) -> tuple[str, ...]:
         return ("team_orchestration", "message_broadcast")
     if target_kind == "core_runtime":
         return ("runtime_message_transport",)
+    if target_kind == "core_agent":
+        return ("runtime_message_receive", "prompt_view_hydration")
     return ("agent_message_handling", "artifact_generation")
 
 
@@ -2215,6 +3257,17 @@ def _resolve_broadcast_mode(value: str) -> str:
     if normalized in BROADCAST_MODES:
         return normalized
     return "shadow-only"
+
+
+def _resolve_core_receiver_hydrate_mode(value: str) -> str:
+    normalized = str(value or "").strip().lower().replace("_", "-")
+    if not normalized:
+        return "off"
+    if normalized in {"1", "true", "yes", "on"}:
+        return "prompt-view"
+    if normalized in CORE_RECEIVER_HYDRATE_MODES:
+        return normalized
+    return "off"
 
 
 def _truthy_env(value: str) -> bool:
@@ -2457,6 +3510,33 @@ def _replace_messages_argument(
     return args, kwargs
 
 
+def _extract_core_message_argument(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> tuple[Any | None, str]:
+    if "message" in kwargs:
+        return kwargs["message"], "kw_message"
+    if args:
+        return args[0], "args0"
+    return None, "missing"
+
+
+def _replace_core_message_argument(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    *,
+    source: str,
+    replacement: Any,
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    if source == "kw_message":
+        new_kwargs = dict(kwargs)
+        new_kwargs["message"] = replacement
+        return args, new_kwargs
+    if source == "args0":
+        return (replacement, *args[1:]), kwargs
+    return args, kwargs
+
+
 def _extract_team_task_argument(
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
@@ -2526,6 +3606,129 @@ def _clone_message_with_content(message: Any, content: str) -> Any | None:
     return None
 
 
+def _core_message_text_field(message: Any) -> tuple[str, str]:
+    if message is None:
+        return "", ""
+    if isinstance(message, dict):
+        for field_name in CORE_REWRITE_FIELDS:
+            value = message.get(field_name)
+            if isinstance(value, str):
+                return field_name, value
+        return "", ""
+    for field_name in CORE_REWRITE_FIELDS:
+        if not hasattr(message, field_name):
+            continue
+        try:
+            value = getattr(message, field_name)
+        except Exception:
+            continue
+        if isinstance(value, str):
+            return field_name, value
+    return "", ""
+
+
+def _field_value(message: Any, field_name: str) -> Any:
+    if message is None or not field_name:
+        return None
+    if isinstance(message, dict):
+        return message.get(field_name)
+    try:
+        return getattr(message, field_name)
+    except Exception:
+        return None
+
+
+def _clone_message_with_text_field(
+    message: Any,
+    *,
+    field_name: str,
+    content: str,
+) -> Any | None:
+    if not field_name:
+        return None
+    if isinstance(message, dict):
+        cloned = dict(message)
+        cloned[field_name] = content
+        return cloned
+    model_copy = getattr(message, "model_copy", None)
+    if callable(model_copy):
+        try:
+            return model_copy(update={field_name: content})
+        except Exception:
+            pass
+    copy_method = getattr(message, "copy", None)
+    if callable(copy_method):
+        try:
+            return copy_method(update={field_name: content})
+        except Exception:
+            pass
+    if is_dataclass(message) and not isinstance(message, type):
+        try:
+            return dataclass_replace(message, **{field_name: content})
+        except Exception:
+            pass
+    replace_method = getattr(message, "_replace", None)
+    if callable(replace_method):
+        try:
+            return replace_method(**{field_name: content})
+        except Exception:
+            pass
+    try:
+        cloned = shallow_copy(message)
+        setattr(cloned, field_name, content)
+        return cloned
+    except Exception:
+        return None
+
+
+def _extract_core_rewrite_wire_envelope(content: str) -> dict[str, Any]:
+    for line in str(content or "").splitlines():
+        if not line.startswith("shp_wire="):
+            continue
+        return _json_object_or_empty(line[len("shp_wire=") :])
+    return {}
+
+
+def _extract_core_embedded_prompt_view(content: str) -> str:
+    marker = "\nprompt_view:\n"
+    text = str(content or "")
+    if marker not in text:
+        return ""
+    return text.split(marker, 1)[1].strip()
+
+
+def _state_refs_from_wire_envelope(wire_envelope: dict[str, Any]) -> list[StateRef]:
+    raw_refs = wire_envelope.get("state_refs", [])
+    if not isinstance(raw_refs, list):
+        return []
+    refs: list[StateRef] = []
+    for raw_ref in raw_refs:
+        if not isinstance(raw_ref, dict):
+            continue
+        state_id = str(raw_ref.get("state_id", "") or "")
+        state_type = str(raw_ref.get("state_type", "") or "")
+        if not state_id or not state_type:
+            continue
+        try:
+            version = int(raw_ref.get("version", 1) or 1)
+        except (TypeError, ValueError):
+            version = 1
+        refs.append(
+            StateRef(
+                state_id=state_id,
+                state_type=state_type,
+                version=version,
+                payload_kind=str(raw_ref.get("payload_kind", "") or ""),
+                contains_embedding_refs=bool(
+                    raw_ref.get("contains_embedding_refs", False)
+                ),
+                usage_hint=str(raw_ref.get("usage_hint", "") or ""),
+                tier=str(raw_ref.get("tier", "") or "cold"),
+            )
+        )
+    return refs
+
+
 def _first_message(messages: Any) -> Any | None:
     if isinstance(messages, (list, tuple)):
         return messages[0] if messages else None
@@ -2567,6 +3770,39 @@ def _build_real_rewrite_content(
     return (
         "AGENTLITE_REAL_REWRITE v1\n"
         "native_payload_moved_to_state_pool=true\n"
+        f"shp_wire={wire_json}\n"
+        "prompt_view:\n"
+        f"{prompt_view_text}"
+    )
+
+
+def _contains_agentlite_rewrite_marker(text: str) -> bool:
+    return any(
+        marker in text
+        for marker in (
+            "AGENTLITE_REAL_REWRITE v1",
+            "AGENTLITE_TEAM_REAL_REWRITE v1",
+            "AGENTLITE_HANDOFF_TYPED_REWRITE_CANDIDATE v1",
+            "AGENTLITE_TOOL_SUMMARY_TYPED_REWRITE_CANDIDATE v1",
+            CORE_REWRITE_MARKER,
+        )
+    )
+
+
+def _build_core_content_rewrite_content(
+    *,
+    wire_envelope: dict[str, Any],
+    prompt_view_text: str,
+) -> str:
+    wire_json = json.dumps(
+        wire_envelope,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return (
+        f"{CORE_REWRITE_MARKER}\n"
+        "native_core_message_content_moved_to_state_pool=true\n"
+        "native_python_message_type_preserved=true\n"
         f"shp_wire={wire_json}\n"
         "prompt_view:\n"
         f"{prompt_view_text}"
@@ -2720,6 +3956,121 @@ def _tool_result_lineage_complete(
     call_ids = set(_tool_call_ids(tool_calls))
     result_call_ids = set(_tool_result_call_ids(tool_results))
     return bool(call_ids) and bool(result_call_ids) and result_call_ids <= call_ids
+
+
+def _core_transport_metadata(
+    *,
+    method_name: str,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    message = kwargs.get("message") if "message" in kwargs else _item_at(args, 0)
+    route_value = None
+    route_kind = "unknown"
+    if method_name == "send_message":
+        route_value = (
+            kwargs.get("recipient") if "recipient" in kwargs else _item_at(args, 1)
+        )
+        route_kind = "direct"
+    elif method_name == "publish_message":
+        route_value = (
+            kwargs.get("topic_id") if "topic_id" in kwargs else _item_at(args, 1)
+        )
+        route_kind = "publish"
+    route_raw = _route_value_text(route_value)
+    sender_raw = _route_value_text(kwargs.get("sender"))
+    return {
+        "transport_kind": route_kind,
+        "method": method_name,
+        "message_native_type": type(message).__name__ if message is not None else "",
+        "route_raw": route_raw,
+        "declared_receiver": _core_declared_receiver(
+            method_name=method_name,
+            route_raw=route_raw,
+        ),
+        "sender": _safe_identifier(sender_raw) if sender_raw else "",
+        "sender_raw": sender_raw,
+        "message_id": str(kwargs.get("message_id") or ""),
+    }
+
+
+def _core_agent_receive_metadata(
+    *,
+    method_name: str,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    message = kwargs.get("message") if "message" in kwargs else _item_at(args, 0)
+    ctx = (
+        kwargs.get("ctx")
+        if "ctx" in kwargs
+        else kwargs.get("context")
+        if "context" in kwargs
+        else _item_at(args, 1)
+    )
+    sender_value = getattr(ctx, "sender", None) if ctx is not None else None
+    topic_value = getattr(ctx, "topic_id", None) if ctx is not None else None
+    sender_raw = _route_value_text(sender_value)
+    topic_raw = _route_value_text(topic_value)
+    return {
+        "transport_kind": "receive",
+        "method": method_name,
+        "message_native_type": type(message).__name__ if message is not None else "",
+        "sender_raw": sender_raw,
+        "sender": _safe_identifier(sender_raw) if sender_raw else "",
+        "topic_raw": topic_raw,
+        "topic": _safe_identifier(topic_raw) if topic_raw else "",
+    }
+
+
+def _item_at(values: tuple[Any, ...], index: int) -> Any:
+    return values[index] if len(values) > index else None
+
+
+def _route_value_text(value: Any) -> str:
+    if value is None:
+        return ""
+    type_value = getattr(value, "type", None)
+    key_value = getattr(value, "key", None)
+    source_value = getattr(value, "source", None)
+    if type_value is not None and key_value is not None:
+        return f"{type_value}/{key_value}"
+    if type_value is not None and source_value is not None:
+        return f"{type_value}/{source_value}"
+    if type_value is not None:
+        return str(type_value)
+    return str(value)
+
+
+def _core_declared_receiver(*, method_name: str, route_raw: str) -> str:
+    if route_raw:
+        prefix = "topic" if method_name == "publish_message" else "agent"
+        return _safe_identifier(f"{prefix}_{route_raw}")
+    if method_name == "publish_message":
+        return "topic_unknown"
+    if method_name == "send_message":
+        return "agent_unknown"
+    return "autogen_runtime_peer"
+
+
+def _build_core_transport_summary(
+    *,
+    sender: str,
+    method_name: str,
+    receiver: str,
+    message_kinds: list[str],
+    native_text: str,
+    limit: int = 320,
+) -> str:
+    kinds = sorted({kind for kind in message_kinds if kind}) or ["unknown"]
+    preview = " ".join(native_text.split())
+    body = (
+        f"{sender}.{method_name} -> {receiver} transported "
+        f"{','.join(kinds)}"
+    )
+    if preview:
+        body = f"{body}: {preview}"
+    return body[:limit]
 
 
 def _extract_text(value: Any, *, _depth: int = 0) -> str:

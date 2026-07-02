@@ -63,7 +63,7 @@ def main() -> int:
     output_dir = args.output_dir
     if output_dir is None:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        output_dir = PROJECT_ROOT / "runs" / f"v5.12x-autogen-rewrite-fallback-{stamp}"
+        output_dir = PROJECT_ROOT / "runs" / f"v5.13h-autogen-rewrite-fallback-{stamp}"
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -123,7 +123,7 @@ def run_fallback_smoke(*, output_dir: Path, python: str) -> dict[str, Any]:
     checks = {
         "target_returncode_zero": result.returncode == 0,
         "bootstrap_ok": bool(status.get("ok")),
-        "driver_phase_v5_12x": details.get("phase") == "v5.12x",
+        "driver_phase_v5_13h": details.get("phase") == "v5.13h",
         "agent_saw_native_handoff": first_seen.get("type") == "HandoffMessage"
         and bool(first_seen.get("contains_native_marker")),
         "agent_did_not_see_rewrite_marker": not bool(

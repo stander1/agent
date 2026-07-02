@@ -141,7 +141,7 @@ def build_report(
         "target_returncode_zero": returncode == 0,
         "bootstrap_ok": bool(status.get("ok")),
         "hooks_active": bool(status.get("hooks_active")),
-        "driver_phase_v5_12x": details.get("phase") == "v5.12x",
+        "driver_phase_v5_13h": details.get("phase") == "v5.13h",
         "app_output_written": bool(app_payload),
         "agentlite_active_in_target": bool(app_payload.get("agentlite_active")),
         "receive_event_recorded": event_counts["autogen_agent_receive"] > 0,

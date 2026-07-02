@@ -31,7 +31,7 @@ from run_autogen_handoff_tool_rewrite_guard_smoke import (  # noqa: E402
 )
 from run_autogen_native_smoke import _missing_modules, _read_trace_events  # noqa: E402
 
-EXPECTED_PHASE = "v5.12x"
+EXPECTED_PHASE = "v5.13h"
 EXPECTED_CONTRACT = "autogen_tool_summary_typed_rewrite_candidate.v1"
 EXPECTED_CALL_ID = "call_tool_switch_1"
 
@@ -81,7 +81,7 @@ def main() -> int:
         output_dir = (
             PROJECT_ROOT
             / "runs"
-            / f"v5.12x-autogen-tool-summary-rewrite-switch-{stamp}"
+            / f"v5.13h-autogen-tool-summary-rewrite-switch-{stamp}"
         )
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -187,7 +187,7 @@ def build_switch_report(
             int(report.get("returncode", 1)) == 0 for report in mode_reports
         ),
         "all_bootstrap_ok": all(bool(report.get("bootstrap_ok")) for report in mode_reports),
-        "all_driver_phase_v5_12x": all(
+        "all_driver_phase_v5_13h": all(
             report.get("driver_phase") == EXPECTED_PHASE for report in mode_reports
         ),
         "off_mode_keeps_native_tool_summary": (

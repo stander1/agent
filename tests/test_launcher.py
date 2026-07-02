@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_runtime.cli import build_managed_environment_overlay
+from agent_runtime.cli import build_managed_environment_overlay, build_parser
 from agent_runtime.bootstrap.startup import BootstrapContext
 from agent_runtime.drivers.loader import load_and_activate_driver
 from agent_runtime.launcher import (
@@ -117,7 +117,7 @@ class ManagedProcessLauncherTest(unittest.TestCase):
 
             self.assertEqual(activation.status, "active")
             self.assertTrue(activation.hooks_active)
-            self.assertEqual(activation.details["phase"], "v5.12x")
+            self.assertEqual(activation.details["phase"], "v5.13h")
             self.assertEqual(activation.details["broadcast_mode"], "shadow-only")
             self.assertEqual(
                 activation.details["hook_mode"], "managed_import_patch"
@@ -191,7 +191,7 @@ class ManagedProcessLauncherTest(unittest.TestCase):
             self.assertTrue(status["framework_available"])
             self.assertEqual(status["driver_status"], "active")
             details = status["driver_details"]
-            self.assertEqual(details["phase"], "v5.12x")
+            self.assertEqual(details["phase"], "v5.13h")
             self.assertEqual(details["broadcast_mode"], "shadow-only")
             self.assertIn("autogen_agentchat", details["available_modules"])
 
@@ -278,6 +278,54 @@ class ManagedProcessLauncherTest(unittest.TestCase):
 
 
 class AgentLiteCliTest(unittest.TestCase):
+    def test_autogen_subcommand_defaults_to_full_takeover(self) -> None:
+        args = build_parser().parse_args(
+            ["autogen", "--cwd", ".", "--", sys.executable, "app.py"]
+        )
+
+        self.assertEqual(args.subcommand, "autogen")
+        self.assertEqual(args.rewrite, "all")
+        self.assertEqual(args.command, ["--", sys.executable, "app.py"])
+
+    def test_run_subcommand_keeps_explicit_framework_and_rewrite(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "run",
+                "--framework",
+                "autogen",
+                "--rewrite",
+                "team",
+                "--",
+                sys.executable,
+                "app.py",
+            ]
+        )
+
+        self.assertEqual(args.subcommand, "run")
+        self.assertEqual(args.framework, "autogen")
+        self.assertEqual(args.rewrite, "team")
+        self.assertEqual(args.command, ["--", sys.executable, "app.py"])
+
+    def test_monitor_subcommand_accepts_runs_and_data_dirs(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "monitor",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "9000",
+                "--runs-dir",
+                "runs",
+                "--data-dir",
+                "agentlite-data",
+            ]
+        )
+
+        self.assertEqual(args.subcommand, "monitor")
+        self.assertEqual(args.port, 9000)
+        self.assertEqual(str(args.runs_dir), "runs")
+        self.assertEqual(str(args.data_dir), "agentlite-data")
+
     def test_autogen_rewrite_all_sets_release_env_switches(self) -> None:
         env = build_managed_environment_overlay(
             framework="autogen",
@@ -291,6 +339,11 @@ class AgentLiteCliTest(unittest.TestCase):
         self.assertEqual(env["AGENTLITE_AUTOGEN_TEAM_REWRITE"], "1")
         self.assertEqual(env["AGENTLITE_AUTOGEN_HANDOFF_REWRITE"], "1")
         self.assertEqual(env["AGENTLITE_AUTOGEN_TOOL_SUMMARY_REWRITE"], "1")
+        self.assertEqual(env["AGENTLITE_AUTOGEN_CORE_CONTENT_REWRITE"], "1")
+        self.assertEqual(
+            env["AGENTLITE_AUTOGEN_CORE_RECEIVER_HYDRATE"],
+            "prompt-view",
+        )
 
     def test_broadcast_mode_overrides_rewrite_preset_for_diagnostics(self) -> None:
         env = build_managed_environment_overlay(
@@ -305,6 +358,11 @@ class AgentLiteCliTest(unittest.TestCase):
             "dry-run-rewrite",
         )
         self.assertEqual(env["AGENTLITE_AUTOGEN_TEAM_REWRITE"], "1")
+        self.assertEqual(env["AGENTLITE_AUTOGEN_CORE_CONTENT_REWRITE"], "1")
+        self.assertEqual(
+            env["AGENTLITE_AUTOGEN_CORE_RECEIVER_HYDRATE"],
+            "prompt-view",
+        )
 
     def test_rewrite_preset_is_ignored_for_non_autogen_frameworks(self) -> None:
         env = build_managed_environment_overlay(
@@ -316,6 +374,8 @@ class AgentLiteCliTest(unittest.TestCase):
 
         self.assertNotIn("AGENTLITE_AUTOGEN_BROADCAST_MODE", env)
         self.assertNotIn("AGENTLITE_AUTOGEN_TEAM_REWRITE", env)
+        self.assertNotIn("AGENTLITE_AUTOGEN_CORE_CONTENT_REWRITE", env)
+        self.assertNotIn("AGENTLITE_AUTOGEN_CORE_RECEIVER_HYDRATE", env)
 
 
 if __name__ == "__main__":

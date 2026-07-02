@@ -99,7 +99,7 @@ def main() -> int:
         output_dir = (
             PROJECT_ROOT
             / "runs"
-            / f"v5.12x-autogen-handoff-rewrite-{args.handoff_rewrite}-{stamp}"
+            / f"v5.13h-autogen-handoff-rewrite-{args.handoff_rewrite}-{stamp}"
         )
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -190,7 +190,7 @@ def run_guard_smoke(
     checks = {
         "target_returncode_zero": result.returncode == 0,
         "bootstrap_ok": bool(status.get("ok")),
-        "driver_phase_v5_12x": details.get("phase") == "v5.12x",
+        "driver_phase_v5_13h": details.get("phase") == "v5.13h",
         "handoff_rewrite_mode_matches_request": handoff_rewrite_enabled
         == (handoff_rewrite == "on"),
         "two_cases_recorded": len(cases) == 2,

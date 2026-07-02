@@ -24,30 +24,40 @@ REWRITE_ENV_BY_PRESET = {
         "AGENTLITE_AUTOGEN_TEAM_REWRITE": "0",
         "AGENTLITE_AUTOGEN_HANDOFF_REWRITE": "0",
         "AGENTLITE_AUTOGEN_TOOL_SUMMARY_REWRITE": "0",
+        "AGENTLITE_AUTOGEN_CORE_CONTENT_REWRITE": "0",
+        "AGENTLITE_AUTOGEN_CORE_RECEIVER_HYDRATE": "off",
     },
     "agent": {
         "AGENTLITE_AUTOGEN_BROADCAST_MODE": "real-rewrite",
         "AGENTLITE_AUTOGEN_TEAM_REWRITE": "0",
         "AGENTLITE_AUTOGEN_HANDOFF_REWRITE": "0",
         "AGENTLITE_AUTOGEN_TOOL_SUMMARY_REWRITE": "0",
+        "AGENTLITE_AUTOGEN_CORE_CONTENT_REWRITE": "0",
+        "AGENTLITE_AUTOGEN_CORE_RECEIVER_HYDRATE": "off",
     },
     "team": {
         "AGENTLITE_AUTOGEN_BROADCAST_MODE": "real-rewrite",
         "AGENTLITE_AUTOGEN_TEAM_REWRITE": "1",
         "AGENTLITE_AUTOGEN_HANDOFF_REWRITE": "0",
         "AGENTLITE_AUTOGEN_TOOL_SUMMARY_REWRITE": "0",
+        "AGENTLITE_AUTOGEN_CORE_CONTENT_REWRITE": "0",
+        "AGENTLITE_AUTOGEN_CORE_RECEIVER_HYDRATE": "off",
     },
     "non-text": {
         "AGENTLITE_AUTOGEN_BROADCAST_MODE": "real-rewrite",
         "AGENTLITE_AUTOGEN_TEAM_REWRITE": "0",
         "AGENTLITE_AUTOGEN_HANDOFF_REWRITE": "1",
         "AGENTLITE_AUTOGEN_TOOL_SUMMARY_REWRITE": "1",
+        "AGENTLITE_AUTOGEN_CORE_CONTENT_REWRITE": "0",
+        "AGENTLITE_AUTOGEN_CORE_RECEIVER_HYDRATE": "off",
     },
     "all": {
         "AGENTLITE_AUTOGEN_BROADCAST_MODE": "real-rewrite",
         "AGENTLITE_AUTOGEN_TEAM_REWRITE": "1",
         "AGENTLITE_AUTOGEN_HANDOFF_REWRITE": "1",
         "AGENTLITE_AUTOGEN_TOOL_SUMMARY_REWRITE": "1",
+        "AGENTLITE_AUTOGEN_CORE_CONTENT_REWRITE": "1",
+        "AGENTLITE_AUTOGEN_CORE_RECEIVER_HYDRATE": "prompt-view",
     },
 }
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
@@ -93,7 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
             "AutoGen rewrite preset. off=observe only; agent=rewrite simple "
             "agent text inputs; team=rewrite Team task entry; non-text=rewrite "
             "safe Handoff/ToolSummary content; all=enables every supported "
-            "v5.12 rewrite gate."
+            "AutoGen rewrite gate."
         ),
     )
     run_parser.add_argument(
@@ -103,6 +113,52 @@ def build_parser() -> argparse.ArgumentParser:
             "Low-level AutoGen broadcast mode override. Usually prefer "
             "--rewrite unless you need an exact diagnostic mode."
         ),
+    )
+
+    autogen_parser = subparsers.add_parser(
+        "autogen",
+        help=(
+            "Run a Python command under the AutoGen driver with the supported "
+            "rewrite gates enabled by default."
+        ),
+    )
+    autogen_parser.add_argument("--cwd", type=Path, default=Path.cwd())
+    autogen_parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path.home() / ".agentlite",
+    )
+    autogen_parser.add_argument("--runtime-endpoint")
+    autogen_parser.add_argument(
+        "--driver",
+        help="Override the built-in AutoGen driver with a Python module path.",
+    )
+    autogen_parser.add_argument(
+        "--no-strict-bootstrap",
+        action="store_true",
+        help="Allow the target process to continue if bootstrap fails.",
+    )
+    autogen_parser.add_argument(
+        "--rewrite",
+        choices=tuple(REWRITE_ENV_BY_PRESET),
+        default="all",
+        help=(
+            "AutoGen rewrite preset. Defaults to all for the shorthand "
+            "AutoGen takeover command."
+        ),
+    )
+    autogen_parser.add_argument(
+        "--broadcast-mode",
+        choices=BROADCAST_MODES,
+        help=(
+            "Low-level AutoGen broadcast mode override. Usually prefer "
+            "--rewrite unless you need an exact diagnostic mode."
+        ),
+    )
+    autogen_parser.add_argument(
+        "command",
+        nargs=argparse.REMAINDER,
+        help="Command to run; place it after '--'.",
     )
 
     doctor_parser = subparsers.add_parser(
@@ -120,6 +176,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print machine-readable diagnostics.",
     )
 
+    monitor_parser = subparsers.add_parser(
+        "monitor",
+        help="Run the local AgentLite workflow monitor web UI.",
+    )
+    monitor_parser.add_argument("--host", default="127.0.0.1")
+    monitor_parser.add_argument("--port", type=int, default=8765)
+    monitor_parser.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=Path.cwd() / "runs",
+        help="Directory containing benchmark run outputs.",
+    )
+    monitor_parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path.home() / ".agentlite",
+        help="AgentLite data directory containing managed launch sessions.",
+    )
+
     subparsers.add_parser("version", help="Print AgentLite package version.")
     return parser
 
@@ -131,14 +206,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.subcommand == "version":
         print(_package_version())
         return 0
-    if args.subcommand not in {"run", "start"}:
+    if args.subcommand == "monitor":
+        return _monitor(
+            host=args.host,
+            port=args.port,
+            runs_dir=args.runs_dir,
+            data_dir=args.data_dir,
+        )
+    if args.subcommand not in {"run", "start", "autogen"}:
         return 2
 
     command = list(args.command)
     if command and command[0] == "--":
         command = command[1:]
+    framework = _launch_framework(args)
     request = LaunchRequest(
-        framework=args.framework.strip().lower(),
+        framework=framework,
         command=command,
         cwd=args.cwd.expanduser().resolve(),
         data_dir=args.data_dir.expanduser().resolve(),
@@ -173,6 +256,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Driver hooks: {hook_state}")
     print(f"Session file: {result.status_file}")
     return result.returncode
+
+
+def _launch_framework(args: argparse.Namespace) -> str:
+    if args.subcommand == "autogen":
+        return "autogen"
+    return str(args.framework).strip().lower()
 
 
 def build_managed_environment_overlay(
@@ -222,6 +311,27 @@ def _doctor(*, framework: str | None, json_output: bool) -> int:
             detail = f" - {check['detail']}" if check.get("detail") else ""
             print(f"[{status}] {check['name']}{detail}")
     return 0 if ok else 1
+
+
+def _monitor(*, host: str, port: int, runs_dir: Path, data_dir: Path) -> int:
+    from web_monitor.server import main as monitor_main
+
+    previous_argv = sys.argv[:]
+    sys.argv = [
+        "agentlite monitor",
+        "--host",
+        host,
+        "--port",
+        str(port),
+        "--runs-dir",
+        str(runs_dir.expanduser().resolve()),
+        "--data-dir",
+        str(data_dir.expanduser().resolve()),
+    ]
+    try:
+        return monitor_main()
+    finally:
+        sys.argv = previous_argv
 
 
 def _doctor_checks(*, framework: str | None) -> list[dict[str, object]]:

@@ -22,5 +22,6 @@ class TraceLogger:
         }
         encoded = json.dumps(record, ensure_ascii=False) + "\n"
         with self._write_lock:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
             with self.path.open("a", encoding="utf-8") as fh:
                 fh.write(encoded)

@@ -14,7 +14,9 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TEAM_BENCHMARK_APP = PROJECT_ROOT / "examples" / "autogen_team_benchmark_app.py"
+MIXED_TEAM_CORE_APP = PROJECT_ROOT / "examples" / "autogen_mixed_team_core_smoke.py"
 PACKAGE_NAME = "multi-agent-collaboration-runtime"
+PACKAGE_VERSION = "0.5.13.dev0"
 WHEEL_PREFIX = "multi_agent_collaboration_runtime-"
 REQUIRED_WHEEL_MEMBERS = {
     "agent_runtime/__init__.py",
@@ -30,6 +32,11 @@ REQUIRED_WHEEL_MEMBERS = {
     "agent_runtime/drivers/autogen_shp.py",
     "agent_runtime/memory/memory_store.py",
     "agent_runtime/state/state_pool.py",
+    "web_monitor/__init__.py",
+    "web_monitor/parser.py",
+    "web_monitor/server.py",
+    "web_monitor/demo/index.html",
+    "web_monitor/demo/agentlite-live.js",
 }
 
 
@@ -174,7 +181,7 @@ def inspect_wheel(wheel_path: Path | None) -> dict[str, Any]:
     )
     metadata_checks = {
         "name": f"Name: {PACKAGE_NAME}" in metadata,
-        "version_post3": "Version: 0.5.12.post3" in metadata,
+        "version_dev0": f"Version: {PACKAGE_VERSION}" in metadata,
         "requires_tiktoken": "Requires-Dist: tiktoken" in metadata,
         "requires_python": "Requires-Python: >=3.11" in metadata,
     }
@@ -261,6 +268,11 @@ def verify_installed_wheel(
         ),
         run_installed_cli_rewrite_smoke(
             output_dir=output_dir / "installed_cli_rewrite",
+            python=python,
+            env=install_env,
+        ),
+        run_installed_cli_mixed_team_core_smoke(
+            output_dir=output_dir / "installed_cli_mixed_team_core",
             python=python,
             env=install_env,
         ),
@@ -352,6 +364,121 @@ def run_installed_cli_rewrite_smoke(
                     first.get("contains_receiver_prompt_views")
                 ),
                 "native_marker_count": int(first.get("native_marker_count", 0) or 0),
+            },
+        }
+    )
+    return step
+
+
+def run_installed_cli_mixed_team_core_smoke(
+    *,
+    output_dir: Path,
+    python: str,
+    env: dict[str, str],
+) -> dict[str, Any]:
+    _mkdir(output_dir)
+    app_output = output_dir / "autogen_mixed_team_core_installed_cli_output.json"
+    smoke_env = {
+        **env,
+        "AGENTLITE_AUTOGEN_MIXED_TEAM_CORE_OUTPUT": str(app_output),
+    }
+    step = run_command(
+        name="installed_agentlite_cli_mixed_team_core",
+        command=[
+            python,
+            "-m",
+            "agent_runtime.cli",
+            "autogen",
+            "--cwd",
+            str(output_dir),
+            "--data-dir",
+            str(output_dir / "agentlite"),
+            "--",
+            python,
+            str(MIXED_TEAM_CORE_APP),
+        ],
+        output_dir=output_dir,
+        cwd=output_dir,
+        env=smoke_env,
+    )
+    payload = _load_json(app_output)
+    bridge_seen = _first_list_dict(payload.get("bridge_seen_messages", []))
+    core_received = _first_list_dict(payload.get("core_received", []))
+    core_reply = _first_list_dict(payload.get("core_caller_replies", []))
+    final_message = _last_task_message(payload.get("task_result", {}))
+    mixed_ok = (
+        bool(payload.get("agentlite_active"))
+        and bool(bridge_seen.get("contains_team_rewrite_marker"))
+        and bool(bridge_seen.get("contains_state_pool_marker"))
+        and bool(bridge_seen.get("contains_broadcast_manifest"))
+        and bool(bridge_seen.get("contains_receiver_prompt_views"))
+        and not bool(bridge_seen.get("contains_team_native_marker"))
+        and bool(core_received.get("agentlite_prompt_view"))
+        and not bool(core_received.get("contains_core_request_native_marker"))
+        and not bool(core_received.get("contains_core_rewrite_marker"))
+        and bool(core_reply.get("agentlite_prompt_view"))
+        and not bool(core_reply.get("contains_core_reply_native_marker"))
+        and not bool(core_reply.get("contains_core_rewrite_marker"))
+        and bool(final_message.get("contains_done_token"))
+        and not bool(final_message.get("contains_team_rewrite_marker"))
+        and not bool(final_message.get("contains_state_pool_marker"))
+        and not bool(final_message.get("contains_broadcast_manifest"))
+    )
+    step.update(
+        {
+            "passed": bool(step.get("passed")) and mixed_ok,
+            "app_output_path": str(app_output),
+            "agentlite_active": bool(payload.get("agentlite_active")),
+            "bridge_seen_first_message": {
+                "contains_team_rewrite_marker": bool(
+                    bridge_seen.get("contains_team_rewrite_marker")
+                ),
+                "contains_state_pool_marker": bool(
+                    bridge_seen.get("contains_state_pool_marker")
+                ),
+                "contains_broadcast_manifest": bool(
+                    bridge_seen.get("contains_broadcast_manifest")
+                ),
+                "contains_receiver_prompt_views": bool(
+                    bridge_seen.get("contains_receiver_prompt_views")
+                ),
+                "contains_team_native_marker": bool(
+                    bridge_seen.get("contains_team_native_marker")
+                ),
+            },
+            "core_received_first": {
+                "message_type": core_received.get("message_type", ""),
+                "agentlite_prompt_view": bool(
+                    core_received.get("agentlite_prompt_view")
+                ),
+                "contains_core_request_native_marker": bool(
+                    core_received.get("contains_core_request_native_marker")
+                ),
+                "contains_core_rewrite_marker": bool(
+                    core_received.get("contains_core_rewrite_marker")
+                ),
+            },
+            "core_caller_reply_first": {
+                "message_type": core_reply.get("message_type", ""),
+                "agentlite_prompt_view": bool(core_reply.get("agentlite_prompt_view")),
+                "contains_core_reply_native_marker": bool(
+                    core_reply.get("contains_core_reply_native_marker")
+                ),
+                "contains_core_rewrite_marker": bool(
+                    core_reply.get("contains_core_rewrite_marker")
+                ),
+            },
+            "final_message": {
+                "contains_done_token": bool(final_message.get("contains_done_token")),
+                "contains_team_rewrite_marker": bool(
+                    final_message.get("contains_team_rewrite_marker")
+                ),
+                "contains_state_pool_marker": bool(
+                    final_message.get("contains_state_pool_marker")
+                ),
+                "contains_broadcast_manifest": bool(
+                    final_message.get("contains_broadcast_manifest")
+                ),
             },
         }
     )
@@ -484,6 +611,21 @@ def _first_stream_item(payload: dict[str, Any]) -> dict[str, Any]:
     items = payload.get("stream_items", []) if isinstance(payload, dict) else []
     first = items[0] if isinstance(items, list) and items else {}
     return first if isinstance(first, dict) else {}
+
+
+def _first_list_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, list) and value and isinstance(value[0], dict):
+        return value[0]
+    return {}
+
+
+def _last_task_message(task_result: Any) -> dict[str, Any]:
+    if not isinstance(task_result, dict):
+        return {}
+    messages = task_result.get("messages", [])
+    if isinstance(messages, list) and messages and isinstance(messages[-1], dict):
+        return messages[-1]
+    return {}
 
 
 def _preview(text: str, limit: int = 600) -> str:

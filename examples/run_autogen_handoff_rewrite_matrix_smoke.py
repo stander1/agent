@@ -31,7 +31,7 @@ from run_autogen_handoff_tool_rewrite_guard_smoke import (  # noqa: E402
 )
 from run_autogen_native_smoke import _missing_modules, _read_trace_events  # noqa: E402
 
-EXPECTED_PHASE = "v5.12x"
+EXPECTED_PHASE = "v5.13h"
 
 
 def parse_args() -> argparse.Namespace:
@@ -70,7 +70,7 @@ def main() -> int:
     output_dir = args.output_dir
     if output_dir is None:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        output_dir = PROJECT_ROOT / "runs" / f"v5.12x-autogen-handoff-matrix-{stamp}"
+        output_dir = PROJECT_ROOT / "runs" / f"v5.13h-autogen-handoff-matrix-{stamp}"
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -205,7 +205,7 @@ def build_matrix_report(
         "all_bootstrap_ok": all(
             bool(report.get("bootstrap_ok")) for report in scenario_reports
         ),
-        "all_driver_phase_v5_12x": all(
+        "all_driver_phase_v5_13h": all(
             report.get("driver_phase") == EXPECTED_PHASE for report in scenario_reports
         ),
         "off_switch_keeps_native_handoff": (

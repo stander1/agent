@@ -27,7 +27,7 @@ from run_autogen_broadcast_shadow_smoke import (  # noqa: E402
 )
 from run_autogen_native_smoke import _missing_modules, _read_trace_events  # noqa: E402
 
-EXPECTED_PHASE = "v5.12x"
+EXPECTED_PHASE = "v5.13h"
 EXPECTED_RECEIVERS = {"planner", "writer", "reviewer"}
 USER_SCRIPT = PROJECT_ROOT / "examples" / "autogen_team_rewrite_smoke.py"
 
@@ -67,7 +67,7 @@ def main() -> int:
     output_dir = args.output_dir
     if output_dir is None:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        output_dir = PROJECT_ROOT / "runs" / f"v5.12x-autogen-team-rewrite-{stamp}"
+        output_dir = PROJECT_ROOT / "runs" / f"v5.13h-autogen-team-rewrite-{stamp}"
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -234,7 +234,7 @@ def build_checks(
         "target_returncode_zero": returncode == 0,
         "bootstrap_ok": bool(status.get("ok")),
         "hooks_active": bool(status.get("hooks_active")),
-        "driver_phase_v5_12x": details.get("phase") == EXPECTED_PHASE,
+        "driver_phase_v5_13h": details.get("phase") == EXPECTED_PHASE,
         "real_rewrite_mode_enabled": details.get("broadcast_mode") == "real-rewrite",
         "team_rewrite_enabled": bool(details.get("team_rewrite_enabled")),
         "user_script_does_not_import_agentlite": (

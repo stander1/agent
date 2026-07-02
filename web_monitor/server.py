@@ -18,11 +18,17 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from agent_runtime.core.models import Mode
 from agent_runtime.eval.benchmark_runner import run_v0_benchmark
-from web_monitor.parser import build_run_snapshot, list_runs
+from web_monitor.parser import (
+    build_run_snapshot,
+    build_session_snapshot,
+    list_runs,
+    list_sessions,
+)
 
 
 RUNS_DIR = PROJECT_ROOT / "runs"
-STATIC_DIR = PROJECT_ROOT / "web_monitor" / "static"
+AGENTLITE_DATA_DIR = Path.home() / ".agentlite"
+DEMO_DIR = PROJECT_ROOT / "web_monitor" / "demo"
 
 
 class ExperimentRegistry:
@@ -125,6 +131,9 @@ class MonitorHandler(SimpleHTTPRequestHandler):
         if path == "/api/runs":
             self._json({"runs": list_runs(RUNS_DIR)})
             return
+        if path == "/api/sessions":
+            self._json({"sessions": list_sessions(AGENTLITE_DATA_DIR)})
+            return
         if path.startswith("/api/runs/") and path.endswith("/snapshot"):
             run_id = unquote(path[len("/api/runs/") : -len("/snapshot")].strip("/"))
             run_dir = _safe_run_dir(run_id)
@@ -132,6 +141,16 @@ class MonitorHandler(SimpleHTTPRequestHandler):
                 self._json({"error": "run not found"}, HTTPStatus.NOT_FOUND)
                 return
             self._json(build_run_snapshot(run_dir, run_id=run_id))
+            return
+        if path.startswith("/api/sessions/") and path.endswith("/snapshot"):
+            session_id = unquote(
+                path[len("/api/sessions/") : -len("/snapshot")].strip("/")
+            )
+            session_dir = _safe_session_dir(session_id)
+            if session_dir is None:
+                self._json({"error": "session not found"}, HTTPStatus.NOT_FOUND)
+                return
+            self._json(build_session_snapshot(session_dir, session_id=session_id))
             return
         if path.startswith("/api/experiments/") and path.endswith("/snapshot"):
             experiment_id = unquote(
@@ -175,15 +194,15 @@ class MonitorHandler(SimpleHTTPRequestHandler):
 
     def _static_get(self, path: str) -> None:
         if path in {"/", "/index.html"}:
-            target = STATIC_DIR / "index.html"
+            target = DEMO_DIR / "index.html"
         elif path.startswith("/static/"):
-            target = STATIC_DIR / path[len("/static/") :]
+            target = DEMO_DIR / path[len("/static/") :]
         else:
             self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
             return
         try:
             resolved = target.resolve()
-            resolved.relative_to(STATIC_DIR.resolve())
+            resolved.relative_to(DEMO_DIR.resolve())
         except ValueError:
             self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
             return
@@ -222,13 +241,21 @@ class MonitorHandler(SimpleHTTPRequestHandler):
 
 
 def main() -> int:
+    global RUNS_DIR, AGENTLITE_DATA_DIR
     parser = argparse.ArgumentParser(description="Run the multi-agent workflow monitor.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--runs-dir", type=Path, default=RUNS_DIR)
+    parser.add_argument("--data-dir", type=Path, default=AGENTLITE_DATA_DIR)
     args = parser.parse_args()
+    RUNS_DIR = args.runs_dir.expanduser().resolve()
+    AGENTLITE_DATA_DIR = args.data_dir.expanduser().resolve()
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    AGENTLITE_DATA_DIR.mkdir(parents=True, exist_ok=True)
     server = ThreadingHTTPServer((args.host, args.port), MonitorHandler)
     print(f"Workflow monitor running at http://{args.host}:{args.port}")
+    print(f"Runs directory: {RUNS_DIR}")
+    print(f"AgentLite data directory: {AGENTLITE_DATA_DIR}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -247,6 +274,17 @@ def _safe_run_dir(run_id: str) -> Path | None:
     except ValueError:
         return None
     return run_dir if run_dir.exists() and run_dir.is_dir() else None
+
+
+def _safe_session_dir(session_id: str) -> Path | None:
+    if not session_id or "/" in session_id or "\\" in session_id:
+        return None
+    session_dir = (AGENTLITE_DATA_DIR / "sessions" / session_id).resolve()
+    try:
+        session_dir.relative_to((AGENTLITE_DATA_DIR / "sessions").resolve())
+    except ValueError:
+        return None
+    return session_dir if session_dir.exists() and session_dir.is_dir() else None
 
 
 def _content_type(path: Path) -> str:
