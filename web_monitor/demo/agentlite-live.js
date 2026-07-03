@@ -11,6 +11,8 @@
     agents: 0,
     duration: 0,
     tokens: 0,
+    baselineTokens: 0,
+    costBreakdown: {},
     memoryHits: 0,
     startedAt: "--",
     alerts: 0,
@@ -73,9 +75,14 @@
         <div class="panel"><div class="panel-head"><span class="panel-title">任务状态</span><span class="panel-meta">共 ${total} 个</span></div><div class="panel-body"><div class="donut-row"><div class="donut"><div class="donut-center">${success}<small>成功</small></div></div><div class="legend"><div class="legend-item"><span class="legend-dot" style="background:var(--green)"></span>成功<strong>${success}</strong></div><div class="legend-item"><span class="legend-dot" style="background:var(--amber)"></span>运行中<strong>${running}</strong></div><div class="legend-item"><span class="legend-dot" style="background:var(--red)"></span>失败<strong>${failed}</strong></div><div class="legend-item"><span class="legend-dot" style="background:#9aa7b0"></span>其他<strong>${other}</strong></div></div></div></div></div>
         <div class="panel"><div class="panel-head"><span class="panel-title">Agent 调用排行</span><span class="panel-meta">调用量 / 状态</span></div><div class="panel-body"><div class="bar-list">${agents.length ? agents.map((agent) => `<div class="bar-row"><span>${esc(String(agent.role || agent.id).replace("Agent",""))}</span><div class="bar-track"><div class="bar-fill" style="width:${Math.min(100, Number(agent.calls || 0) * 20)}%"></div></div><span>${agent.calls || 0}</span></div>`).join("") : `<div class="empty-hint">等待 Agent 轨迹</div>`}</div></div></div>
         <div class="panel"><div class="panel-head"><span class="panel-title">状态池占用</span><span class="panel-meta">${states.length} objects · ${formatBytes(totalStateBytes())}</span></div><div class="panel-body">${tierTrack()}<div class="legend">${stateTierItems()}</div></div></div>
+        <div class="panel"><div class="panel-head"><span class="panel-title">Token 成本拆解</span><span class="panel-meta">${esc(selectedTask().id)}</span></div><div class="panel-body">${tokenCostPanel(selectedTask())}</div></div>
         <div class="panel"><div class="panel-head"><span class="panel-title">最近告警</span><button class="ghost-btn" data-nav="alerts">全部告警</button></div><div class="dense-list">${alerts.length ? alerts.slice(0,4).map((alert) => denseAlert(alert)).join("") : `<div class="empty-hint">暂无异常事件</div>`}</div></div>
-        <div class="panel span-2"><div class="panel-head"><span class="panel-title">最近任务</span><button class="ghost-btn" data-nav="tasks">任务列表</button></div><div class="table-wrap" style="border:0;border-radius:0"><table style="min-width:760px"><thead><tr><th>任务</th><th>模式</th><th>状态</th><th>耗时</th><th>Token</th><th>开始时间</th></tr></thead><tbody>${tasks.length ? tasks.slice(0,5).map((task) => `<tr data-task-id="${task.id}"><td><div class="question-cell truncate">${esc(task.question)}</div><div class="dense-sub mono">${task.id}</div></td><td><span class="mode-tag ${task.mode.startsWith("baseline") ? "baseline" : ""}">${task.mode}</span></td><td>${statusPill(task.status)}</td><td>${task.duration ? task.duration + "s" : "--"}</td><td>${fmtTokens(task.tokens)}</td><td>${task.startedAt}</td></tr>`).join("") : `<tr><td colspan="6" style="text-align:center;color:var(--muted);height:100px">等待真实运行数据</td></tr>`}</tbody></table></div></div>
+        <div class="panel span-2"><div class="panel-head"><span class="panel-title">最近任务</span><button class="ghost-btn" data-nav="tasks">任务列表</button></div><div class="table-wrap" style="border:0;border-radius:0"><table style="min-width:760px"><thead><tr><th>任务</th><th>模式</th><th>状态</th><th>耗时</th><th>Token</th><th>开始时间</th></tr></thead><tbody>${tasks.length ? tasks.slice(0,5).map((task) => `<tr data-task-id="${task.id}"><td><div class="question-cell truncate">${esc(task.question)}</div><div class="dense-sub mono">${task.id}</div></td><td><span class="mode-tag ${task.mode.startsWith("baseline") ? "baseline" : ""}">${task.mode}</span></td><td>${statusPill(task.status)}</td><td>${task.duration ? task.duration + "s" : "--"}</td><td>${tokenCell(task)}</td><td>${task.startedAt}</td></tr>`).join("") : `<tr><td colspan="6" style="text-align:center;color:var(--muted);height:100px">等待真实运行数据</td></tr>`}</tbody></table></div></div>
       </div></section>`;
+  };
+
+  taskRow = function (task) {
+    return `<tr data-task-id="${task.id}"><td class="mono">${task.id}</td><td><div class="question-cell truncate" title="${esc(task.question)}">${esc(task.question)}</div><div class="dense-sub">${task.group}</div></td><td><span class="mode-tag ${task.mode.startsWith("baseline") ? "baseline" : ""}">${task.mode}</span></td><td>${statusPill(task.status)}</td><td><div class="progress"><span style="width:${task.progress}%"></span></div><div class="dense-sub">${task.progress}%</div></td><td>${task.agents}</td><td>${task.duration ? task.duration + "s" : "--"}</td><td>${tokenCell(task)}</td><td>${task.memoryHits}</td><td>${task.startedAt}</td></tr>`;
   };
 
   renderWorkflow = function () {
@@ -83,7 +90,7 @@
     const runtime = appState.workflowMode === "runtime_lite";
     const nodes = runtime ? runtimeNodes : baselineNodes;
     return `<section class="workflow-view"><div class="workflow-header"><div class="breadcrumb"><button data-nav="tasks">任务实例</button> / <span class="mono">${task.id}</span></div><div class="workflow-title-row"><div><div class="workflow-question">${esc(task.question)}</div><div class="workflow-meta"><span>状态 ${statusPill(task.status)}</span><span>耗时<strong>${task.duration || "--"}s</strong></span><span>Token<strong>${fmtTokens(task.tokens)}</strong></span><span>Agent<strong>${task.agents}</strong></span><span>记忆命中<strong>${task.memoryHits}</strong></span></div></div><div class="segment"><button data-mode="runtime_lite" class="${runtime ? "active" : ""}">runtime_lite</button><button data-mode="baseline_text" class="${!runtime ? "active" : ""}">baseline_text</button></div></div></div>
-      <div class="workflow-shell"><aside class="workflow-aside"><div class="aside-title">Agent 执行链</div>${nodes.filter((node) => node.type === "agent").map((node) => `<button class="aside-agent" data-node-id="${node.id}"><span class="mini-status"></span><span><strong>${esc(node.label)}</strong><br><span class="dense-sub">${esc(node.metrics || "等待执行")}</span></span></button>`).join("") || `<div class="empty-hint">等待 Agent 轨迹</div>`}<div class="aside-title" style="margin-top:14px">资源池快照</div>${asideStateStats()}</aside>
+      <div class="workflow-shell"><aside class="workflow-aside"><div class="aside-title">Agent 执行链</div>${nodes.filter((node) => node.type === "agent").map((node) => `<button class="aside-agent" data-node-id="${node.id}"><span class="mini-status"></span><span><strong>${esc(node.label)}</strong><br><span class="dense-sub">${esc(node.metrics || "等待执行")}</span></span></button>`).join("") || `<div class="empty-hint">等待 Agent 轨迹</div>`}<div class="aside-title" style="margin-top:14px">Token 成本</div>${tokenCostAside(task)}<div class="aside-title" style="margin-top:14px">资源池快照</div>${asideStateStats()}</aside>
       <div class="canvas-wrap"><div class="workflow-viewport" id="workflowViewport"><div class="workflow-stage" id="workflowStage"><svg class="edge-layer" id="wfEdges"><defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#6c98ab"/></marker></defs></svg>${nodes.map(renderWorkflowNode).join("")}</div></div><div class="canvas-controls"><button data-canvas="zoom-out" title="缩小">−</button><button data-canvas="zoom-in" title="放大">＋</button><button data-canvas="fit" title="适配画布">□</button><button data-canvas="reset" title="重置">↺</button></div><div class="canvas-legend"><span><i class="legend-shape" style="border-color:var(--teal);background:var(--teal-soft)"></i>Agent</span><span><i class="legend-shape" style="border-color:var(--blue);background:var(--blue-soft)"></i>Message</span><span><i class="legend-shape" style="border-color:var(--amber);background:var(--amber-soft)"></i>State</span><span><i class="legend-shape" style="border-color:var(--purple);background:var(--purple-soft)"></i>Memory</span></div><div class="minimap">${nodes.map((node) => `<i class="minimap-node ${node.type}" style="left:${node.x * .115}px;top:${node.y * .115}px;width:${node.type === "agent" ? 25 : 16}px;height:${node.type === "agent" ? 10 : 7}px"></i>`).join("")}</div></div></div></section>`;
   };
 
@@ -173,11 +180,11 @@
     const baseline = snapshot.modes?.baseline_text || emptyMode();
     const runtimeSummary = modeSummary(snapshot, "runtime_lite");
     const baselineSummary = modeSummary(snapshot, "baseline_text");
+    const snapshotTokenSummary = snapshot.token_summary || snapshot.summary?.token_summary || tokenSummaryFromModes(runtimeSummary, baselineSummary);
+    applyTokenSummaryToTask(task, snapshotTokenSummary);
     task.status = normalizeStatus(snapshot.status);
     task.agents = runtime.agents.length || baseline.agents.length || task.agents;
     task.duration = seconds(runtime.finished?.latency_ms || runtimeSummary.latency_ms || baseline.finished?.latency_ms || baselineSummary.latency_ms);
-    task.tokens = runtimeSummary.end_to_end_collaboration_tokens || runtimeSummary.llm_total_tokens || runtimeSummary.prompt_tokens || task.tokens || 0;
-    task.baselineTokens = baselineSummary.end_to_end_collaboration_tokens || baselineSummary.llm_total_tokens || baselineSummary.prompt_tokens || 0;
     task.memoryHits = runtimeSummary.useful_memory_hit_count || runtimeSummary.memory_hit_count || countRefs(runtime.messages, "memory_refs");
     task.progress = task.status === "success" ? 100 : task.status === "failed" ? Math.max(10, task.progress || 10) : Math.min(95, 20 + runtime.timeline.length * 4);
     task.alerts = (snapshot.errors || []).length;
@@ -212,7 +219,7 @@
   function taskFromSession(session) {
     const updatedAt = Number(session.updated_at || 0);
     const status = session.driver_status || (session.hooks_active ? "active" : "unknown");
-    return {
+    const task = {
       id: `session:${session.session_id}`,
       question: `AutoGen 接管会话：${session.framework || "unknown"} / ${session.driver || "driver"}`,
       group: "agentlite autogen",
@@ -229,11 +236,12 @@
       sourceId: session.session_id,
       updatedAt
     };
+    return applyTokenSummaryToTask(task, session.token_summary);
   }
 
   function taskFromRun(run) {
     const updatedAt = Number(run.updated_at || 0);
-    return {
+    const task = {
       id: `run:${run.run_id}`,
       question: `实验输出：${run.run_id}`,
       group: "benchmark run",
@@ -250,6 +258,131 @@
       sourceId: run.run_id,
       updatedAt
     };
+    return applyTokenSummaryToTask(task, run.token_summary);
+  }
+
+  function applyTokenSummaryToTask(task, rawSummary) {
+    const summary = normalizeTokenSummary(rawSummary);
+    task.costBreakdown = summary;
+    task.tokens = summary.end_to_end_collaboration_tokens || task.tokens || 0;
+    task.baselineTokens = summary.native_baseline_tokens || task.baselineTokens || 0;
+    task.tokenSavings = summary.token_savings || 0;
+    task.tokenSavingsRatio = summary.token_savings_ratio || 0;
+    return task;
+  }
+
+  function normalizeTokenSummary(rawSummary) {
+    const raw = rawSummary || {};
+    const direct = number(raw.direct_message_tokens);
+    const promptView = number(raw.prompt_view_tokens);
+    const retrieved = number(raw.retrieved_memory_tokens);
+    const control = number(raw.control_llm_tokens);
+    const retry = number(raw.retry_tokens);
+    const llmPrompt = number(raw.llm_prompt_tokens);
+    const llmCompletion = number(raw.llm_completion_tokens);
+    const llmTotal = number(raw.llm_total_tokens);
+    let total = number(raw.end_to_end_collaboration_tokens || raw.runtime_tokens);
+    if (!total) {
+      total = direct + promptView + retrieved + control + retry + llmTotal;
+    }
+    const baseline = number(raw.native_baseline_tokens);
+    const savings = baseline ? baseline - total : number(raw.token_savings);
+    return {
+      direct_message_tokens: direct,
+      prompt_view_tokens: promptView,
+      retrieved_memory_tokens: retrieved,
+      control_llm_tokens: control,
+      retry_tokens: retry,
+      llm_prompt_tokens: llmPrompt,
+      llm_completion_tokens: llmCompletion,
+      llm_total_tokens: llmTotal,
+      end_to_end_collaboration_tokens: total,
+      native_baseline_tokens: baseline,
+      runtime_tokens: total,
+      token_savings: savings,
+      token_savings_ratio: baseline ? savings / baseline : number(raw.token_savings_ratio),
+      source: raw.source || ""
+    };
+  }
+
+  function tokenSummaryFromModes(runtimeSummary, baselineSummary) {
+    const runtime = normalizeTokenSummary({
+      direct_message_tokens: runtimeSummary.direct_text_tokens,
+      prompt_view_tokens: runtimeSummary.prompt_view_tokens,
+      retrieved_memory_tokens: runtimeSummary.retrieved_memory_tokens,
+      control_llm_tokens: runtimeSummary.control_llm_tokens,
+      retry_tokens: runtimeSummary.retry_tokens,
+      llm_prompt_tokens: runtimeSummary.llm_prompt_tokens,
+      llm_completion_tokens: runtimeSummary.llm_completion_tokens,
+      llm_total_tokens: runtimeSummary.llm_total_tokens,
+      end_to_end_collaboration_tokens: runtimeSummary.end_to_end_collaboration_tokens || runtimeSummary.llm_total_tokens || runtimeSummary.prompt_tokens
+    });
+    const baseline = normalizeTokenSummary({
+      end_to_end_collaboration_tokens: baselineSummary.end_to_end_collaboration_tokens || baselineSummary.llm_total_tokens || baselineSummary.prompt_tokens,
+      direct_message_tokens: baselineSummary.direct_text_tokens,
+      prompt_view_tokens: baselineSummary.prompt_view_tokens,
+      retrieved_memory_tokens: baselineSummary.retrieved_memory_tokens,
+      control_llm_tokens: baselineSummary.control_llm_tokens,
+      retry_tokens: baselineSummary.retry_tokens,
+      llm_total_tokens: baselineSummary.llm_total_tokens
+    });
+    runtime.native_baseline_tokens = baseline.end_to_end_collaboration_tokens;
+    runtime.token_savings = baseline.end_to_end_collaboration_tokens - runtime.end_to_end_collaboration_tokens;
+    runtime.token_savings_ratio = baseline.end_to_end_collaboration_tokens
+      ? runtime.token_savings / baseline.end_to_end_collaboration_tokens
+      : 0;
+    runtime.source = "snapshot_by_mode";
+    return runtime;
+  }
+
+  function tokenCell(task) {
+    const cost = normalizeTokenSummary(task.costBreakdown);
+    const total = cost.end_to_end_collaboration_tokens || task.tokens || 0;
+    const baseline = cost.native_baseline_tokens || task.baselineTokens || 0;
+    const ratio = baseline ? Math.max(0, (1 - total / baseline) * 100) : 0;
+    const subline = baseline
+      ? `baseline ${fmtTokens(baseline)} · 省 ${ratio.toFixed(1)}%`
+      : cost.source === "autogen_trace"
+        ? "AutoGen trace 聚合"
+        : "等待成本数据";
+    return `<div><strong>${fmtTokens(total)}</strong><div class="dense-sub">${subline}</div></div>`;
+  }
+
+  function tokenCostPanel(task) {
+    const cost = normalizeTokenSummary(task.costBreakdown);
+    if (!cost.end_to_end_collaboration_tokens && !cost.native_baseline_tokens) {
+      return `<div class="empty-hint">等待 Token 成本数据</div>`;
+    }
+    return `<div class="legend">${tokenCostRows(cost).join("")}</div>`;
+  }
+
+  function tokenCostAside(task) {
+    const cost = normalizeTokenSummary(task.costBreakdown);
+    return [
+      `<div class="aside-stat"><span>端到端</span><strong>${fmtTokens(cost.end_to_end_collaboration_tokens)}</strong></div>`,
+      `<div class="aside-stat"><span>原生基线</span><strong>${cost.native_baseline_tokens ? fmtTokens(cost.native_baseline_tokens) : "--"}</strong></div>`,
+      `<div class="aside-stat"><span>节省率</span><strong>${cost.native_baseline_tokens ? `${Math.max(0, cost.token_savings_ratio * 100).toFixed(1)}%` : "--"}</strong></div>`,
+      `<div class="aside-stat"><span>Prompt View</span><strong>${fmtTokens(cost.prompt_view_tokens)}</strong></div>`
+    ].join("");
+  }
+
+  function tokenCostRows(cost) {
+    const rows = [
+      ["端到端总成本", cost.end_to_end_collaboration_tokens],
+      ["原生文本基线", cost.native_baseline_tokens],
+      ["直接消息", cost.direct_message_tokens],
+      ["Prompt View", cost.prompt_view_tokens],
+      ["记忆读取", cost.retrieved_memory_tokens],
+      ["控制模块", cost.control_llm_tokens],
+      ["重试", cost.retry_tokens],
+      ["LLM usage", cost.llm_total_tokens]
+    ];
+    return rows.map(([label, value]) => `<div class="legend-item">${label}<strong>${fmtTokens(value)}</strong></div>`);
+  }
+
+  function number(value) {
+    const parsed = Number(value || 0);
+    return Number.isFinite(parsed) ? parsed : 0;
   }
 
   function mapAgents(items) {

@@ -27,6 +27,7 @@ def build_run_snapshot(
         "output_dir": str(run_dir),
         "modes": {mode: _empty_mode_snapshot() for mode in DEFAULT_MODES},
         "summary": summary,
+        "token_summary": _summary_token_summary(summary),
         "errors": errors or [],
     }
 
@@ -131,6 +132,7 @@ def list_runs(runs_dir: Path) -> list[dict[str, Any]]:
         summary_path = path / "summary.json"
         if not trace_path.exists() and not summary_path.exists():
             continue
+        summary = _read_json(summary_path, default={})
         runs.append(
             {
                 "run_id": path.name,
@@ -139,6 +141,7 @@ def list_runs(runs_dir: Path) -> list[dict[str, Any]]:
                 "has_summary": summary_path.exists(),
                 "has_pool_snapshot": (path / "pool_snapshot_latest.json").exists(),
                 "status": _infer_status(path),
+                "token_summary": _summary_token_summary(summary),
                 "updated_at": path.stat().st_mtime,
             }
         )
@@ -161,6 +164,7 @@ def list_sessions(data_dir: Path) -> list[dict[str, Any]]:
             continue
         status = _read_json(status_path, default={})
         launch = _read_json(launch_path, default={})
+        trace_events = _read_jsonl(trace_path)
         updated_at = max(
             item.stat().st_mtime
             for item in (path, status_path, launch_path, trace_path)
@@ -177,6 +181,7 @@ def list_sessions(data_dir: Path) -> list[dict[str, Any]]:
                 "hooks_active": bool(status.get("hooks_active")),
                 "has_trace": trace_path.exists(),
                 "has_status": status_path.exists(),
+                "token_summary": _autogen_token_summary(trace_events),
                 "updated_at": updated_at,
             }
         )
@@ -204,6 +209,7 @@ def build_session_snapshot(
     }
     state_pool: list[dict[str, Any]] = []
     event_counts: dict[str, int] = {}
+    token_summary = _autogen_token_summary(trace_events)
     for event in trace_events:
         event_type = str(event.get("event_type", ""))
         event_counts[event_type] = event_counts.get(event_type, 0) + 1
@@ -245,11 +251,207 @@ def build_session_snapshot(
             "hooks_active": bool(status.get("hooks_active")),
             "event_counts": event_counts,
             "trace_path": str(trace_path) if trace_path.exists() else "",
+            "token_summary": token_summary,
+            "by_mode": {
+                "runtime_lite": token_summary,
+                "baseline_text": {
+                    "end_to_end_collaboration_tokens": token_summary.get(
+                        "native_baseline_tokens", 0
+                    ),
+                    "direct_message_tokens": token_summary.get(
+                        "native_baseline_tokens", 0
+                    ),
+                    "prompt_view_tokens": 0,
+                    "retrieved_memory_tokens": 0,
+                    "control_llm_tokens": 0,
+                    "retry_tokens": 0,
+                    "llm_prompt_tokens": 0,
+                    "llm_completion_tokens": 0,
+                    "llm_total_tokens": 0,
+                },
+            },
         },
+        "token_summary": token_summary,
         "errors": [status.get("error", "")] if status.get("error") else [],
         "bootstrap_status": status,
         "launch": launch,
     }
+
+
+def _summary_token_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    by_mode = summary.get("by_mode") if isinstance(summary, dict) else {}
+    runtime = _mode_token_breakdown(
+        by_mode.get("runtime_lite", {}) if isinstance(by_mode, dict) else {}
+    )
+    baseline = _mode_token_breakdown(
+        by_mode.get("baseline_text", {}) if isinstance(by_mode, dict) else {}
+    )
+    native_baseline = baseline["end_to_end_collaboration_tokens"]
+    runtime_total = runtime["end_to_end_collaboration_tokens"]
+    savings = native_baseline - runtime_total if native_baseline else 0
+    return {
+        **runtime,
+        "native_baseline_tokens": native_baseline,
+        "runtime_tokens": runtime_total,
+        "token_savings": savings,
+        "token_savings_ratio": round(savings / native_baseline, 6)
+        if native_baseline > 0
+        else 0.0,
+        "baseline": baseline,
+        "runtime": runtime,
+        "source": "summary_json",
+    }
+
+
+def _mode_token_breakdown(row: dict[str, Any]) -> dict[str, int]:
+    direct = _int(row.get("direct_text_tokens"))
+    prompt_view = _int(row.get("prompt_view_tokens"))
+    retrieved = _int(row.get("retrieved_memory_tokens"))
+    control = _int(row.get("control_llm_tokens"))
+    retry = _int(row.get("retry_tokens"))
+    llm_prompt = _int(row.get("llm_prompt_tokens"))
+    llm_completion = _int(row.get("llm_completion_tokens"))
+    llm_total = _int(row.get("llm_total_tokens"))
+    total = _int(row.get("end_to_end_collaboration_tokens"))
+    if total <= 0:
+        total = direct + prompt_view + retrieved + control + retry + llm_total
+    if total <= 0:
+        total = _int(row.get("prompt_tokens")) or llm_total
+    return {
+        "direct_message_tokens": direct,
+        "prompt_view_tokens": prompt_view,
+        "retrieved_memory_tokens": retrieved,
+        "control_llm_tokens": control,
+        "retry_tokens": retry,
+        "llm_prompt_tokens": llm_prompt,
+        "llm_completion_tokens": llm_completion,
+        "llm_total_tokens": llm_total,
+        "end_to_end_collaboration_tokens": total,
+    }
+
+
+def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]:
+    breakdown = {
+        "direct_message_tokens": 0,
+        "prompt_view_tokens": 0,
+        "retrieved_memory_tokens": 0,
+        "control_llm_tokens": 0,
+        "retry_tokens": 0,
+        "llm_prompt_tokens": 0,
+        "llm_completion_tokens": 0,
+        "llm_total_tokens": 0,
+        "end_to_end_collaboration_tokens": 0,
+        "native_baseline_tokens": 0,
+        "runtime_tokens": 0,
+        "token_savings": 0,
+        "token_savings_ratio": 0.0,
+        "event_count": 0,
+        "source": "autogen_trace",
+    }
+    seen_cost_events = 0
+    for event in trace_events:
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        native, runtime, direct, prompt_view = _autogen_event_cost(payload)
+        if native <= 0 and runtime <= 0:
+            continue
+        seen_cost_events += 1
+        breakdown["native_baseline_tokens"] += native
+        breakdown["direct_message_tokens"] += direct
+        breakdown["prompt_view_tokens"] += prompt_view
+        if runtime > 0:
+            breakdown["end_to_end_collaboration_tokens"] += runtime
+        else:
+            breakdown["end_to_end_collaboration_tokens"] += direct + prompt_view
+    runtime_total = breakdown["end_to_end_collaboration_tokens"]
+    native_total = breakdown["native_baseline_tokens"]
+    savings = native_total - runtime_total if native_total else 0
+    breakdown["runtime_tokens"] = runtime_total
+    breakdown["token_savings"] = savings
+    breakdown["token_savings_ratio"] = (
+        round(savings / native_total, 6) if native_total > 0 else 0.0
+    )
+    breakdown["event_count"] = seen_cost_events
+    return breakdown
+
+
+def _autogen_event_cost(payload: dict[str, Any]) -> tuple[int, int, int, int]:
+    receiver_wire, receiver_prompt = _receiver_plan_tokens(payload)
+    if receiver_wire or receiver_prompt:
+        native = _int(payload.get("native_full_broadcast_tokens"))
+        if native <= 0:
+            native = _int(payload.get("native_tokens_per_receiver")) * _int(
+                payload.get("receiver_count")
+            )
+        return native, receiver_wire + receiver_prompt, receiver_wire, receiver_prompt
+
+    native = _first_positive(
+        payload,
+        [
+            "native_full_broadcast_tokens",
+            "native_transport_tokens",
+            "native_content_tokens",
+            "native_input_tokens",
+            "native_output_text_tokens",
+            "native_task_tokens",
+        ],
+    )
+    prompt_view = _int(payload.get("prompt_view_tokens"))
+    direct = _first_positive(
+        payload,
+        [
+            "shadow_wire_tokens",
+            "shp_shadow_envelope_tokens",
+            "rewritten_content_tokens",
+            "rewritten_input_tokens",
+            "rewritten_task_tokens",
+            "candidate_input_tokens",
+        ],
+    )
+    runtime = _first_positive(
+        payload,
+        [
+            "wire_plus_prompt_view_tokens",
+            "rewritten_content_tokens",
+            "rewritten_input_tokens",
+            "rewritten_task_tokens",
+            "candidate_input_tokens",
+            "shp_shadow_envelope_tokens",
+        ],
+    )
+    if runtime <= 0:
+        runtime = direct + prompt_view
+    if direct <= 0 and runtime > prompt_view:
+        direct = runtime - prompt_view
+    return native, runtime, direct, prompt_view
+
+
+def _receiver_plan_tokens(payload: dict[str, Any]) -> tuple[int, int]:
+    entries = payload.get("receiver_plans")
+    if not isinstance(entries, list):
+        return 0, 0
+    wire = 0
+    prompt_view = 0
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        wire += _int(item.get("shadow_wire_tokens"))
+        prompt_view += _int(item.get("prompt_view_tokens"))
+    return wire, prompt_view
+
+
+def _first_positive(payload: dict[str, Any], keys: list[str]) -> int:
+    for key in keys:
+        value = _int(payload.get(key))
+        if value > 0:
+            return value
+    return 0
+
+
+def _int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _empty_mode_snapshot() -> dict[str, Any]:

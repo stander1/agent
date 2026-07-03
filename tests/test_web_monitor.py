@@ -189,11 +189,37 @@ class WebMonitorParserTest(unittest.TestCase):
             run_a = runs_dir / "run-a"
             run_a.mkdir()
             (run_a / "trace.jsonl").write_text("", encoding="utf-8")
+            (run_a / "summary.json").write_text(
+                json.dumps(
+                    {
+                        "by_mode": {
+                            "baseline_text": {
+                                "end_to_end_collaboration_tokens": 1000,
+                                "direct_text_tokens": 900,
+                            },
+                            "runtime_lite": {
+                                "end_to_end_collaboration_tokens": 400,
+                                "direct_text_tokens": 120,
+                                "prompt_view_tokens": 180,
+                                "retrieved_memory_tokens": 50,
+                                "control_llm_tokens": 20,
+                                "retry_tokens": 30,
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
             ignored = runs_dir / "ignored"
             ignored.mkdir()
 
             runs = list_runs(runs_dir)
             self.assertEqual([item["run_id"] for item in runs], ["run-a"])
+            token_summary = runs[0]["token_summary"]
+            self.assertEqual(token_summary["end_to_end_collaboration_tokens"], 400)
+            self.assertEqual(token_summary["native_baseline_tokens"], 1000)
+            self.assertEqual(token_summary["prompt_view_tokens"], 180)
+            self.assertEqual(token_summary["token_savings"], 600)
 
     def test_agentlite_session_snapshot_exposes_autogen_trace_and_state_pool(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -246,7 +272,15 @@ class WebMonitorParserTest(unittest.TestCase):
                         "agent_id": "RoundRobinGroupChat",
                         "rewrite_applied_count": 1,
                         "rewrite_fallback_count": 0,
+                        "native_full_broadcast_tokens": 1000,
+                        "wire_plus_prompt_view_tokens": 260,
                         "token_delta_native_broadcast_minus_rewrite": 321,
+                        "receiver_plans": [
+                            {
+                                "shadow_wire_tokens": 120,
+                                "prompt_view_tokens": 140,
+                            }
+                        ],
                         "state_refs": [{"state_id": "state_session"}],
                     },
                 },
@@ -258,6 +292,11 @@ class WebMonitorParserTest(unittest.TestCase):
 
             sessions = list_sessions(data_dir)
             self.assertEqual(sessions[0]["session_id"], "launch_sample")
+            self.assertEqual(
+                sessions[0]["token_summary"]["end_to_end_collaboration_tokens"],
+                260,
+            )
+            self.assertEqual(sessions[0]["token_summary"]["native_baseline_tokens"], 1000)
             snapshot = build_session_snapshot(session_dir)
             runtime = snapshot["modes"]["runtime_lite"]
             self.assertEqual(snapshot["session_id"], "launch_sample")
@@ -272,6 +311,13 @@ class WebMonitorParserTest(unittest.TestCase):
                     "Team task rewritten" in message["summary"]
                     for message in runtime["messages"]
                 )
+            )
+            self.assertEqual(snapshot["token_summary"]["prompt_view_tokens"], 140)
+            self.assertEqual(
+                snapshot["summary"]["by_mode"]["runtime_lite"][
+                    "end_to_end_collaboration_tokens"
+                ],
+                260,
             )
 
 
