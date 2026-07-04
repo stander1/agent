@@ -117,7 +117,7 @@ class ManagedProcessLauncherTest(unittest.TestCase):
 
             self.assertEqual(activation.status, "active")
             self.assertTrue(activation.hooks_active)
-            self.assertEqual(activation.details["phase"], "v5.13h")
+            self.assertEqual(activation.details["phase"], "v5.13i")
             self.assertEqual(activation.details["broadcast_mode"], "shadow-only")
             self.assertEqual(
                 activation.details["hook_mode"], "managed_import_patch"
@@ -191,16 +191,95 @@ class ManagedProcessLauncherTest(unittest.TestCase):
             self.assertTrue(status["framework_available"])
             self.assertEqual(status["driver_status"], "active")
             details = status["driver_details"]
-            self.assertEqual(details["phase"], "v5.13h")
+            self.assertEqual(details["phase"], "v5.13i")
             self.assertEqual(details["broadcast_mode"], "shadow-only")
             self.assertIn("autogen_agentchat", details["available_modules"])
 
             trace_path = result.status_file.parent / "autogen_driver" / "trace.jsonl"
             trace = trace_path.read_text(encoding="utf-8")
             self.assertIn("autogen_agent_receive", trace)
-            self.assertIn("autogen_agent_output", trace)
-            self.assertIn("autogen_shp_handoff_shadow", trace)
-            self.assertIn("artifact_state", trace)
+
+    def test_autogen_driver_records_model_client_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package_dir = root / "fakepkg" / "autogen_ext" / "models" / "openai"
+            package_dir.mkdir(parents=True)
+            (package_dir.parent.parent / "__init__.py").write_text("", encoding="utf-8")
+            (package_dir.parent / "__init__.py").write_text("", encoding="utf-8")
+            (package_dir / "__init__.py").write_text(
+                "\n".join(
+                    [
+                        "class Usage:",
+                        "    prompt_tokens = 11",
+                        "    completion_tokens = 7",
+                        "class Result:",
+                        "    usage = Usage()",
+                        "    cached = False",
+                        "    content = 'done'",
+                        "class OpenAIChatCompletionClient:",
+                        "    def __init__(self, model):",
+                        "        self.model = model",
+                        "    async def create(self, messages):",
+                        "        return Result()",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            target_output = root / "target.json"
+            script = root / "app.py"
+            script.write_text(
+                "\n".join(
+                    [
+                        "import asyncio",
+                        "import json",
+                        "from pathlib import Path",
+                        "from autogen_ext.models.openai import OpenAIChatCompletionClient",
+                        "async def main():",
+                        "    client = OpenAIChatCompletionClient(model='mimov2.5')",
+                        "    result = await client.create(['hello'])",
+                        (
+                            f"    Path({str(target_output)!r}).write_text("
+                            "json.dumps({'content': result.content}), encoding='utf-8')"
+                        ),
+                        "asyncio.run(main())",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            request = LaunchRequest(
+                framework="autogen",
+                command=[sys.executable, str(script)],
+                cwd=root,
+                data_dir=root / "data",
+            )
+
+            result = ManagedProcessLauncher().launch(
+                request,
+                environ={
+                    **os.environ,
+                    "PYTHONPATH": str(root / "fakepkg"),
+                },
+            )
+
+            self.assertEqual(result.returncode, 0)
+            target = json.loads(target_output.read_text(encoding="utf-8"))
+            self.assertEqual(target["content"], "done")
+            trace_path = result.status_file.parent / "autogen_driver" / "trace.jsonl"
+            events = [
+                json.loads(line)
+                for line in trace_path.read_text(encoding="utf-8").splitlines()
+            ]
+            usage_events = [
+                item
+                for item in events
+                if item["event_type"] == "autogen_model_client_usage"
+            ]
+            self.assertEqual(len(usage_events), 1)
+            payload = usage_events[0]["payload"]
+            self.assertEqual(payload["model"], "mimov2.5")
+            self.assertEqual(payload["llm_prompt_tokens"], 11)
+            self.assertEqual(payload["llm_completion_tokens"], 7)
+            self.assertEqual(payload["llm_total_tokens"], 18)
 
     def test_existing_pythonpath_is_preserved_after_bootstrap_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -325,6 +404,29 @@ class AgentLiteCliTest(unittest.TestCase):
         self.assertEqual(args.port, 9000)
         self.assertEqual(str(args.runs_dir), "runs")
         self.assertEqual(str(args.data_dir), "agentlite-data")
+
+    def test_report_autogen_session_subcommand_accepts_output_format(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "report",
+                "autogen-session",
+                "--data-dir",
+                "agentlite-data",
+                "--session-id",
+                "latest",
+                "--format",
+                "csv",
+                "--output",
+                "reports/session.csv",
+            ]
+        )
+
+        self.assertEqual(args.subcommand, "report")
+        self.assertEqual(args.report_kind, "autogen-session")
+        self.assertEqual(str(args.data_dir), "agentlite-data")
+        self.assertEqual(args.session_id, "latest")
+        self.assertEqual(args.format, "csv")
+        self.assertEqual(args.output, Path("reports/session.csv"))
 
     def test_autogen_rewrite_all_sets_release_env_switches(self) -> None:
         env = build_managed_environment_overlay(

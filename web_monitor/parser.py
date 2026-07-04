@@ -233,6 +233,7 @@ def build_session_snapshot(
             "autogen_core_response_real_rewrite",
             "autogen_transport_input_state",
             "autogen_core_transport_shadow",
+            "autogen_model_client_usage",
         }:
             _apply_autogen_event(mode_view, event)
 
@@ -274,6 +275,7 @@ def build_session_snapshot(
                     "llm_prompt_tokens": 0,
                     "llm_completion_tokens": 0,
                     "llm_total_tokens": 0,
+                    "llm_call_count": 0,
                 },
             },
         },
@@ -355,6 +357,7 @@ def _mode_token_breakdown(row: dict[str, Any]) -> dict[str, int]:
     llm_prompt = _int(row.get("llm_prompt_tokens"))
     llm_completion = _int(row.get("llm_completion_tokens"))
     llm_total = _int(row.get("llm_total_tokens"))
+    llm_call_count = _int(row.get("llm_call_count"))
     total = _int(row.get("end_to_end_collaboration_tokens"))
     if total <= 0:
         total = direct + prompt_view + retrieved + control + retry + llm_total
@@ -369,6 +372,7 @@ def _mode_token_breakdown(row: dict[str, Any]) -> dict[str, int]:
         "llm_prompt_tokens": llm_prompt,
         "llm_completion_tokens": llm_completion,
         "llm_total_tokens": llm_total,
+        "llm_call_count": llm_call_count,
         "end_to_end_collaboration_tokens": total,
     }
 
@@ -383,6 +387,7 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "llm_prompt_tokens": 0,
         "llm_completion_tokens": 0,
         "llm_total_tokens": 0,
+        "llm_call_count": 0,
         "end_to_end_collaboration_tokens": 0,
         "native_baseline_tokens": 0,
         "runtime_tokens": 0,
@@ -394,6 +399,24 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
     seen_cost_events = 0
     for event in trace_events:
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        if event.get("event_type") == "autogen_model_client_usage":
+            usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+            prompt = _int(payload.get("llm_prompt_tokens")) or _int(
+                usage.get("prompt_tokens")
+            )
+            completion = _int(payload.get("llm_completion_tokens")) or _int(
+                usage.get("completion_tokens")
+            )
+            total = _int(payload.get("llm_total_tokens")) or _int(
+                usage.get("total_tokens")
+            )
+            if total <= 0:
+                total = prompt + completion
+            breakdown["llm_prompt_tokens"] += prompt
+            breakdown["llm_completion_tokens"] += completion
+            breakdown["llm_total_tokens"] += total
+            breakdown["llm_call_count"] += 1
+            continue
         native, runtime, direct, prompt_view = _autogen_event_cost(payload)
         if native <= 0 and runtime <= 0:
             continue
@@ -562,6 +585,12 @@ def _autogen_event_summary(event: dict[str, Any]) -> str:
             f"{payload.get('agent_id')} output; "
             f"output_chars={payload.get('output_chars', payload.get('content_chars', 0))}"
         )
+    if event_type == "autogen_model_client_usage":
+        return (
+            f"{payload.get('model') or payload.get('client_class')} LLM usage; "
+            f"prompt={payload.get('llm_prompt_tokens', 0)}, "
+            f"completion={payload.get('llm_completion_tokens', 0)}"
+        )
     if event_type == "autogen_team_input_real_rewrite":
         return (
             "Team task rewritten; "
@@ -645,6 +674,11 @@ def _event_summary(event: dict[str, Any]) -> str:
     if event_type == "state_written":
         state = payload.get("state", {})
         return f"{state.get('source_agent')} wrote {state.get('state_type')}"
+    if event_type == "autogen_model_client_usage":
+        return (
+            f"{payload.get('model') or payload.get('client_class')} LLM usage; "
+            f"total={payload.get('llm_total_tokens', 0)}"
+        )
     return event_type
 
 

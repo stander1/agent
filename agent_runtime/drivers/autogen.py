@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import threading
+import time
 from copy import copy as shallow_copy
 from dataclasses import dataclass, field, is_dataclass
 from dataclasses import replace as dataclass_replace
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
 SUPPORTED_MODULE_ROOTS = (
     "autogen_agentchat",
     "autogen_core",
+    "autogen_ext",
     "autogen",
 )
 PATCH_TARGETS = {
@@ -44,6 +46,7 @@ PATCH_TARGETS = {
     "agentchat_team": ("run", "run_stream"),
     "core_runtime": ("send_message", "publish_message"),
     "core_agent": ("on_message",),
+    "model_client": ("create", "create_stream"),
 }
 BROADCAST_MODE_ENV = "AGENTLITE_AUTOGEN_BROADCAST_MODE"
 TEAM_REWRITE_ENV = "AGENTLITE_AUTOGEN_TEAM_REWRITE"
@@ -53,7 +56,7 @@ CORE_CONTENT_REWRITE_ENV = "AGENTLITE_AUTOGEN_CORE_CONTENT_REWRITE"
 CORE_RECEIVER_HYDRATE_ENV = "AGENTLITE_AUTOGEN_CORE_RECEIVER_HYDRATE"
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
 CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
-DRIVER_PHASE = "v5.13h"
+DRIVER_PHASE = "v5.13i"
 TEAM_REAL_REWRITE_DISABLED_REASON = (
     "team_level_real_rewrite_not_enabled_for_guarded_agent_input"
 )
@@ -2845,6 +2848,80 @@ class AutoGenHookManager:
             },
         )
 
+    def record_model_client_usage(
+        self,
+        *,
+        instance: object,
+        method_name: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        result: Any,
+        latency_ms: float,
+    ) -> None:
+        call_id = self._next_call_id()
+        usage, usage_available = _extract_model_usage(result)
+        output_text = _extract_text(result)
+        agent_id = _model_client_agent_id(instance)
+        self.metrics.record_llm_call(
+            task_id=call_id,
+            round_id=1,
+            mode="runtime_lite",
+            usage=usage,
+            latency_ms=latency_ms,
+            agent_id=agent_id,
+            output_chars=len(output_text),
+        )
+        self.trace.write(
+            "autogen_model_client_usage",
+            {
+                "call_id": call_id,
+                "agent_id": agent_id,
+                "role": "model_client",
+                "target_kind": "model_client",
+                "method": method_name,
+                "client_class": (
+                    f"{type(instance).__module__}.{type(instance).__name__}"
+                ),
+                "model": _model_client_model_name(instance, kwargs),
+                "cached": _extract_bool(result, "cached"),
+                "usage_available": usage_available,
+                "usage": usage,
+                "llm_prompt_tokens": usage["prompt_tokens"],
+                "llm_completion_tokens": usage["completion_tokens"],
+                "llm_total_tokens": usage["total_tokens"],
+                "llm_wall_time_ms": round(latency_ms, 3),
+                "output_chars": len(output_text),
+                "output_preview": _preview(output_text),
+                "request_preview": _preview(_extract_text({"args": args, "kwargs": kwargs})),
+            },
+        )
+
+    def record_model_client_error(
+        self,
+        *,
+        instance: object,
+        method_name: str,
+        error: BaseException,
+        latency_ms: float,
+    ) -> None:
+        self.trace.write(
+            "autogen_model_client_error",
+            {
+                "call_id": self._next_call_id(),
+                "agent_id": _model_client_agent_id(instance),
+                "role": "model_client",
+                "target_kind": "model_client",
+                "method": method_name,
+                "client_class": (
+                    f"{type(instance).__module__}.{type(instance).__name__}"
+                ),
+                "model": _model_client_model_name(instance, {}),
+                "error_type": type(error).__name__,
+                "error": str(error),
+                "llm_wall_time_ms": round(latency_ms, 3),
+            },
+        )
+
     def describe_agent(self, instance: object, *, target_kind: str) -> AgentDescriptor:
         raw_name = (
             getattr(instance, "name", None)
@@ -2934,6 +3011,12 @@ class AutoGenHookManager:
         method_name: str,
         target_kind: str,
     ) -> Any:
+        if target_kind == "model_client":
+            return self._wrap_model_client_method(
+                original,
+                method_name=method_name,
+            )
+
         if inspect.isasyncgenfunction(original):
 
             @functools.wraps(original)
@@ -3076,8 +3159,134 @@ class AutoGenHookManager:
         setattr(sync_wrapper, "__agentlite_wrapped__", True)
         return sync_wrapper
 
+    def _wrap_model_client_method(
+        self,
+        original: Any,
+        *,
+        method_name: str,
+    ) -> Any:
+        if inspect.isasyncgenfunction(original):
+
+            @functools.wraps(original)
+            async def asyncgen_wrapper(instance: object, *args: Any, **kwargs: Any):
+                started = time.perf_counter()
+                last_item: Any = None
+                try:
+                    async for item in original(instance, *args, **kwargs):
+                        last_item = item
+                        yield item
+                    self.record_model_client_usage(
+                        instance=instance,
+                        method_name=method_name,
+                        args=args,
+                        kwargs=kwargs,
+                        result=last_item,
+                        latency_ms=(time.perf_counter() - started) * 1000.0,
+                    )
+                except Exception as exc:
+                    self.record_model_client_error(
+                        instance=instance,
+                        method_name=method_name,
+                        error=exc,
+                        latency_ms=(time.perf_counter() - started) * 1000.0,
+                    )
+                    raise
+
+            setattr(asyncgen_wrapper, "__agentlite_wrapped__", True)
+            return asyncgen_wrapper
+
+        if inspect.iscoroutinefunction(original):
+
+            @functools.wraps(original)
+            async def coroutine_wrapper(
+                instance: object, *args: Any, **kwargs: Any
+            ) -> Any:
+                started = time.perf_counter()
+                try:
+                    result = await original(instance, *args, **kwargs)
+                    self.record_model_client_usage(
+                        instance=instance,
+                        method_name=method_name,
+                        args=args,
+                        kwargs=kwargs,
+                        result=result,
+                        latency_ms=(time.perf_counter() - started) * 1000.0,
+                    )
+                    return result
+                except Exception as exc:
+                    self.record_model_client_error(
+                        instance=instance,
+                        method_name=method_name,
+                        error=exc,
+                        latency_ms=(time.perf_counter() - started) * 1000.0,
+                    )
+                    raise
+
+            setattr(coroutine_wrapper, "__agentlite_wrapped__", True)
+            return coroutine_wrapper
+
+        if inspect.isgeneratorfunction(original):
+
+            @functools.wraps(original)
+            def generator_wrapper(instance: object, *args: Any, **kwargs: Any):
+                started = time.perf_counter()
+                last_item: Any = None
+                try:
+                    for item in original(instance, *args, **kwargs):
+                        last_item = item
+                        yield item
+                    self.record_model_client_usage(
+                        instance=instance,
+                        method_name=method_name,
+                        args=args,
+                        kwargs=kwargs,
+                        result=last_item,
+                        latency_ms=(time.perf_counter() - started) * 1000.0,
+                    )
+                except Exception as exc:
+                    self.record_model_client_error(
+                        instance=instance,
+                        method_name=method_name,
+                        error=exc,
+                        latency_ms=(time.perf_counter() - started) * 1000.0,
+                    )
+                    raise
+
+            setattr(generator_wrapper, "__agentlite_wrapped__", True)
+            return generator_wrapper
+
+        @functools.wraps(original)
+        def sync_wrapper(instance: object, *args: Any, **kwargs: Any) -> Any:
+            started = time.perf_counter()
+            try:
+                result = original(instance, *args, **kwargs)
+                self.record_model_client_usage(
+                    instance=instance,
+                    method_name=method_name,
+                    args=args,
+                    kwargs=kwargs,
+                    result=result,
+                    latency_ms=(time.perf_counter() - started) * 1000.0,
+                )
+                return result
+            except Exception as exc:
+                self.record_model_client_error(
+                    instance=instance,
+                    method_name=method_name,
+                    error=exc,
+                    latency_ms=(time.perf_counter() - started) * 1000.0,
+                )
+                raise
+
+        setattr(sync_wrapper, "__agentlite_wrapped__", True)
+        return sync_wrapper
+
     @staticmethod
     def _target_methods_for(module_name: str) -> dict[str, tuple[str, ...]]:
+        if module_name.startswith("autogen_ext.models") or module_name.startswith(
+            "autogen_core.models"
+        ):
+            return {"model_client": PATCH_TARGETS["model_client"]}
         if module_name.startswith("autogen_agentchat.agents"):
             return {"agentchat_agent": PATCH_TARGETS["agentchat_agent"]}
         if module_name.startswith("autogen_agentchat.teams"):
@@ -3097,6 +3306,14 @@ class AutoGenHookManager:
     @staticmethod
     def _target_kind_for(module_name: str, cls: type) -> str | None:
         class_name = cls.__name__
+        if module_name.startswith("autogen_ext.models") or module_name.startswith(
+            "autogen_core.models"
+        ):
+            if any(
+                callable(getattr(cls, method_name, None))
+                for method_name in PATCH_TARGETS["model_client"]
+            ):
+                return "model_client"
         if module_name.startswith("autogen_agentchat.agents"):
             return "agentchat_agent"
         if module_name.startswith("autogen_agentchat.teams"):
@@ -4160,6 +4377,111 @@ def _count_tokens(token_counter: TokenCounter, text: str) -> int:
     if not text:
         return 0
     return int(token_counter.count(text).token_count)
+
+
+def _extract_model_usage(value: Any) -> tuple[dict[str, int], bool]:
+    for usage_key in ("usage", "_usage", "usage_metadata"):
+        found, usage_value = _lookup_field(value, usage_key)
+        if found:
+            return _normalize_provider_usage(usage_value), True
+    return _empty_provider_usage(), False
+
+
+def _normalize_provider_usage(value: Any) -> dict[str, int]:
+    if value is None:
+        return _empty_provider_usage()
+    prompt = _usage_int(
+        value,
+        (
+            "prompt_tokens",
+            "input_tokens",
+            "prompt_token_count",
+            "input_token_count",
+        ),
+    )
+    completion = _usage_int(
+        value,
+        (
+            "completion_tokens",
+            "output_tokens",
+            "completion_token_count",
+            "candidates_token_count",
+        ),
+    )
+    total = _usage_int(value, ("total_tokens", "total_token_count"))
+    if total <= 0:
+        total = prompt + completion
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": total,
+    }
+
+
+def _empty_provider_usage() -> dict[str, int]:
+    return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+
+def _usage_int(value: Any, names: tuple[str, ...]) -> int:
+    for name in names:
+        found, raw_value = _lookup_field(value, name)
+        if found:
+            return _safe_int(raw_value)
+    return 0
+
+
+def _lookup_field(value: Any, name: str) -> tuple[bool, Any]:
+    if isinstance(value, dict):
+        if name in value:
+            return True, value.get(name)
+        return False, None
+    if value is not None and hasattr(value, name):
+        return True, getattr(value, name)
+    return False, None
+
+
+def _extract_bool(value: Any, name: str) -> bool:
+    found, raw_value = _lookup_field(value, name)
+    return bool(raw_value) if found else False
+
+
+def _model_client_agent_id(instance: object) -> str:
+    label = (
+        _model_client_model_name(instance, {})
+        or getattr(instance, "name", None)
+        or getattr(instance, "_name", None)
+        or type(instance).__name__
+    )
+    return _safe_identifier(f"model_{label}")
+
+
+def _model_client_model_name(instance: object, kwargs: dict[str, Any]) -> str:
+    for source in (
+        kwargs,
+        getattr(instance, "_config", None),
+        getattr(instance, "config", None),
+        getattr(instance, "_client_config", None),
+        instance,
+    ):
+        for name in (
+            "model",
+            "_model",
+            "model_name",
+            "_model_name",
+            "deployment_name",
+            "azure_deployment",
+        ):
+            found, value = _lookup_field(source, name)
+            if found and value:
+                return str(value)
+    return ""
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _json_object_or_empty(text: str) -> dict[str, Any]:

@@ -195,6 +195,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="AgentLite data directory containing managed launch sessions.",
     )
 
+    report_parser = subparsers.add_parser(
+        "report",
+        help="Export AgentLite experiment and takeover reports.",
+    )
+    report_subparsers = report_parser.add_subparsers(dest="report_kind", required=True)
+    session_report_parser = report_subparsers.add_parser(
+        "autogen-session",
+        help="Export token metrics for one AgentLite-managed AutoGen session.",
+    )
+    session_report_parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path.home() / ".agentlite",
+        help="AgentLite data directory containing managed launch sessions.",
+    )
+    session_report_parser.add_argument(
+        "--session-id",
+        default="latest",
+        help="Session id to export. Defaults to latest.",
+    )
+    session_report_parser.add_argument(
+        "--format",
+        choices=("markdown", "json", "csv"),
+        default="markdown",
+        help="Report output format.",
+    )
+    session_report_parser.add_argument(
+        "--output",
+        type=Path,
+        help="Optional file path. Prints to stdout when omitted.",
+    )
+
     subparsers.add_parser("version", help="Print AgentLite package version.")
     return parser
 
@@ -213,6 +245,8 @@ def main(argv: list[str] | None = None) -> int:
             runs_dir=args.runs_dir,
             data_dir=args.data_dir,
         )
+    if args.subcommand == "report":
+        return _report(args)
     if args.subcommand not in {"run", "start", "autogen"}:
         return 2
 
@@ -332,6 +366,31 @@ def _monitor(*, host: str, port: int, runs_dir: Path, data_dir: Path) -> int:
         return monitor_main()
     finally:
         sys.argv = previous_argv
+
+
+def _report(args: argparse.Namespace) -> int:
+    if args.report_kind != "autogen-session":
+        return 2
+    from agent_runtime.eval.autogen_session_report import (
+        SessionReportRequest,
+        write_autogen_session_report,
+    )
+
+    try:
+        report = write_autogen_session_report(
+            SessionReportRequest(
+                data_dir=args.data_dir,
+                session_id=args.session_id,
+                output=args.output,
+                report_format=args.format,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        print(f"AgentLite report failed: {exc}", file=sys.stderr)
+        return 2
+    if args.output:
+        print(f"Report written: {report['output_path']}")
+    return 0
 
 
 def _doctor_checks(*, framework: str | None) -> list[dict[str, object]]:

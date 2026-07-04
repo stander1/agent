@@ -3385,6 +3385,76 @@ AgentLite 的 AutoGen Core 接管已经不局限于单一 content dataclass；
 3. 真实 LLM agent 的质量和成本对比。
 ```
 
+## 46. v5.13i AutoGen Studio Provider Token 采集
+
+### 46.1 背景
+
+用户侧网页端实验应使用 AutoGen Studio 原生网页，而不是项目自建网页。AutoGen Studio 的浏览器页面可以展示运行过程，但浏览器本身不能可靠导出结构化 token 数据，也无法区分模型服务实际计费 token 与 Agent 间协作通信 token。
+
+因此 v5.13i 的目标是补上 provider token 采集：
+
+```text
+provider token:
+  模型服务返回的 prompt/completion usage，更接近后台账单口径。
+
+collaboration token:
+  Agent 间消息传递、StateRef、Prompt View 等协作通信成本。
+```
+
+### 46.2 已完成实现
+
+代码变更：
+
+```text
+agent_runtime/drivers/autogen.py:
+  DRIVER_PHASE = v5.13i
+  SUPPORTED_MODULE_ROOTS 增加 autogen_ext
+  PATCH_TARGETS 增加 model_client: create / create_stream
+  新增 autogen_model_client_usage trace 事件
+
+web_monitor/parser.py:
+  汇总 autogen_model_client_usage 到 llm_prompt_tokens /
+  llm_completion_tokens / llm_total_tokens / llm_call_count
+
+agent_runtime/eval/autogen_session_report.py:
+  report 中显示 llm_call_count 和 llm_* token
+
+docs/experiments/autogen-native-code-and-studio-user-experiment.md:
+  将网页端实验口径修正为 AutoGen Studio 原生网页
+```
+
+### 46.3 验收结果
+
+本轮没有安装并启动真实 AutoGen Studio；使用 fake `autogen_ext.models.openai.OpenAIChatCompletionClient` 验证注入链路。
+
+通过测试：
+
+```text
+python -m compileall agent_runtime web_monitor examples/developer_autogen_code_app.py
+python -m unittest tests.test_launcher tests.test_autogen_session_report tests.test_web_monitor
+
+Ran 21 tests in 0.796s
+OK
+```
+
+### 46.4 当前边界
+
+可以表述为：
+
+```text
+AgentLite 在被其启动的 AutoGen / AutoGen Studio 后端 Python 进程内，
+能够旁路 hook AutoGen 模型客户端 create/create_stream，
+记录 provider usage，并在 session report 中汇总展示。
+```
+
+仍不能表述为：
+
+```text
+已经在真实 AutoGen Studio 环境完成端到端人工网页实验；
+已经提供 agentlite autogen-studio 便捷命令；
+已经对不返回 usage 的第三方模型客户端保证自动统计真实后台账单。
+```
+
 ## 44. v5.13h 安装包级 AutoGen 混合接管门禁
 
 ### 44.1 本轮解决的问题

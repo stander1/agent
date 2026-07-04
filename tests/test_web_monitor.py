@@ -267,6 +267,22 @@ class WebMonitorParserTest(unittest.TestCase):
                 },
                 {
                     "ts": "2026-07-02T00:00:02+00:00",
+                    "event_type": "autogen_model_client_usage",
+                    "payload": {
+                        "agent_id": "model_mimov2_5",
+                        "model": "mimov2.5",
+                        "usage": {
+                            "prompt_tokens": 12,
+                            "completion_tokens": 8,
+                            "total_tokens": 20,
+                        },
+                        "llm_prompt_tokens": 12,
+                        "llm_completion_tokens": 8,
+                        "llm_total_tokens": 20,
+                    },
+                },
+                {
+                    "ts": "2026-07-02T00:00:03+00:00",
                     "event_type": "autogen_team_input_real_rewrite",
                     "payload": {
                         "agent_id": "RoundRobinGroupChat",
@@ -313,11 +329,19 @@ class WebMonitorParserTest(unittest.TestCase):
                 )
             )
             self.assertEqual(snapshot["token_summary"]["prompt_view_tokens"], 140)
+            self.assertEqual(snapshot["token_summary"]["llm_call_count"], 1)
+            self.assertEqual(snapshot["token_summary"]["llm_total_tokens"], 20)
             self.assertEqual(
                 snapshot["summary"]["by_mode"]["runtime_lite"][
                     "end_to_end_collaboration_tokens"
                 ],
                 260,
+            )
+            self.assertTrue(
+                any(
+                    "LLM usage" in message["summary"]
+                    for message in runtime["messages"]
+                )
             )
 
 
