@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from agent_runtime.core.communication import CapabilityProfileManagerLite
+
 
 AGENT_ORDER = ["planner", "retriever", "writer", "reviewer", "memory_manager"]
 DEFAULT_MODES = ["baseline_text", "runtime_lite"]
@@ -19,6 +21,8 @@ def build_run_snapshot(
     run_id = run_id or run_dir.name
     trace_events = _read_jsonl(run_dir / "trace.jsonl")
     summary = _read_json(run_dir / "summary.json", default={})
+    if isinstance(summary, dict):
+        summary = {**summary, "agent_profiles": _agent_profiles()}
     pool_snapshot = _read_json(run_dir / "pool_snapshot_latest.json", default={})
 
     snapshot: dict[str, Any] = {
@@ -28,6 +32,7 @@ def build_run_snapshot(
         "modes": {mode: _empty_mode_snapshot() for mode in DEFAULT_MODES},
         "summary": summary,
         "token_summary": _summary_token_summary(summary),
+        "agent_profiles": _agent_profiles(),
         "errors": errors or [],
     }
 
@@ -252,6 +257,7 @@ def build_session_snapshot(
             "event_counts": event_counts,
             "trace_path": str(trace_path) if trace_path.exists() else "",
             "token_summary": token_summary,
+            "agent_profiles": _agent_profiles(),
             "by_mode": {
                 "runtime_lite": token_summary,
                 "baseline_text": {
@@ -301,6 +307,43 @@ def _summary_token_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "runtime": runtime,
         "source": "summary_json",
     }
+
+
+def _agent_profiles() -> dict[str, Any]:
+    profiles = CapabilityProfileManagerLite([]).snapshot()
+    profiles.update(
+        {
+            "team": {
+                "agent_id": "team",
+                "role": "AutoGenTeam",
+                "summary": "AutoGen Team 入口，负责组级任务广播",
+                "capabilities": ["Team 调度", "广播入口", "任务流转"],
+                "accepted": ["user_task", "team_input"],
+            },
+            "team_manager": {
+                "agent_id": "team_manager",
+                "role": "AutoGenTeamManager",
+                "summary": "AutoGen 组管理器，维护回合与参与者顺序",
+                "capabilities": ["回合管理", "参与者编排"],
+                "accepted": ["team_output", "handoff_message"],
+            },
+            "runtime_bridge": {
+                "agent_id": "runtime_bridge",
+                "role": "AutoGenRuntimeBridge",
+                "summary": "AutoGen Core 运行时桥接层，承接底层消息投递",
+                "capabilities": ["Core 桥接", "消息投递", "水合还原"],
+                "accepted": ["core_request", "core_response"],
+            },
+            "autogen_driver": {
+                "agent_id": "autogen_driver",
+                "role": "AgentLiteDriver",
+                "summary": "AgentLite 注入驱动，记录 hook、改写与 trace",
+                "capabilities": ["运行时注入", "trace 记录", "协议改写"],
+                "accepted": ["driver_event"],
+            },
+        }
+    )
+    return profiles
 
 
 def _mode_token_breakdown(row: dict[str, Any]) -> dict[str, int]:
