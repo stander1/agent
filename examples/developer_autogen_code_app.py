@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import http.client
 import json
 import os
 import time
@@ -17,6 +18,7 @@ DEFAULT_QUESTION = (
     "状态传递方式、低开销通信机制、风险控制和实验验证指标。"
 )
 DONE_TOKEN = "FINAL_ANSWER_READY"
+DEFAULT_MODEL = "mimo-v2.5"
 
 
 DEFAULT_AGENTS = [
@@ -52,6 +54,7 @@ class LLMResult:
     content: str
     usage: dict[str, int]
     wall_time_ms: int
+    retry_count: int = 0
 
 
 class OpenAICompatibleClient:
@@ -65,12 +68,16 @@ class OpenAICompatibleClient:
         model: str,
         temperature: float,
         timeout_seconds: int = 120,
+        max_retries: int = 4,
+        retry_backoff_seconds: float = 2.0,
     ) -> None:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.temperature = temperature
         self.timeout_seconds = timeout_seconds
+        self.max_retries = max(0, max_retries)
+        self.retry_backoff_seconds = max(0.0, retry_backoff_seconds)
 
     @classmethod
     def from_env(cls, *, temperature: float) -> "OpenAICompatibleClient":
@@ -89,8 +96,13 @@ class OpenAICompatibleClient:
         return cls(
             api_key=api_key,
             base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-            model=os.getenv("OPENAI_MODEL", "mimov2.5"),
+            model=os.getenv("OPENAI_MODEL", DEFAULT_MODEL),
             temperature=temperature,
+            timeout_seconds=int(os.getenv("OPENAI_TIMEOUT_SECONDS", "120")),
+            max_retries=int(os.getenv("OPENAI_MAX_RETRIES", "4")),
+            retry_backoff_seconds=float(
+                os.getenv("OPENAI_RETRY_BACKOFF_SECONDS", "2")
+            ),
         )
 
     def complete(self, messages: list[dict[str, str]]) -> LLMResult:
@@ -103,22 +115,51 @@ class OpenAICompatibleClient:
             "temperature": self.temperature,
             "stream": False,
         }
-        request = urllib.request.Request(
-            url,
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         started = time.perf_counter()
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                raw = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"LLM request failed: HTTP {exc.code}: {detail}") from exc
+        raw: dict[str, Any] | None = None
+        retry_count = 0
+        for attempt in range(self.max_retries + 1):
+            request = urllib.request.Request(
+                url,
+                data=data,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(
+                    request, timeout=self.timeout_seconds
+                ) as response:
+                    raw = json.loads(response.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                if exc.code != 429 and exc.code < 500:
+                    raise RuntimeError(
+                        f"LLM request failed: HTTP {exc.code}: {detail}"
+                    ) from exc
+                if attempt >= self.max_retries:
+                    raise RuntimeError(
+                        f"LLM request failed after {attempt + 1} attempts: "
+                        f"HTTP {exc.code}: {detail}"
+                    ) from exc
+            except (
+                urllib.error.URLError,
+                http.client.RemoteDisconnected,
+                TimeoutError,
+                ConnectionError,
+            ) as exc:
+                if attempt >= self.max_retries:
+                    raise RuntimeError(
+                        f"LLM connection failed after {attempt + 1} attempts: {exc}"
+                    ) from exc
+            retry_count += 1
+            time.sleep(self.retry_backoff_seconds * (attempt + 1))
+        if raw is None:
+            raise RuntimeError("LLM request failed without a provider response")
         wall_time_ms = int((time.perf_counter() - started) * 1000)
         choices = raw.get("choices") or []
         if not choices:
@@ -130,6 +171,7 @@ class OpenAICompatibleClient:
             content=content,
             usage=_normalize_usage(raw.get("usage", {})),
             wall_time_ms=wall_time_ms,
+            retry_count=retry_count,
         )
 
 
@@ -156,6 +198,7 @@ class CostLogger:
                     "completion_tokens": 0,
                     "total_tokens": 0,
                     "wall_time_ms": 0,
+                    "retry_count": 0,
                 },
             )
             bucket["calls"] += 1
@@ -163,6 +206,7 @@ class CostLogger:
             bucket["completion_tokens"] += int(row["completion_tokens"])
             bucket["total_tokens"] += int(row["total_tokens"])
             bucket["wall_time_ms"] += int(row["wall_time_ms"])
+            bucket["retry_count"] += int(row.get("retry_count", 0))
         return {
             "calls": len(self.rows),
             "llm_prompt_tokens": sum(int(row["prompt_tokens"]) for row in self.rows),
@@ -171,6 +215,7 @@ class CostLogger:
             ),
             "llm_total_tokens": sum(int(row["total_tokens"]) for row in self.rows),
             "llm_wall_time_ms": sum(int(row["wall_time_ms"]) for row in self.rows),
+            "retry_count": sum(int(row.get("retry_count", 0)) for row in self.rows),
             "by_agent": by_agent,
         }
 
@@ -257,6 +302,7 @@ async def run_team(
                     "completion_tokens": result.usage["completion_tokens"],
                     "total_tokens": result.usage["total_tokens"],
                     "wall_time_ms": result.wall_time_ms,
+                    "retry_count": result.retry_count,
                     "ts": time.time(),
                 }
             )

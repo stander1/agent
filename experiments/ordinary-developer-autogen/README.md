@@ -22,7 +22,9 @@
 ```bash
 export OPENAI_API_KEY="你的 API key"
 export OPENAI_BASE_URL="https://token-plan-cn.xiaomimimo.com/v1"
-export OPENAI_MODEL="mimov2.5"
+export OPENAI_MODEL="mimo-v2.5"
+export OPENAI_MAX_RETRIES="4"
+export OPENAI_RETRY_BACKOFF_SECONDS="2"
 ```
 
 Windows PowerShell:
@@ -30,7 +32,9 @@ Windows PowerShell:
 ```powershell
 $env:OPENAI_API_KEY="你的 API key"
 $env:OPENAI_BASE_URL="https://token-plan-cn.xiaomimimo.com/v1"
-$env:OPENAI_MODEL="mimov2.5"
+$env:OPENAI_MODEL="mimo-v2.5"
+$env:OPENAI_MAX_RETRIES="4"
+$env:OPENAI_RETRY_BACKOFF_SECONDS="2"
 ```
 
 ## 代码端实验
