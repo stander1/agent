@@ -283,6 +283,19 @@ class WebMonitorParserTest(unittest.TestCase):
                 },
                 {
                     "ts": "2026-07-02T00:00:03+00:00",
+                    "event_type": "autogen_memory_retrieval",
+                    "payload": {
+                        "agent_id": "RoundRobinGroupChat",
+                        "memory_query_count": 1,
+                        "memory_hit_count": 1,
+                        "useful_memory_hit_count": 1,
+                        "wrong_memory_hit_count": 0,
+                        "retrieved_memory_tokens": 50,
+                        "memory_refs": [{"memory_id": "mem_session"}],
+                    },
+                },
+                {
+                    "ts": "2026-07-02T00:00:04+00:00",
                     "event_type": "autogen_team_input_real_rewrite",
                     "payload": {
                         "agent_id": "RoundRobinGroupChat",
@@ -295,6 +308,7 @@ class WebMonitorParserTest(unittest.TestCase):
                             {
                                 "shadow_wire_tokens": 120,
                                 "prompt_view_tokens": 140,
+                                "retrieved_memory_tokens": 50,
                             }
                         ],
                         "state_refs": [{"state_id": "state_session"}],
@@ -310,9 +324,14 @@ class WebMonitorParserTest(unittest.TestCase):
             self.assertEqual(sessions[0]["session_id"], "launch_sample")
             self.assertEqual(
                 sessions[0]["token_summary"]["end_to_end_collaboration_tokens"],
-                260,
+                310,
             )
             self.assertEqual(sessions[0]["token_summary"]["native_baseline_tokens"], 1000)
+            self.assertEqual(
+                sessions[0]["token_summary"]["retrieved_memory_tokens"],
+                50,
+            )
+            self.assertEqual(sessions[0]["token_summary"]["memory_hit_count"], 1)
             snapshot = build_session_snapshot(session_dir)
             runtime = snapshot["modes"]["runtime_lite"]
             self.assertEqual(snapshot["session_id"], "launch_sample")
@@ -335,7 +354,7 @@ class WebMonitorParserTest(unittest.TestCase):
                 snapshot["summary"]["by_mode"]["runtime_lite"][
                     "end_to_end_collaboration_tokens"
                 ],
-                260,
+                310,
             )
             self.assertTrue(
                 any(

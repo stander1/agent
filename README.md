@@ -2,7 +2,7 @@
 
 本仓库用于迭代实现一个面向多 Agent 协作的跨框架运行时工具层，目标是在多 Agent 任务中通过结构化通信、非文本状态传递和共享记忆复用降低协作开销。
 
-当前开发版本：`v5.13h package gate + AutoGen web backend smoke`
+当前开发版本：`v5.13i AutoGen provider usage + persistent shared memory bridge`
 
 最新发行包门禁版本：`v5.13h package release gate`
 
@@ -56,9 +56,20 @@
 - [docs/experiments/v5.13g-autogen-mixed-team-core-results.md](docs/experiments/v5.13g-autogen-mixed-team-core-results.md)
 - [docs/experiments/v5.13h-package-gate-results.md](docs/experiments/v5.13h-package-gate-results.md)
 - [docs/experiments/v5.13h-autogen-web-backend-results.md](docs/experiments/v5.13h-autogen-web-backend-results.md)
+- [docs/experiments/v5.13i-autogen-shared-memory-results.md](docs/experiments/v5.13i-autogen-shared-memory-results.md)
 - [docs/release/v5.12z-final-release-notes.md](docs/release/v5.12z-final-release-notes.md)
 
-## v5.13h Current Note
+## v5.13i Current Note
+
+`v5.13i` now connects AutoGen takeover to the canonical TLC-Memory path. In `real-rewrite` mode, Agent outputs are first written to StatePool. Intermediate Agent outputs become `MemoryCandidate` records with `pending` status, while a completed Team result can pass rules-first admission and become a persistent `MemoryView`. A later managed process with the same data directory, workspace scope, and Team participant signature retrieves that MemoryView and injects it into the Team task without requiring the user's AutoGen code or Studio configuration to import AgentLite.
+
+Shared memory is enabled by the normal `agentlite autogen -- ...` command. It is disabled in `--rewrite off` observation mode, so native/observed experiments remain uncontaminated. Different Team participant signatures use strict retrieval scopes and cannot retrieve one another's memory. The optional `AGENTLITE_MEMORY_SCOPE` environment variable can provide an explicit experiment or project namespace; otherwise AgentLite derives a stable scope from the target working directory.
+
+Real AutoGen 0.7.5 validation used two independent managed Python processes. The first process admitted one Team final result; the second process loaded the persistent snapshot, recorded one useful memory hit and a `127`-token MemoryView. That view entered three receiver prompts, so the session report correctly recorded `381` retrieved-memory tokens. The actual Team input contained both the shared-memory marker and the first process's confirmed fact. The ordinary AutoGen script did not import AgentLite.
+
+This bridge provides cross-task context continuity, but it does not by itself fix weak Agent prompts, an unsuitable Team selection policy, or a termination condition that stops before a complete answer. Those remain part of the Studio Team configuration and quality experiment.
+
+## v5.13h Historical Note
 
 `v5.13h` builds on the v5.13g mixed-link takeover, which extends AutoGen coverage from AgentChat / Team entry points down to `autogen_core.SingleThreadedAgentRuntime.send_message()` and `publish_message()`. Core runtime direct and publish messages are now written to StatePool, converted into compact SHP shadow wire packets, rendered as receiver Prompt Views, and measured in trace.
 
@@ -93,6 +104,18 @@ multi_agent_collaboration_runtime-0.5.12.post3.tar.gz
 
 ```powershell
 agentlite autogen -- python app.py
+```
+
+该命令默认使用持久化共享记忆。只要后续任务使用同一个 `--data-dir`、同一工作目录和同一组 Team 成员，已通过准入的 Team 最终结论就可以跨进程复用：
+
+```powershell
+agentlite autogen --data-dir "$HOME/.agentlite" -- python app.py
+```
+
+原生观察组使用 `--rewrite off`，不会读取或写入共享记忆：
+
+```powershell
+agentlite autogen --rewrite off -- python app.py
 ```
 
 也可以使用统一命令入口：

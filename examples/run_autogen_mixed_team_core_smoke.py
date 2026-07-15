@@ -27,7 +27,7 @@ from run_autogen_team_rewrite_smoke import (  # noqa: E402
     summarize_team_rewrite_events,
 )
 
-EXPECTED_PHASE = "v5.13h"
+EXPECTED_PHASE = "v5.13i"
 USER_SCRIPT = PROJECT_ROOT / "examples" / "autogen_mixed_team_core_smoke.py"
 
 
@@ -194,7 +194,7 @@ def build_report(
         "target_returncode_zero": returncode == 0,
         "bootstrap_ok": bool(status.get("ok")),
         "hooks_active": bool(status.get("hooks_active")),
-        "driver_phase_v5_13h": details.get("phase") == EXPECTED_PHASE,
+        "driver_phase_v5_13i": details.get("phase") == EXPECTED_PHASE,
         "real_rewrite_mode_enabled": details.get("broadcast_mode") == "real-rewrite",
         "team_rewrite_enabled": bool(details.get("team_rewrite_enabled")),
         "core_content_rewrite_enabled": details.get("core_content_rewrite_enabled")

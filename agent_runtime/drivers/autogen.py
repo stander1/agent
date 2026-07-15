@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import functools
+import hashlib
 import importlib.abc
 import importlib.machinery
 import importlib.util
 import inspect
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -17,7 +19,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, Iterable
 
-from agent_runtime.core.kernel import AgentDescriptor, CollaborationKernel
+from agent_runtime.core.kernel import AgentDescriptor, CollaborationKernel, MemoryContext
 from agent_runtime.core.models import AgentOutput, TaskSpec
 from agent_runtime.drivers.autogen_codec import AutoGenMessageCodec
 from agent_runtime.drivers.autogen_shp import (
@@ -29,6 +31,7 @@ from agent_runtime.drivers.loader import DriverActivation
 from agent_runtime.eval.metrics import MetricsCollector
 from agent_runtime.eval.token_counter import TokenCounter
 from agent_runtime.eval.trace_logger import TraceLogger
+from agent_runtime.memory.memory_store import MemoryStoreLite
 from agent_runtime.state.state_pool import StatePoolLite, StateRef
 
 if TYPE_CHECKING:
@@ -54,6 +57,8 @@ HANDOFF_REWRITE_ENV = "AGENTLITE_AUTOGEN_HANDOFF_REWRITE"
 TOOL_SUMMARY_REWRITE_ENV = "AGENTLITE_AUTOGEN_TOOL_SUMMARY_REWRITE"
 CORE_CONTENT_REWRITE_ENV = "AGENTLITE_AUTOGEN_CORE_CONTENT_REWRITE"
 CORE_RECEIVER_HYDRATE_ENV = "AGENTLITE_AUTOGEN_CORE_RECEIVER_HYDRATE"
+SHARED_MEMORY_ENV = "AGENTLITE_AUTOGEN_SHARED_MEMORY"
+MEMORY_SCOPE_ENV = "AGENTLITE_MEMORY_SCOPE"
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
 CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
 DRIVER_PHASE = "v5.13i"
@@ -66,6 +71,7 @@ CORE_REAL_REWRITE_DISABLED_REASON = (
 CORE_REWRITE_FIELDS = ("content", "body", "text")
 CORE_REWRITE_MARKER = "AGENTLITE_CORE_CONTENT_REWRITE v1"
 CORE_PROMPT_VIEW_MARKER = "AGENTLITE_CORE_PROMPT_VIEW v1"
+SHARED_MEMORY_MARKER = "AGENTLITE_SHARED_MEMORY v1"
 FALLBACK_REASON_BUCKETS = {
     "missing_messages_argument": "input_contract_missing",
     "messages_not_sequence": "input_contract_invalid",
@@ -130,6 +136,9 @@ class HookCallContext:
     target_kind: str
     team_participants: tuple[str, ...] = ()
     transport_metadata: dict[str, Any] = field(default_factory=dict)
+    memory_context: MemoryContext = field(
+        default_factory=lambda: MemoryContext([], [])
+    )
 
 
 class AutoGenHookManager:
@@ -159,13 +168,28 @@ class AutoGenHookManager:
         self.core_receiver_hydrate_mode = _resolve_core_receiver_hydrate_mode(
             os.getenv(CORE_RECEIVER_HYDRATE_ENV, "")
         )
+        self.shared_memory_enabled = _resolve_shared_memory_enabled(
+            broadcast_mode=self.broadcast_mode,
+            raw_value=os.getenv(SHARED_MEMORY_ENV),
+        )
+        self.memory_scope_id = _resolve_memory_scope_id(context)
+        memory_store = (
+            MemoryStoreLite(
+                context.data_dir
+                / "shared_memory"
+                / "autogen"
+                / self.memory_scope_id
+            )
+            if self.shared_memory_enabled
+            else MemoryStoreLite()
+        )
         self.kernel = CollaborationKernel(
             agents=[],
             token_counter=self.token_counter,
             metrics=self.metrics,
             trace=self.trace,
             state_pool=StatePoolLite(self.output_dir / "state"),
-            memory_store=None,
+            memory_store=memory_store,
         )
         self.kernel_session = self.kernel.open_session(
             framework="autogen",
@@ -178,10 +202,14 @@ class AutoGenHookManager:
                 "team_rewrite_enabled": self.team_rewrite_enabled,
                 "handoff_rewrite_enabled": self.handoff_rewrite_enabled,
                 "tool_summary_rewrite_enabled": self.tool_summary_rewrite_enabled,
+                "shared_memory_enabled": self.shared_memory_enabled,
+                "memory_scope_id": self.memory_scope_id,
             },
         )
         self._sequence = 0
         self._lock = threading.Lock()
+        self._memory_lock = threading.RLock()
+        self._promoted_memory_fingerprints: set[str] = set()
         self._core_response_rewrite_depth = 0
         self._patched_methods: set[str] = set()
         self._patched_modules: set[str] = set()
@@ -194,6 +222,158 @@ class AutoGenHookManager:
     @property
     def patched_modules(self) -> list[str]:
         return sorted(self._patched_modules)
+
+    def _prepare_shared_memory_context(
+        self,
+        *,
+        task: TaskSpec,
+        target_kind: str,
+        method_name: str,
+        prompt: str,
+    ) -> MemoryContext:
+        empty = MemoryContext([], [])
+        if not self.shared_memory_enabled or not prompt.strip():
+            return empty
+        if SHARED_MEMORY_MARKER in prompt or _contains_agentlite_rewrite_marker(prompt):
+            return empty
+        supported_call = (
+            target_kind == "agentchat_team" and method_name == "run_stream"
+        ) or (
+            target_kind == "agentchat_agent"
+            and method_name in {"on_messages", "on_messages_stream"}
+        )
+        if not supported_call:
+            return empty
+        with self._memory_lock:
+            memory_context = self._safe_kernel_call(
+                "autogen_prepare_shared_memory",
+                lambda: self.kernel.prepare_memory_context(
+                    task=task,
+                    round_id=1,
+                    mode="runtime_lite",
+                    final_task=_looks_like_final_task(prompt),
+                    deliverable_budget_chars=1800,
+                    strict_group_scope=True,
+                ),
+            )
+        if not isinstance(memory_context, MemoryContext):
+            return empty
+        memory_text = "\n".join(memory_context.prompt_views)
+        self.trace.write(
+            "autogen_memory_retrieval",
+            {
+                "call_id": task.task_id,
+                "task_id": task.task_id,
+                "group_id": task.group_id,
+                "target_kind": target_kind,
+                "method": method_name,
+                "memory_scope_id": self.memory_scope_id,
+                "memory_query_count": 1,
+                "memory_hit_count": len(memory_context.refs),
+                "useful_memory_hit_count": len(memory_context.refs),
+                "wrong_memory_hit_count": 0,
+                "retrieved_memory_tokens": _count_tokens(
+                    self.token_counter,
+                    memory_text,
+                ),
+                "memory_refs": [
+                    _memory_ref_payload(ref) for ref in memory_context.refs
+                ],
+                "prompt_view_preview": _preview(memory_text),
+            },
+        )
+        return memory_context
+
+    def _promote_autogen_output_to_memory(
+        self,
+        *,
+        context: HookCallContext,
+        decoded_messages: list[Any],
+        text: str,
+        state_refs: list[StateRef],
+    ) -> Any | None:
+        if not self.shared_memory_enabled or not state_refs:
+            return None
+        if context.target_kind == "agentchat_team" and context.method_name == "run_stream":
+            candidate_kind = "autogen_team_final"
+            confidence, importance, coverage = 0.86, 0.82, 0.78
+        elif context.target_kind == "agentchat_agent" and context.method_name in {
+            "on_messages",
+            "on_messages_stream",
+        }:
+            candidate_kind = "autogen_agent_intermediate"
+            confidence, importance, coverage = 0.50, 0.40, 0.60
+        else:
+            return None
+
+        summary = _memory_summary(decoded_messages, text, limit=900)
+        if len(summary.strip()) < 12:
+            return None
+        fingerprint = hashlib.sha256(
+            f"{candidate_kind}:{context.agent.agent_id}:{summary}".encode("utf-8")
+        ).hexdigest()
+        with self._memory_lock:
+            if fingerprint in self._promoted_memory_fingerprints:
+                return None
+            self._promoted_memory_fingerprints.add(fingerprint)
+            slot_hint = _autogen_memory_slot_hint(context.task.prompt, summary)
+            report = self._safe_kernel_call(
+                "autogen_promote_memory_candidate",
+                lambda: self.kernel.promote_memory_candidate(
+                    task=context.task,
+                    round_id=1,
+                    mode="runtime_lite",
+                    agent=context.agent,
+                    summary=summary,
+                    state_refs=state_refs,
+                    slot_hint=slot_hint,
+                    task_topic=(
+                        f"autogen.{_safe_identifier(context.task.group_id)}."
+                        f"{slot_hint}"
+                    ),
+                    candidate_kind=candidate_kind,
+                    confidence=confidence,
+                    importance_hint=importance,
+                    coverage_score=coverage,
+                ),
+            )
+            self._write_pool_snapshot(context.task)
+        if report is not None:
+            self.trace.write(
+                "autogen_memory_candidate",
+                {
+                    "call_id": context.call_id,
+                    "task_id": context.task.task_id,
+                    "agent_id": context.agent.agent_id,
+                    "candidate_kind": candidate_kind,
+                    "candidate_id": getattr(report, "candidate_id", ""),
+                    "admission_status": getattr(report, "admission_status", ""),
+                    "admission_reasons": getattr(report, "admission_reasons", []),
+                    "memory_refs": (
+                        [_memory_ref_payload(report.memory_ref)]
+                        if getattr(report, "memory_ref", None) is not None
+                        else []
+                    ),
+                },
+            )
+        return report
+
+    def _write_pool_snapshot(self, task: TaskSpec) -> None:
+        snapshot = {
+            "task_id": task.task_id,
+            "group_id": task.group_id,
+            "mode": "runtime_lite",
+            "memory_scope_id": self.memory_scope_id,
+            "state_pool": self.kernel.state_pool.snapshot(),
+            "memory_store": self.kernel.memory_store.snapshot(),
+        }
+        path = self.output_dir / "pool_snapshot_latest.json"
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(
+            json.dumps(snapshot, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temporary.replace(path)
 
     def _enter_core_send_message(self, *, response_rewrite_enabled: bool) -> None:
         if not response_rewrite_enabled:
@@ -264,16 +444,36 @@ class AutoGenHookManager:
     ) -> HookCallContext:
         call_id = self._next_call_id()
         agent = self.describe_agent(instance, target_kind=target_kind)
+        team_participants = self.describe_team_participants(
+            instance,
+            target_kind=target_kind,
+        )
         decoded_messages = self.codec.decode_many({"args": args, "kwargs": kwargs})
         prompt = self.codec.render_text(decoded_messages) or _extract_text(
             {"args": args, "kwargs": kwargs}
         )
+        collaboration_group_id = _resolve_collaboration_group_id(
+            memory_scope_id=self.memory_scope_id,
+            target_kind=target_kind,
+            agent_id=agent.agent_id,
+            team_participants=team_participants,
+        )
         task = TaskSpec(
             task_id=call_id,
-            group_id=self.context.session_id,
+            group_id=(
+                collaboration_group_id
+                if self.shared_memory_enabled
+                else self.context.session_id
+            ),
             title=f"AutoGen {target_kind} {method_name}",
             prompt=prompt,
             expected_agents=[agent.agent_id],
+        )
+        memory_context = self._prepare_shared_memory_context(
+            task=task,
+            target_kind=target_kind,
+            method_name=method_name,
+            prompt=prompt,
         )
         hook_context = HookCallContext(
             call_id=call_id,
@@ -281,10 +481,7 @@ class AutoGenHookManager:
             agent=agent,
             method_name=method_name,
             target_kind=target_kind,
-            team_participants=self.describe_team_participants(
-                instance,
-                target_kind=target_kind,
-            ),
+            team_participants=team_participants,
             transport_metadata=(
                 _core_transport_metadata(
                     method_name=method_name,
@@ -300,6 +497,7 @@ class AutoGenHookManager:
                 if target_kind == "core_agent"
                 else {}
             ),
+            memory_context=memory_context,
         )
         self._safe_kernel_call(
             "before_agent_receive",
@@ -309,6 +507,7 @@ class AutoGenHookManager:
                 mode="runtime_lite",
                 agent=agent,
                 state_refs=[],
+                memory_context=memory_context,
             ),
         )
         self.trace.write(
@@ -323,6 +522,14 @@ class AutoGenHookManager:
                 "input_preview": _preview(prompt),
                 "team_participants": list(hook_context.team_participants),
                 "transport_metadata": hook_context.transport_metadata,
+                "memory_refs": [
+                    _memory_ref_payload(ref) for ref in memory_context.refs
+                ],
+                "memory_hit_count": len(memory_context.refs),
+                "retrieved_memory_tokens": _count_tokens(
+                    self.token_counter,
+                    "\n".join(memory_context.prompt_views),
+                ),
                 "decoded_messages": [
                     message.to_dict() for message in decoded_messages
                 ],
@@ -394,6 +601,17 @@ class AutoGenHookManager:
             )
             if isinstance(ref_payload, dict):
                 state_ref_payload.append(ref_payload)
+        admission_report = self._promote_autogen_output_to_memory(
+            context=context,
+            decoded_messages=decoded_messages,
+            text=text,
+            state_refs=list(state_refs),
+        )
+        admitted_memory_refs = (
+            [_memory_ref_payload(admission_report.memory_ref)]
+            if getattr(admission_report, "memory_ref", None) is not None
+            else []
+        )
         self.trace.write(
             "autogen_agent_output",
             {
@@ -405,6 +623,12 @@ class AutoGenHookManager:
                 "output_chars": len(text),
                 "output_preview": _preview(text),
                 "state_refs": state_ref_payload,
+                "memory_refs": admitted_memory_refs,
+                "memory_admission_status": getattr(
+                    admission_report,
+                    "admission_status",
+                    "",
+                ),
                 "decoded_messages": [
                     message.to_dict() for message in decoded_messages
                 ],
@@ -416,6 +640,11 @@ class AutoGenHookManager:
             native_text=text,
             state_refs=list(state_refs or []),
             state_ref_payload=state_ref_payload,
+            memory_refs=(
+                [admission_report.memory_ref]
+                if getattr(admission_report, "memory_ref", None) is not None
+                else []
+            ),
         )
         self._record_shadow_broadcast_replacement(
             context=context,
@@ -434,6 +663,7 @@ class AutoGenHookManager:
         native_text: str,
         state_refs: list[Any],
         state_ref_payload: list[dict[str, Any]],
+        memory_refs: list[Any],
     ) -> None:
         if not state_refs:
             return
@@ -454,7 +684,7 @@ class AutoGenHookManager:
                 declared_receiver=plan.declared_receiver,
                 summary=plan.summary,
                 state_refs=state_refs,
-                memory_refs=[],
+                memory_refs=memory_refs,
             ),
         )
         if not isinstance(envelope_json, str) or not envelope_json:
@@ -485,6 +715,9 @@ class AutoGenHookManager:
                 "method": context.method_name,
                 "plan": plan.to_dict(),
                 "state_refs": state_ref_payload,
+                "memory_refs": [
+                    _memory_ref_payload(ref) for ref in memory_refs
+                ],
                 "state_ref_count": len(state_ref_payload),
                 "shadow_envelope": envelope_payload,
                 "shadow_envelope_json_chars": len(envelope_json),
@@ -619,7 +852,7 @@ class AutoGenHookManager:
         wire_envelope_json = json.dumps(
             wire_envelope, ensure_ascii=False, separators=(",", ":")
         )
-        prompt_views = []
+        state_prompt_views = []
         for state_ref in state_refs:
             view = self._safe_kernel_call(
                 "autogen_core_transport_prompt_view",
@@ -629,8 +862,13 @@ class AutoGenHookManager:
                 ),
             )
             if isinstance(view, str) and view:
-                prompt_views.append(view)
-        prompt_view_text = "\n".join(prompt_views)
+                state_prompt_views.append(view)
+        memory_refs = list(context.memory_context.refs)
+        memory_prompt_views = list(context.memory_context.prompt_views)
+        prompt_view_text = _join_state_and_memory_views(
+            state_prompt_views,
+            memory_prompt_views,
+        )
         native_tokens = _count_tokens(self.token_counter, native_text)
         wire_tokens = _count_tokens(self.token_counter, wire_envelope_json)
         prompt_view_tokens = _count_tokens(self.token_counter, prompt_view_text)
@@ -752,7 +990,7 @@ class AutoGenHookManager:
             )
             if isinstance(ref_payload, dict):
                 state_ref_payload.append(ref_payload)
-        prompt_views = []
+        state_prompt_views = []
         for state_ref in state_refs:
             view = self._safe_kernel_call(
                 "core_content_real_rewrite_prompt_view",
@@ -762,8 +1000,13 @@ class AutoGenHookManager:
                 ),
             )
             if isinstance(view, str) and view:
-                prompt_views.append(view)
-        prompt_view_text = "\n".join(prompt_views)
+                state_prompt_views.append(view)
+        memory_refs = list(context.memory_context.refs)
+        memory_prompt_views = list(context.memory_context.prompt_views)
+        prompt_view_text = _join_state_and_memory_views(
+            state_prompt_views,
+            memory_prompt_views,
+        )
         envelope_json = self._safe_kernel_call(
             "autogen_build_core_content_real_rewrite_handoff",
             lambda: self.kernel.build_handoff(
@@ -777,7 +1020,7 @@ class AutoGenHookManager:
                     "preserving the native Python message type"
                 ),
                 state_refs=state_refs,
-                memory_refs=[],
+                memory_refs=memory_refs,
             ),
         )
         envelope_payload = (
@@ -875,12 +1118,18 @@ class AutoGenHookManager:
         native_text: str = "",
         rewritten_content: str = "",
         state_refs: list[dict[str, Any]] | None = None,
+        memory_refs: list[dict[str, Any]] | None = None,
         wire_envelope: dict[str, Any] | None = None,
         prompt_view_text: str = "",
+        retrieved_memory_tokens: int = 0,
         semantic_checks: dict[str, Any] | None = None,
     ) -> None:
         native_tokens = _count_tokens(self.token_counter, native_text)
         rewritten_tokens = _count_tokens(self.token_counter, rewritten_content)
+        total_prompt_view_tokens = _count_tokens(
+            self.token_counter,
+            prompt_view_text,
+        )
         fallback_buckets = _fallback_buckets(fallback_reasons)
         self.trace.write(
             "autogen_core_content_real_rewrite",
@@ -1611,6 +1860,7 @@ class AutoGenHookManager:
         receiver_entries: list[dict[str, Any]] = []
         total_wire_tokens = 0
         total_prompt_view_tokens = 0
+        total_retrieved_memory_tokens = 0
         for receiver_plan in broadcast_plan.receiver_plans:
             entry = self._build_receiver_broadcast_entry(
                 context=context,
@@ -1623,21 +1873,30 @@ class AutoGenHookManager:
             receiver_entries.append(entry)
             total_wire_tokens += int(entry.get("shadow_wire_tokens", 0) or 0)
             total_prompt_view_tokens += int(entry.get("prompt_view_tokens", 0) or 0)
+            total_retrieved_memory_tokens += int(
+                entry.get("retrieved_memory_tokens", 0) or 0
+            )
 
         fallback_reasons = _broadcast_fallback_reasons(
             expected_receivers=list(context.team_participants),
             receiver_entries=receiver_entries,
             native_tokens_per_receiver=_count_tokens(self.token_counter, native_text),
             total_wire_tokens=total_wire_tokens,
-            total_prompt_view_tokens=total_prompt_view_tokens,
+            total_prompt_view_tokens=(
+                total_prompt_view_tokens + total_retrieved_memory_tokens
+            ),
         )
+        if context.memory_context.refs:
+            fallback_reasons = [
+                reason for reason in fallback_reasons if reason != "token_not_reduced"
+            ]
         rewritten_content = _build_team_real_rewrite_content(
             receiver_entries=receiver_entries,
             state_refs=state_ref_payload,
         )
         native_tokens = _count_tokens(self.token_counter, native_text)
         rewritten_tokens = _count_tokens(self.token_counter, rewritten_content)
-        if native_tokens <= rewritten_tokens:
+        if native_tokens <= rewritten_tokens and not context.memory_context.refs:
             fallback_reasons.append("team_task_token_not_reduced")
         if fallback_reasons:
             self._record_team_rewrite_audit(
@@ -1896,7 +2155,12 @@ class AutoGenHookManager:
             )
             if isinstance(view, str) and view:
                 prompt_views.append(view)
-        prompt_view_text = "\n".join(prompt_views)
+        memory_refs = list(context.memory_context.refs)
+        memory_prompt_views = list(context.memory_context.prompt_views)
+        prompt_view_text = _join_state_and_memory_views(
+            prompt_views,
+            memory_prompt_views,
+        )
         envelope_json = self._safe_kernel_call(
             "autogen_build_real_rewrite_handoff",
             lambda: self.kernel.build_handoff(
@@ -1910,7 +2174,7 @@ class AutoGenHookManager:
                     "agent receives compact SHP view"
                 ),
                 state_refs=state_refs,
-                memory_refs=[],
+                memory_refs=memory_refs,
             ),
         )
         envelope_payload = (
@@ -1940,7 +2204,7 @@ class AutoGenHookManager:
             fallback_reasons.append("message_clone_failed")
         original_tokens = _count_tokens(self.token_counter, native_text)
         rewritten_tokens = _count_tokens(self.token_counter, rewritten_content)
-        if original_tokens <= rewritten_tokens:
+        if original_tokens <= rewritten_tokens and not memory_refs:
             fallback_reasons.append("token_not_reduced")
         if fallback_reasons:
             self._record_agent_rewrite_audit(
@@ -1950,8 +2214,13 @@ class AutoGenHookManager:
                 native_text=native_text,
                 rewritten_content=rewritten_content,
                 state_refs=state_ref_payload,
+                memory_refs=[_memory_ref_payload(ref) for ref in memory_refs],
                 wire_envelope=wire_envelope,
                 prompt_view_text=prompt_view_text,
+                retrieved_memory_tokens=_count_tokens(
+                    self.token_counter,
+                    "\n".join(memory_prompt_views),
+                ),
             )
             return None
 
@@ -1973,8 +2242,13 @@ class AutoGenHookManager:
             native_text=native_text,
             rewritten_content=rewritten_content,
             state_refs=state_ref_payload,
+            memory_refs=[_memory_ref_payload(ref) for ref in memory_refs],
             wire_envelope=wire_envelope,
             prompt_view_text=prompt_view_text,
+            retrieved_memory_tokens=_count_tokens(
+                self.token_counter,
+                "\n".join(memory_prompt_views),
+            ),
         )
         return new_args, new_kwargs
 
@@ -2462,13 +2736,19 @@ class AutoGenHookManager:
         native_text: str = "",
         rewritten_content: str = "",
         state_refs: list[dict[str, Any]] | None = None,
+        memory_refs: list[dict[str, Any]] | None = None,
         wire_envelope: dict[str, Any] | None = None,
         prompt_view_text: str = "",
+        retrieved_memory_tokens: int = 0,
         rewrite_safety: dict[str, Any] | None = None,
         typed_rewrite_candidate: dict[str, Any] | None = None,
     ) -> None:
         native_tokens = _count_tokens(self.token_counter, native_text)
         rewritten_tokens = _count_tokens(self.token_counter, rewritten_content)
+        total_prompt_view_tokens = _count_tokens(
+            self.token_counter,
+            prompt_view_text,
+        )
         fallback_buckets = _fallback_buckets(fallback_reasons)
         self.trace.write(
             "autogen_agent_input_real_rewrite",
@@ -2490,8 +2770,14 @@ class AutoGenHookManager:
                 "fallback_buckets": fallback_buckets,
                 "fallback_bucket_counts": _count_values(fallback_buckets),
                 "state_refs": state_refs or [],
+                "memory_refs": memory_refs or [],
                 "shadow_wire_envelope": wire_envelope or {},
                 "prompt_view_available": bool(prompt_view_text.strip()),
+                "prompt_view_tokens": max(
+                    0,
+                    total_prompt_view_tokens - retrieved_memory_tokens,
+                ),
+                "retrieved_memory_tokens": retrieved_memory_tokens,
                 "native_input_tokens": native_tokens,
                 "rewritten_input_tokens": rewritten_tokens,
                 "token_delta_native_minus_rewrite": native_tokens - rewritten_tokens,
@@ -2519,9 +2805,14 @@ class AutoGenHookManager:
         rewritten_tokens = _count_tokens(self.token_counter, rewritten_content)
         receiver_entries = list(receiver_entries or [])
         native_full_broadcast_tokens = native_tokens * len(receiver_entries)
+        retrieved_memory_tokens = sum(
+            int(entry.get("retrieved_memory_tokens", 0) or 0)
+            for entry in receiver_entries
+        )
         wire_plus_prompt_view_tokens = sum(
             int(entry.get("shadow_wire_tokens", 0) or 0)
             + int(entry.get("prompt_view_tokens", 0) or 0)
+            + int(entry.get("retrieved_memory_tokens", 0) or 0)
             for entry in receiver_entries
         )
         fallback_buckets = _fallback_buckets(fallback_reasons)
@@ -2547,6 +2838,12 @@ class AutoGenHookManager:
                 "fallback_buckets": fallback_buckets,
                 "fallback_bucket_counts": _count_values(fallback_buckets),
                 "state_refs": state_refs or [],
+                "memory_refs": [
+                    ref
+                    for entry in receiver_entries
+                    for ref in (entry.get("memory_refs", []) or [])
+                ],
+                "retrieved_memory_tokens": retrieved_memory_tokens,
                 "receiver_count": len(receiver_entries),
                 "receiver_plans": _team_rewrite_receiver_audit(receiver_entries),
                 "broadcast_plan": broadcast_plan or {},
@@ -2674,24 +2971,32 @@ class AutoGenHookManager:
         receiver_entries: list[dict[str, Any]] = []
         total_wire_tokens = 0
         total_prompt_view_tokens = 0
+        total_retrieved_memory_tokens = 0
+        include_memory = False
         for receiver_plan in broadcast_plan.receiver_plans:
             entry = self._build_receiver_broadcast_entry(
                 context=context,
                 receiver_plan=receiver_plan,
                 state_refs=state_refs,
                 state_ref_payload=state_ref_payload,
+                include_memory=include_memory,
             )
             if not entry:
                 continue
             receiver_entries.append(entry)
             total_wire_tokens += int(entry.get("shadow_wire_tokens", 0) or 0)
             total_prompt_view_tokens += int(entry.get("prompt_view_tokens", 0) or 0)
+            total_retrieved_memory_tokens += int(
+                entry.get("retrieved_memory_tokens", 0) or 0
+            )
         fallback_reasons = _broadcast_fallback_reasons(
             expected_receivers=list(context.team_participants),
             receiver_entries=receiver_entries,
             native_tokens_per_receiver=_count_tokens(self.token_counter, native_text),
             total_wire_tokens=total_wire_tokens,
-            total_prompt_view_tokens=total_prompt_view_tokens,
+            total_prompt_view_tokens=(
+                total_prompt_view_tokens + total_retrieved_memory_tokens
+            ),
         )
         self._write_broadcast_shadow_event(
             context=context,
@@ -2724,8 +3029,16 @@ class AutoGenHookManager:
             int(entry.get("prompt_view_tokens", 0) or 0)
             for entry in receiver_entries
         )
+        total_retrieved_memory_tokens = sum(
+            int(entry.get("retrieved_memory_tokens", 0) or 0)
+            for entry in receiver_entries
+        )
         native_full_broadcast_tokens = native_tokens_per_receiver * receiver_count
-        wire_plus_prompt_view_tokens = total_wire_tokens + total_prompt_view_tokens
+        wire_plus_prompt_view_tokens = (
+            total_wire_tokens
+            + total_prompt_view_tokens
+            + total_retrieved_memory_tokens
+        )
         delta = native_full_broadcast_tokens - wire_plus_prompt_view_tokens
         reduction_ratio = (
             delta / native_full_broadcast_tokens
@@ -2757,12 +3070,18 @@ class AutoGenHookManager:
                 "plan": broadcast_plan,
                 "team_participants": list(context.team_participants),
                 "state_refs": state_ref_payload,
+                "memory_refs": [
+                    ref
+                    for entry in receiver_entries
+                    for ref in (entry.get("memory_refs", []) or [])
+                ],
                 "receiver_count": receiver_count,
                 "receiver_plans": receiver_entries,
                 "native_tokens_per_receiver": native_tokens_per_receiver,
                 "native_full_broadcast_tokens": native_full_broadcast_tokens,
                 "shadow_wire_tokens": total_wire_tokens,
                 "prompt_view_tokens": total_prompt_view_tokens,
+                "retrieved_memory_tokens": total_retrieved_memory_tokens,
                 "wire_plus_prompt_view_tokens": wire_plus_prompt_view_tokens,
                 "token_delta_native_broadcast_minus_shadow": delta,
                 "token_reduction_ratio": round(reduction_ratio, 6),
@@ -2781,7 +3100,11 @@ class AutoGenHookManager:
         receiver_plan: AutoGenShadowHandoffPlan,
         state_refs: list[Any],
         state_ref_payload: list[dict[str, Any]],
+        include_memory: bool = True,
     ) -> dict[str, Any]:
+        memory_refs = (
+            list(context.memory_context.refs) if include_memory else []
+        )
         envelope_json = self._safe_kernel_call(
             "autogen_build_broadcast_shadow_handoff",
             lambda: self.kernel.build_handoff(
@@ -2792,7 +3115,7 @@ class AutoGenHookManager:
                 declared_receiver=receiver_plan.declared_receiver,
                 summary=receiver_plan.summary,
                 state_refs=state_refs,
-                memory_refs=[],
+                memory_refs=memory_refs,
             ),
         )
         if not isinstance(envelope_json, str) or not envelope_json:
@@ -2802,7 +3125,7 @@ class AutoGenHookManager:
         wire_envelope_json = json.dumps(
             wire_envelope, ensure_ascii=False, separators=(",", ":")
         )
-        prompt_views = []
+        state_prompt_views = []
         for state_ref in state_refs:
             view = self._safe_kernel_call(
                 "autogen_broadcast_prompt_view",
@@ -2812,8 +3135,14 @@ class AutoGenHookManager:
                 ),
             )
             if isinstance(view, str) and view:
-                prompt_views.append(view)
-        prompt_view_text = "\n".join(prompt_views)
+                state_prompt_views.append(view)
+        memory_prompt_views = (
+            list(context.memory_context.prompt_views) if include_memory else []
+        )
+        prompt_view_text = _join_state_and_memory_views(
+            state_prompt_views,
+            memory_prompt_views,
+        )
         schema_valid = _wire_envelope_schema_valid(wire_envelope)
         return {
             "receiver": receiver_plan.declared_receiver,
@@ -2821,6 +3150,9 @@ class AutoGenHookManager:
             "message_kinds": receiver_plan.message_kinds,
             "summary": receiver_plan.summary,
             "state_refs": state_ref_payload,
+            "memory_refs": [
+                _memory_ref_payload(ref) for ref in memory_refs
+            ],
             "shadow_wire_envelope": wire_envelope,
             "schema_valid": schema_valid,
             "shadow_wire_tokens": _count_tokens(
@@ -2829,10 +3161,16 @@ class AutoGenHookManager:
             ),
             "prompt_view_tokens": _count_tokens(
                 self.token_counter,
-                prompt_view_text,
+                "\n".join(state_prompt_views),
+            ),
+            "retrieved_memory_tokens": _count_tokens(
+                self.token_counter,
+                "\n".join(memory_prompt_views),
             ),
             "prompt_view_available": bool(prompt_view_text.strip()),
             "prompt_view_text": prompt_view_text,
+            "state_prompt_view_text": "\n".join(state_prompt_views),
+            "memory_prompt_view_text": "\n".join(memory_prompt_views),
             "prompt_view_preview": _preview(prompt_view_text),
         }
 
@@ -3433,6 +3771,13 @@ def activate(context: BootstrapContext) -> DriverActivation:
             "core_content_rewrite_env": CORE_CONTENT_REWRITE_ENV,
             "core_receiver_hydrate_mode": manager.core_receiver_hydrate_mode,
             "core_receiver_hydrate_env": CORE_RECEIVER_HYDRATE_ENV,
+            "shared_memory_enabled": manager.shared_memory_enabled,
+            "shared_memory_env": SHARED_MEMORY_ENV,
+            "memory_scope_id": manager.memory_scope_id,
+            "memory_scope_env": MEMORY_SCOPE_ENV,
+            "memory_store_dir": str(
+                manager.kernel.memory_store.storage_dir or ""
+            ),
             "patched_modules": manager.patched_modules,
             "patched_methods": manager.patched_methods,
             "trace_path": str(manager.trace.path),
@@ -3974,6 +4319,103 @@ def _candidate_audit_view(candidate: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
+def _resolve_shared_memory_enabled(*, broadcast_mode: str, raw_value: str | None) -> bool:
+    if broadcast_mode != "real-rewrite":
+        return False
+    if raw_value is None or not raw_value.strip():
+        return True
+    return _truthy_env(raw_value)
+
+
+def _resolve_memory_scope_id(context: Any) -> str:
+    explicit = os.getenv(MEMORY_SCOPE_ENV, "").strip()
+    if explicit:
+        return _safe_identifier(explicit)[:80]
+    target_cwd = Path(context.target_cwd).expanduser().resolve()
+    digest = hashlib.sha256(str(target_cwd).casefold().encode("utf-8")).hexdigest()[:12]
+    label = _safe_identifier(target_cwd.name or "workspace")[:40]
+    return f"{label}_{digest}"
+
+
+def _resolve_collaboration_group_id(
+    *,
+    memory_scope_id: str,
+    target_kind: str,
+    agent_id: str,
+    team_participants: tuple[str, ...],
+) -> str:
+    if target_kind == "agentchat_team":
+        normalized = sorted(_safe_identifier(item) for item in team_participants)
+        signature = "|".join(normalized) or "unnamed_team"
+        digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:12]
+        return f"{memory_scope_id}.team_{digest}"
+    if target_kind == "agentchat_agent":
+        return f"{memory_scope_id}.agent_{_safe_identifier(agent_id)[:48]}"
+    return memory_scope_id
+
+
+def _memory_ref_payload(ref: Any) -> dict[str, Any]:
+    return {
+        "memory_id": str(getattr(ref, "memory_id", "") or ""),
+        "version_id": int(getattr(ref, "version_id", 0) or 0),
+        "status": str(getattr(ref, "status", "") or ""),
+        "task_topic": str(getattr(ref, "task_topic", "") or ""),
+        "memory_view_id": str(getattr(ref, "memory_view_id", "") or ""),
+        "slot_id": str(getattr(ref, "slot_id", "") or ""),
+    }
+
+
+def _memory_summary(messages: list[Any], fallback: str, *, limit: int) -> str:
+    for message in reversed(messages):
+        content = str(getattr(message, "content_text", "") or "").strip()
+        source = str(getattr(message, "source", "") or "").lower()
+        native_type = str(getattr(message, "native_type", "") or "")
+        message_kind = str(getattr(message, "message_kind", "") or "")
+        if not content or source == "user" or message_kind != "text":
+            continue
+        if native_type.endswith("Event") or native_type == "ThoughtEvent":
+            continue
+        return " ".join(content.split())[:limit]
+    return " ".join(fallback.split())[:limit]
+
+
+def _autogen_memory_slot_hint(prompt: str, summary: str) -> str:
+    text = f"{prompt}\n{summary}".lower()
+    if any(term in text for term in ("旅行", "行程", "预算", "travel", "itinerary")):
+        return "travel_preference"
+    if any(term in text for term in ("安全", "审计", "证据链", "security", "audit")):
+        return "security_audit"
+    if _looks_like_final_task(text):
+        return "final_deliverable"
+    return "reuse_strategy"
+
+
+def _looks_like_final_task(text: str) -> bool:
+    lowered = text.lower()
+    return bool(
+        re.search(r"(?:^|[^a-z0-9])(?:a|b)?10(?:[^0-9]|$)", lowered)
+        or "最终" in lowered
+        or "final deliverable" in lowered
+        or "final answer" in lowered
+    )
+
+
+def _join_state_and_memory_views(
+    state_prompt_views: list[str],
+    memory_prompt_views: list[str],
+) -> str:
+    sections = [view for view in state_prompt_views if view.strip()]
+    if memory_prompt_views:
+        sections.extend(
+            [
+                SHARED_MEMORY_MARKER,
+                "以下 MemoryView 是同一协作作用域中已通过规则准入的共享记忆，请在当前任务中复用并服从用户的新修订。",
+                *[view for view in memory_prompt_views if view.strip()],
+            ]
+        )
+    return "\n".join(sections)
+
+
 def _build_real_rewrite_content(
     *,
     wire_envelope: dict[str, Any],
@@ -4070,10 +4512,24 @@ def _build_team_real_rewrite_content(
     receiver_entries: list[dict[str, Any]],
     state_refs: list[dict[str, Any]],
 ) -> str:
+    memory_refs = []
+    seen_memory_ids: set[str] = set()
+    memory_prompt_view_text = ""
+    for entry in receiver_entries:
+        for ref in entry.get("memory_refs", []) or []:
+            memory_id = str(ref.get("memory_id", "")) if isinstance(ref, dict) else ""
+            if memory_id and memory_id not in seen_memory_ids:
+                seen_memory_ids.add(memory_id)
+                memory_refs.append(ref)
+        if not memory_prompt_view_text:
+            memory_prompt_view_text = str(
+                entry.get("memory_prompt_view_text", "") or ""
+            )
     manifest = {
         "protocol": "agentlite.team_rewrite.v1",
         "receivers": [entry.get("receiver", "") for entry in receiver_entries],
         "state_refs": state_refs,
+        "memory_refs": memory_refs,
         "receiver_wires": [
             {
                 "receiver": entry.get("receiver", ""),
@@ -4091,11 +4547,24 @@ def _build_team_real_rewrite_content(
     ]
     for entry in receiver_entries:
         receiver = str(entry.get("receiver", "") or "")
-        prompt_view_text = str(entry.get("prompt_view_text", "") or "")
+        prompt_view_text = str(
+            entry.get("state_prompt_view_text")
+            or entry.get("prompt_view_text", "")
+            or ""
+        )
         sections.extend(
             [
                 f"--- receiver: {receiver}",
                 prompt_view_text,
+            ]
+        )
+    if memory_prompt_view_text:
+        sections.extend(
+            [
+                "--- shared_memory",
+                SHARED_MEMORY_MARKER,
+                "以下 MemoryView 是同一协作作用域中已通过规则准入的共享记忆，请在当前任务中复用并服从用户的新修订。",
+                memory_prompt_view_text,
             ]
         )
     return "\n".join(sections)
@@ -4115,7 +4584,12 @@ def _team_rewrite_receiver_audit(
                 "prompt_view_available": bool(entry.get("prompt_view_available")),
                 "shadow_wire_tokens": int(entry.get("shadow_wire_tokens", 0) or 0),
                 "prompt_view_tokens": int(entry.get("prompt_view_tokens", 0) or 0),
+                "retrieved_memory_tokens": int(
+                    entry.get("retrieved_memory_tokens", 0) or 0
+                ),
                 "state_ref_count": len(entry.get("state_refs", []) or []),
+                "memory_ref_count": len(entry.get("memory_refs", []) or []),
+                "memory_refs": entry.get("memory_refs", []) or [],
                 "prompt_view_preview": entry.get("prompt_view_preview", ""),
             }
         )

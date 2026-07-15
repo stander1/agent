@@ -573,6 +573,7 @@ class MemoryStoreLite:
         )
 
         if status != "admitted":
+            self._persist_snapshot()
             return report
 
         write_report = self.write_memory_with_report(
@@ -603,19 +604,36 @@ class MemoryStoreLite:
         return report
 
     def search_memory(
-        self, query: str, tags: list[str] | None = None, top_k: int = 3
+        self,
+        query: str,
+        tags: list[str] | None = None,
+        top_k: int = 3,
+        required_tags: list[str] | None = None,
     ) -> list[MemoryRef]:
-        return self.search_memory_with_report(query, tags=tags, top_k=top_k).refs
+        return self.search_memory_with_report(
+            query,
+            tags=tags,
+            top_k=top_k,
+            required_tags=required_tags,
+        ).refs
 
     def search_memory_with_report(
-        self, query: str, tags: list[str] | None = None, top_k: int = 3
+        self,
+        query: str,
+        tags: list[str] | None = None,
+        top_k: int = 3,
+        required_tags: list[str] | None = None,
     ) -> MemorySearchReport:
         self.apply_lifecycle_transitions()
         query_terms = set(self._terms(query))
         requested_tags = set(tags or [])
+        required_tag_set = set(required_tags or [])
         scored: list[tuple[int, MemoryObject]] = []
         for memory in self._memories.values():
             if memory.status not in PROMPT_VIEW_MEMORY_STATUSES | DORMANT_MEMORY_STATUSES:
+                continue
+            memory_tags = set(memory.tags)
+            if required_tag_set and not required_tag_set.issubset(memory_tags):
                 continue
             claim = self._claims[memory.claim_id]
             view = self._views[memory.memory_view_id]
@@ -624,8 +642,8 @@ class MemoryStoreLite:
             )
             memory_terms = set(self._terms(searchable))
             overlap = len(query_terms & memory_terms)
-            tag_overlap = len(requested_tags & set(memory.tags))
-            group_overlap = self._group_overlap(requested_tags, set(memory.tags))
+            tag_overlap = len(requested_tags & memory_tags)
+            group_overlap = self._group_overlap(requested_tags, memory_tags)
             score = overlap + tag_overlap * 3 + group_overlap * 5
             if memory.status in DORMANT_MEMORY_STATUSES:
                 score = max(0, score - 2)

@@ -118,6 +118,12 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
     llm_completion = _int(token_summary.get("llm_completion_tokens"))
     llm_total = _int(token_summary.get("llm_total_tokens"))
     llm_call_count = _int(token_summary.get("llm_call_count"))
+    memory_query_count = _int(token_summary.get("memory_query_count"))
+    memory_hit_count = _int(token_summary.get("memory_hit_count"))
+    useful_memory_hit_count = _int(
+        token_summary.get("useful_memory_hit_count")
+    )
+    wrong_memory_hit_count = _int(token_summary.get("wrong_memory_hit_count"))
     savings = native - runtime if native else _int(token_summary.get("token_savings"))
     ratio = savings / native if native > 0 else 0.0
     return [
@@ -129,6 +135,18 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
         _row("agentlite_direct_message_tokens", direct, "AgentLite 在线传输的短消息成本"),
         _row("agentlite_prompt_view_tokens", prompt_view, "下游 Agent 读取 Prompt View 的成本"),
         _row("agentlite_retrieved_memory_tokens", retrieved, "记忆检索读取成本"),
+        _row("agentlite_memory_query_count", memory_query_count, "共享记忆查询次数"),
+        _row("agentlite_memory_hit_count", memory_hit_count, "共享记忆命中条数"),
+        _row(
+            "agentlite_useful_memory_hit_count",
+            useful_memory_hit_count,
+            "进入 Prompt View 的有效记忆条数",
+        ),
+        _row(
+            "agentlite_wrong_memory_hit_count",
+            wrong_memory_hit_count,
+            "被判定为错误或过期的记忆命中条数",
+        ),
         _row("agentlite_control_llm_tokens", control, "控制模块 LLM 成本"),
         _row("agentlite_retry_tokens", retry, "重试带来的额外成本"),
         _row("agentlite_runtime_tokens", runtime, "AgentLite 端到端协作成本"),

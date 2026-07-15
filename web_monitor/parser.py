@@ -388,6 +388,10 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "llm_completion_tokens": 0,
         "llm_total_tokens": 0,
         "llm_call_count": 0,
+        "memory_query_count": 0,
+        "memory_hit_count": 0,
+        "useful_memory_hit_count": 0,
+        "wrong_memory_hit_count": 0,
         "end_to_end_collaboration_tokens": 0,
         "native_baseline_tokens": 0,
         "runtime_tokens": 0,
@@ -398,8 +402,21 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
     }
     seen_cost_events = 0
     for event in trace_events:
+        event_type = str(event.get("event_type", ""))
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-        if event.get("event_type") == "autogen_model_client_usage":
+        if event_type == "autogen_memory_retrieval":
+            breakdown["memory_query_count"] += _int(
+                payload.get("memory_query_count")
+            )
+            breakdown["memory_hit_count"] += _int(payload.get("memory_hit_count"))
+            breakdown["useful_memory_hit_count"] += _int(
+                payload.get("useful_memory_hit_count")
+            )
+            breakdown["wrong_memory_hit_count"] += _int(
+                payload.get("wrong_memory_hit_count")
+            )
+            continue
+        if event_type == "autogen_model_client_usage":
             usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
             prompt = _int(payload.get("llm_prompt_tokens")) or _int(
                 usage.get("prompt_tokens")
@@ -417,13 +434,18 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
             breakdown["llm_total_tokens"] += total
             breakdown["llm_call_count"] += 1
             continue
-        native, runtime, direct, prompt_view = _autogen_event_cost(payload)
+        if event_type == "autogen_agent_receive":
+            continue
+        native, runtime, direct, prompt_view, retrieved_memory = _autogen_event_cost(
+            payload
+        )
         if native <= 0 and runtime <= 0:
             continue
         seen_cost_events += 1
         breakdown["native_baseline_tokens"] += native
         breakdown["direct_message_tokens"] += direct
         breakdown["prompt_view_tokens"] += prompt_view
+        breakdown["retrieved_memory_tokens"] += retrieved_memory
         if runtime > 0:
             breakdown["end_to_end_collaboration_tokens"] += runtime
         else:
@@ -440,15 +462,21 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
     return breakdown
 
 
-def _autogen_event_cost(payload: dict[str, Any]) -> tuple[int, int, int, int]:
-    receiver_wire, receiver_prompt = _receiver_plan_tokens(payload)
-    if receiver_wire or receiver_prompt:
+def _autogen_event_cost(payload: dict[str, Any]) -> tuple[int, int, int, int, int]:
+    receiver_wire, receiver_prompt, receiver_memory = _receiver_plan_tokens(payload)
+    if receiver_wire or receiver_prompt or receiver_memory:
         native = _int(payload.get("native_full_broadcast_tokens"))
         if native <= 0:
             native = _int(payload.get("native_tokens_per_receiver")) * _int(
                 payload.get("receiver_count")
             )
-        return native, receiver_wire + receiver_prompt, receiver_wire, receiver_prompt
+        return (
+            native,
+            receiver_wire + receiver_prompt + receiver_memory,
+            receiver_wire,
+            receiver_prompt,
+            receiver_memory,
+        )
 
     native = _first_positive(
         payload,
@@ -462,6 +490,7 @@ def _autogen_event_cost(payload: dict[str, Any]) -> tuple[int, int, int, int]:
         ],
     )
     prompt_view = _int(payload.get("prompt_view_tokens"))
+    retrieved_memory = _int(payload.get("retrieved_memory_tokens"))
     direct = _first_positive(
         payload,
         [
@@ -485,24 +514,26 @@ def _autogen_event_cost(payload: dict[str, Any]) -> tuple[int, int, int, int]:
         ],
     )
     if runtime <= 0:
-        runtime = direct + prompt_view
-    if direct <= 0 and runtime > prompt_view:
-        direct = runtime - prompt_view
-    return native, runtime, direct, prompt_view
+        runtime = direct + prompt_view + retrieved_memory
+    if direct <= 0 and runtime > prompt_view + retrieved_memory:
+        direct = runtime - prompt_view - retrieved_memory
+    return native, runtime, direct, prompt_view, retrieved_memory
 
 
-def _receiver_plan_tokens(payload: dict[str, Any]) -> tuple[int, int]:
+def _receiver_plan_tokens(payload: dict[str, Any]) -> tuple[int, int, int]:
     entries = payload.get("receiver_plans")
     if not isinstance(entries, list):
-        return 0, 0
+        return 0, 0, 0
     wire = 0
     prompt_view = 0
+    retrieved_memory = 0
     for item in entries:
         if not isinstance(item, dict):
             continue
         wire += _int(item.get("shadow_wire_tokens"))
         prompt_view += _int(item.get("prompt_view_tokens"))
-    return wire, prompt_view
+        retrieved_memory += _int(item.get("retrieved_memory_tokens"))
+    return wire, prompt_view, retrieved_memory
 
 
 def _first_positive(payload: dict[str, Any], keys: list[str]) -> int:

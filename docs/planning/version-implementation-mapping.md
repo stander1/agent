@@ -3385,6 +3385,67 @@ AgentLite 的 AutoGen Core 接管已经不局限于单一 content dataclass；
 3. 真实 LLM agent 的质量和成本对比。
 ```
 
+## 47. v5.13i 补充：AutoGen 共享记忆桥接
+
+版本归属：
+
+```text
+主版本：v5 跨框架适配与比赛验证版
+当前 Driver phase：v5.13i
+性质：把 AutoGen 接管链路接回既有 TLC-Memory 候选与规则准入机制
+```
+
+本项不引入新的小版本创新，也不改变三份最终创新方案的职责边界。它补齐的是工程接线：此前 v3.3 已实现 `State -> PromotionView -> MemoryCandidate -> rules-first admission -> MemoryView`，但 AutoGen Driver 尚未调用该路径。
+
+已实现：
+
+```text
+AutoGen Agent 中间输出写入 StatePool 后生成 pending MemoryCandidate；
+AutoGen Team 最终结果写入 StatePool 后生成候选，并可按规则准入为 MemoryView；
+MemoryStore 持久化到 AgentLite data-dir；
+后续独立 AutoGen 进程按工作区和 Team 成员签名检索；
+MemoryView 通过 memory_ref 和裁剪视图注入 Team 入口；
+共享记忆 token 单独计入 retrieved_memory_tokens；
+不同 Team 使用严格作用域过滤；
+shadow-only / rewrite off 模式不读写共享记忆。
+```
+
+与创新方案的对应关系：
+
+| v5.13i 补充能力 | 对应方案模块 |
+|---|---|
+| 原始输出先写状态池 | SHP-State / 三层状态池 |
+| 中间输出只进入候选池 | TLC-Memory / 记忆候选层 |
+| 规则阈值决定最终准入 | Rules-first Memory Admission |
+| MemoryView 跨进程复用 | TLC-Memory / 共享记忆 |
+| `memory_ref` 随 SHP 传递 | SHP-Control + State/Memory 引用 |
+| 检索 token 单独记账 | CSCC / 端到端成本防转移口径 |
+| Team 签名严格隔离 | 作用域治理 / 防记忆污染 |
+
+真实 AutoGen 0.7.5 双进程验证：
+
+```text
+passed: true
+seed final admission_status: admitted
+recall memory_hit_count: 1
+recall useful_memory_hit_count: 1
+retrieval event MemoryView tokens: 127
+session retrieved_memory_tokens for 3 receivers: 381
+recall task contains shared-memory marker: true
+recall task contains seed fact: true
+ordinary AutoGen script imports AgentLite: false
+```
+
+当前边界：
+
+```text
+只对 real-rewrite 接管模式启用；
+Team 入口仍以受支持的 task: str 路径为主；
+Team 成员签名变化会形成新隔离组；
+共享记忆不替代角色提示词、Team 调度和终止条件；
+真实 LLM 的质量提升仍需重新执行 Studio A1-A10 实验验证。
+```
+
 ## 46. v5.13i AutoGen Studio Provider Token 采集
 
 ### 46.1 背景

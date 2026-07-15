@@ -12,6 +12,7 @@
 | `code_app.py` | 普通开发者风格的 AutoGen 多 Agent 代码端样例 |
 | `agent_config.json` | Planner / Writer / Reviewer 三个 Agent 的配置 |
 | `studio_agent_prompts.md` | AutoGen Studio 网页端手动配置 Agent 时可复制的提示词 |
+| `studio_team_config.template.json` | AutoGen Studio 可导入的 Team 配置模板，不包含真实 API Key |
 | `question_A.md` | A 组实验问题 |
 | `question_B.md` | B 组实验问题 |
 
@@ -46,6 +47,11 @@ python experiments/ordinary-developer-autogen/code_app.py \
   --question-file experiments/ordinary-developer-autogen/question_A.md \
   --agent-config experiments/ordinary-developer-autogen/agent_config.json \
   --output-dir runs/ordinary-developer/code-native-A
+
+  python experiments/ordinary-developer-autogen/code_app.py \
+  --question-file experiments/ordinary-developer-autogen/question_B.md \
+  --agent-config experiments/ordinary-developer-autogen/agent_config.json \
+  --output-dir runs/ordinary-developer/code-native-B
 ```
 
 AgentLite 观察不改写：
@@ -59,6 +65,17 @@ agentlite autogen \
     --question-file experiments/ordinary-developer-autogen/question_A.md \
     --agent-config experiments/ordinary-developer-autogen/agent_config.json \
     --output-dir runs/ordinary-developer/code-observed-A
+
+
+
+agentlite autogen \
+  --data-dir .agentlite-exp/code-observed-B \
+  --rewrite off \
+  --broadcast-mode shadow-only \
+  -- python experiments/ordinary-developer-autogen/code_app.py \
+    --question-file experiments/ordinary-developer-autogen/question_B.md \
+    --agent-config experiments/ordinary-developer-autogen/agent_config.json \
+    --output-dir runs/ordinary-developer/code-observed-B
 ```
 
 导出观察报告：
@@ -69,6 +86,12 @@ agentlite report autogen-session \
   --session-id latest \
   --format markdown \
   --output runs/ordinary-developer/code-observed-A/agentlite_session_report.md
+
+agentlite report autogen-session \
+  --data-dir .agentlite-exp/code-observed-B \
+  --session-id latest \
+  --format markdown \
+  --output runs/ordinary-developer/code-observed-B/agentlite_session_report.md
 ```
 
 AgentLite 正式接管：
@@ -80,6 +103,13 @@ agentlite autogen \
     --question-file experiments/ordinary-developer-autogen/question_A.md \
     --agent-config experiments/ordinary-developer-autogen/agent_config.json \
     --output-dir runs/ordinary-developer/code-agentlite-A
+
+agentlite autogen \
+  --data-dir .agentlite-exp/code-agentlite-B \
+  -- python experiments/ordinary-developer-autogen/code_app.py \
+    --question-file experiments/ordinary-developer-autogen/question_B.md \
+    --agent-config experiments/ordinary-developer-autogen/agent_config.json \
+    --output-dir runs/ordinary-developer/code-agentlite-B
 ```
 
 导出接管报告：
@@ -90,6 +120,13 @@ agentlite report autogen-session \
   --session-id latest \
   --format markdown \
   --output runs/ordinary-developer/code-agentlite-A/agentlite_session_report.md
+
+
+agentlite report autogen-session \
+  --data-dir .agentlite-exp/code-agentlite-B \
+  --session-id latest \
+  --format markdown \
+  --output runs/ordinary-developer/code-agentlite-B/agentlite_session_report.md
 ```
 
 B 组实验只需要把命令中的 `question_A.md` 和输出目录改成 `question_B.md` / `B`。
@@ -115,6 +152,10 @@ http://127.0.0.1:8081
 3. 使用 `studio_agent_prompts.md` 中的提示词。
 4. 创建 RoundRobinGroupChat。
 5. 在 Playground 输入 `question_A.md` 或 `question_B.md` 的完整问题并运行。
+
+也可以导入 `studio_team_config.template.json`。导入前需要在本地把三处 `REPLACE_WITH_YOUR_API_KEY` 替换为实验 Key，或导入后在 Studio 中重新绑定已配置的模型；不要把包含真实 Key 的 Team 导出文件提交到 Git。
+
+新版 Team 最多运行 6 轮。前三轮完成规划、草案和首次审查；若 Reviewer 发现重大问题，则后三轮用于修订。首次审查合格时会立即输出 `FINAL_ANSWER_READY`，不会强制消耗六轮。
 
 AgentLite 观察不改写 Studio 后端：
 

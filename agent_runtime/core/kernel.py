@@ -20,7 +20,11 @@ from agent_runtime.core.readiness import ReadinessBarrierLite
 from agent_runtime.eval.metrics import MetricsCollector
 from agent_runtime.eval.token_counter import TokenCounter
 from agent_runtime.eval.trace_logger import TraceLogger
-from agent_runtime.memory.memory_store import MemoryRef, MemoryStoreLite
+from agent_runtime.memory.memory_store import (
+    MemoryAdmissionReport,
+    MemoryRef,
+    MemoryStoreLite,
+)
 from agent_runtime.protocol.shp import build_handoff_envelope
 from agent_runtime.reliability.contract_guard import (
     ContractContext,
@@ -162,6 +166,7 @@ class CollaborationKernel:
         mode: Mode,
         final_task: bool,
         deliverable_budget_chars: int,
+        strict_group_scope: bool = False,
     ) -> MemoryContext:
         self._ensure_open()
         started = time.perf_counter()
@@ -169,6 +174,7 @@ class CollaborationKernel:
             task.prompt,
             tags=[task.group_id],
             top_k=4 if final_task else 2,
+            required_tags=[task.group_id] if strict_group_scope else None,
         )
         self.metrics.record_memory_search_backend(
             task_id=task.task_id,
@@ -476,6 +482,99 @@ class CollaborationKernel:
                 },
             )
         ]
+
+    def promote_memory_candidate(
+        self,
+        *,
+        task: TaskSpec,
+        round_id: int,
+        mode: Mode,
+        agent: AgentDescriptor,
+        summary: str,
+        state_refs: list[StateRef],
+        slot_hint: str,
+        task_topic: str,
+        candidate_kind: str,
+        confidence: float,
+        importance_hint: float,
+        coverage_score: float,
+    ) -> MemoryAdmissionReport:
+        """Pass a framework output through the canonical rules-first admission path."""
+        self._ensure_open()
+        source_state_ids = [ref.state_id for ref in state_refs]
+        evidence_refs = list(source_state_ids[:3])
+        memory_card = {
+            "summary": summary.strip(),
+            "tags": [task.group_id, "framework:autogen", candidate_kind],
+            "reuse_scope": [task.group_id],
+            "slot_hint": slot_hint,
+            "confidence": confidence,
+            "importance_hint": importance_hint,
+            "coverage_score": coverage_score,
+            "compression_loss_risk": "medium",
+            "raw_required_hint": False,
+            "temporal_scope": "cross_task",
+        }
+        admission_report, validation = self.state_memory_bridge.promote(
+            task_id=task.task_id,
+            source_agent=agent.agent_id,
+            task_topic=task_topic,
+            fallback_summary=summary.strip(),
+            tags=[task.group_id, task.task_id, agent.agent_id, candidate_kind],
+            slot_hint=slot_hint,
+            source_state_ids=source_state_ids,
+            evidence_refs=evidence_refs,
+            reuse_intent=f"供 {task.group_id} 后续 AutoGen 任务复用",
+            control={"memory_card": memory_card},
+            degraded=False,
+        )
+        self.metrics.record_memory_admission(
+            task_id=task.task_id,
+            round_id=round_id,
+            mode=mode,
+            memory_candidate_count=admission_report.memory_candidate_count,
+            claim_candidate_count=admission_report.claim_candidate_count,
+            memory_admitted_count=admission_report.memory_admitted_count,
+            memory_rejected_count=admission_report.memory_rejected_count,
+            memory_pending_count=admission_report.memory_pending_count,
+            memory_audit_only_count=admission_report.memory_audit_only_count,
+            admission_unresolved_slot_count=(
+                admission_report.admission_unresolved_slot_count
+            ),
+            claim_to_memoryview_count=admission_report.claim_to_memoryview_count,
+        )
+        self.metrics.record_memory_write(
+            task_id=task.task_id,
+            round_id=round_id,
+            mode=mode,
+            memory_write_count=admission_report.memory_write_count,
+            claim_card_count=admission_report.claim_card_count,
+            memory_view_count=admission_report.memory_view_count,
+            promotion_view_count=admission_report.promotion_view_count,
+            alias_mapping_hit_count=admission_report.alias_mapping_hit_count,
+            unresolved_slot_count=admission_report.unresolved_slot_count,
+        )
+        self.trace.write(
+            "state_memory_bridge",
+            {
+                "task_id": task.task_id,
+                "round_id": round_id,
+                "mode": mode,
+                "agent_id": agent.agent_id,
+                "candidate_kind": candidate_kind,
+                "validation_allowed": validation.allowed,
+                "validation_reasons": validation.reasons,
+                "admission_status": admission_report.admission_status,
+                "admission_reasons": admission_report.admission_reasons,
+                "candidate_id": admission_report.candidate_id,
+                "memory_ref": (
+                    admission_report.memory_ref.memory_id
+                    if admission_report.memory_ref is not None
+                    else None
+                ),
+            },
+        )
+        return admission_report
 
     def build_handoff(
         self,
