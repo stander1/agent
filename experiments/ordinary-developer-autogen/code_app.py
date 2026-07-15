@@ -260,10 +260,13 @@ async def run_team(
 ) -> dict[str, Any]:
     from autogen_agentchat.agents import BaseChatAgent
     from autogen_agentchat.base import Response
-    from autogen_agentchat.conditions import TextMentionTermination
     from autogen_agentchat.messages import BaseChatMessage, TextMessage
     from autogen_agentchat.teams import RoundRobinGroupChat
     from autogen_core import CancellationToken
+
+    from agent_runtime.adapters.autogen_termination import (
+        ReviewerFinalTextTermination,
+    )
 
     llm = OpenAICompatibleClient.from_env(temperature=temperature)
     cost_logger = CostLogger(output_dir)
@@ -314,7 +317,12 @@ async def run_team(
             del cancellation_token
 
     agents = [DeveloperAgent(config) for config in agent_configs]
-    kwargs: dict[str, Any] = {"termination_condition": TextMentionTermination(DONE_TOKEN)}
+    kwargs: dict[str, Any] = {
+        "termination_condition": ReviewerFinalTextTermination(
+            marker=DONE_TOKEN,
+            source="reviewer",
+        )
+    }
     if max_turns > 0:
         kwargs["max_turns"] = max_turns
     try:

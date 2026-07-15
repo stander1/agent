@@ -155,7 +155,9 @@ http://127.0.0.1:8081
 
 也可以导入 `studio_team_config.template.json`。导入前需要在本地把三处 `REPLACE_WITH_YOUR_API_KEY` 替换为实验 Key，或导入后在 Studio 中重新绑定已配置的模型；不要把包含真实 Key 的 Team 导出文件提交到 Git。
 
-新版 Team 最多运行 6 轮。前三轮完成规划、草案和首次审查；若 Reviewer 发现重大问题，则后三轮用于修订。首次审查合格时会立即输出 `FINAL_ANSWER_READY`，不会强制消耗六轮。
+新版 Team 最多运行 6 轮。前三轮完成规划、草案和首次审查；若 Reviewer 发现重大问题，则后三轮用于修订。首次审查合格时会立即输出完整答案并结束，不会强制消耗六轮。
+
+Team 使用 AgentLite 提供的严格终止条件：只有 `reviewer` 的可见文本最后一行精确等于 `FINAL_ANSWER_READY` 才会结束。Planner、Writer、Reviewer 的模型思考过程、审查意见正文或其他 Agent 偶然提到该字符串都不会触发终止，避免把“退回修改”误当成最终交付。
 
 AgentLite 观察不改写 Studio 后端：
 

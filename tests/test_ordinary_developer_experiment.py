@@ -46,8 +46,16 @@ class OrdinaryDeveloperExperimentTests(unittest.TestCase):
         )
         self.assertEqual(payload["config"]["max_turns"], 6)
         self.assertEqual(
-            payload["config"]["termination_condition"]["config"]["text"],
+            payload["config"]["termination_condition"]["provider"],
+            "agent_runtime.adapters.autogen_termination.ReviewerFinalTextTermination",
+        )
+        self.assertEqual(
+            payload["config"]["termination_condition"]["config"]["marker"],
             "FINAL_ANSWER_READY",
+        )
+        self.assertEqual(
+            payload["config"]["termination_condition"]["config"]["source"],
+            "reviewer",
         )
         self.assertTrue(
             all(
@@ -68,6 +76,15 @@ class OrdinaryDeveloperExperimentTests(unittest.TestCase):
                 for item in participants
             )
         )
+
+        from agent_runtime.adapters.autogen_termination import (
+            ReviewerFinalTextTermination,
+        )
+
+        termination = ReviewerFinalTextTermination.load_component(
+            payload["config"]["termination_condition"]
+        )
+        self.assertIsInstance(termination, ReviewerFinalTextTermination)
 
     def test_mimo_default_model_uses_provider_supported_name(self) -> None:
         client_type = APP_GLOBALS["OpenAICompatibleClient"]
