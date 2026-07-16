@@ -8,6 +8,7 @@ import os
 import time
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -55,6 +56,12 @@ class LLMResult:
     usage: dict[str, int]
     wall_time_ms: int
     retry_count: int = 0
+
+
+@dataclass(frozen=True)
+class TaskSpec:
+    task_id: str
+    question: str
 
 
 class OpenAICompatibleClient:
@@ -179,45 +186,26 @@ class CostLogger:
     def __init__(self, output_dir: Path) -> None:
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.usage_path = self.output_dir / "llm_usage.jsonl"
+        self.usage_path.write_text("", encoding="utf-8")
         self.rows: list[dict[str, Any]] = []
 
     def add(self, row: dict[str, Any]) -> None:
         self.rows.append(row)
-        with (self.output_dir / "llm_usage.jsonl").open("a", encoding="utf-8") as fh:
+        with self.usage_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     def summary(self) -> dict[str, Any]:
-        by_agent: dict[str, dict[str, int]] = {}
+        summary = _summarize_usage_rows(self.rows)
+        by_task: dict[str, dict[str, Any]] = {}
         for row in self.rows:
-            agent = str(row["agent"])
-            bucket = by_agent.setdefault(
-                agent,
-                {
-                    "calls": 0,
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                    "wall_time_ms": 0,
-                    "retry_count": 0,
-                },
-            )
-            bucket["calls"] += 1
-            bucket["prompt_tokens"] += int(row["prompt_tokens"])
-            bucket["completion_tokens"] += int(row["completion_tokens"])
-            bucket["total_tokens"] += int(row["total_tokens"])
-            bucket["wall_time_ms"] += int(row["wall_time_ms"])
-            bucket["retry_count"] += int(row.get("retry_count", 0))
-        return {
-            "calls": len(self.rows),
-            "llm_prompt_tokens": sum(int(row["prompt_tokens"]) for row in self.rows),
-            "llm_completion_tokens": sum(
-                int(row["completion_tokens"]) for row in self.rows
-            ),
-            "llm_total_tokens": sum(int(row["total_tokens"]) for row in self.rows),
-            "llm_wall_time_ms": sum(int(row["wall_time_ms"]) for row in self.rows),
-            "retry_count": sum(int(row.get("retry_count", 0)) for row in self.rows),
-            "by_agent": by_agent,
+            task_id = str(row.get("task_id") or "single")
+            by_task.setdefault(task_id, {"rows": []})["rows"].append(row)
+        summary["by_task"] = {
+            task_id: _summarize_usage_rows(bucket["rows"])
+            for task_id, bucket in by_task.items()
         }
+        return summary
 
     def write_summary(self) -> Path:
         path = self.output_dir / "llm_usage_summary.json"
@@ -229,23 +217,53 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="A normal developer-style AutoGen app.")
     parser.add_argument("--question", default=DEFAULT_QUESTION)
     parser.add_argument("--question-file", type=Path)
+    parser.add_argument(
+        "--question-sequence-file",
+        type=Path,
+        help="JSON task sequence executed by one stateful AutoGen team.",
+    )
     parser.add_argument("--agent-config", type=Path)
     parser.add_argument("--output-dir", type=Path, default=Path("runs/developer-code-app"))
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--max-turns", type=int, default=6)
+    parser.add_argument(
+        "--experiment-mode",
+        choices=("native", "observed", "managed", "unspecified"),
+        default="unspecified",
+        help="Metadata only; AgentLite behavior is still selected by the launcher.",
+    )
     args = parser.parse_args()
 
-    question = args.question_file.read_text(encoding="utf-8").strip() if args.question_file else args.question
     output_dir = args.output_dir.expanduser().resolve()
-    payload = asyncio.run(
-        run_team(
-            question=question,
-            agent_configs=_load_agent_config(args.agent_config),
-            output_dir=output_dir,
-            temperature=args.temperature,
-            max_turns=args.max_turns,
+    agent_configs = _load_agent_config(args.agent_config)
+    if args.question_sequence_file:
+        scenario_id, tasks = _load_question_sequence(args.question_sequence_file)
+        payload = asyncio.run(
+            run_task_sequence(
+                scenario_id=scenario_id,
+                tasks=tasks,
+                agent_configs=agent_configs,
+                output_dir=output_dir,
+                temperature=args.temperature,
+                max_turns=args.max_turns,
+                experiment_mode=args.experiment_mode,
+            )
         )
-    )
+    else:
+        question = (
+            args.question_file.read_text(encoding="utf-8").strip()
+            if args.question_file
+            else args.question
+        )
+        payload = asyncio.run(
+            run_team(
+                question=question,
+                agent_configs=agent_configs,
+                output_dir=output_dir,
+                temperature=args.temperature,
+                max_turns=args.max_turns,
+            )
+        )
     print(json.dumps(payload["summary"], ensure_ascii=False, indent=2))
     return 0
 
@@ -257,6 +275,80 @@ async def run_team(
     output_dir: Path,
     temperature: float,
     max_turns: int,
+) -> dict[str, Any]:
+    payload = await _run_tasks(
+        scenario_id="single",
+        tasks=[TaskSpec(task_id="task_001", question=question)],
+        agent_configs=agent_configs,
+        output_dir=output_dir,
+        temperature=temperature,
+        max_turns=max_turns,
+        experiment_mode="unspecified",
+    )
+    task_payload = payload["raw"]["tasks"][0]
+    final_answer_path = output_dir / "final_answer.md"
+    final_answer_path.write_text(
+        task_payload["final_answer"] + "\n", encoding="utf-8"
+    )
+    run_payload = {
+        "question": question,
+        "wall_time_ms": task_payload["wall_time_ms"],
+        "llm_usage": task_payload["llm_usage"],
+        "agent_configs": agent_configs,
+        "messages": task_payload["messages"],
+        "stop_reason": task_payload["stop_reason"],
+        "delivery_valid": task_payload["delivery_valid"],
+        "final_answer_path": str(final_answer_path),
+        "llm_usage_summary_path": str(output_dir / "llm_usage_summary.json"),
+    }
+    (output_dir / "run_result.json").write_text(
+        json.dumps(run_payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return {
+        "summary": {
+            "output_dir": str(output_dir),
+            "wall_time_ms": task_payload["wall_time_ms"],
+            "llm_total_tokens": task_payload["llm_usage"]["llm_total_tokens"],
+            "delivery_valid": task_payload["delivery_valid"],
+            "final_answer_path": str(final_answer_path),
+            "llm_usage_summary_path": str(output_dir / "llm_usage_summary.json"),
+        },
+        "raw": run_payload,
+    }
+
+
+async def run_task_sequence(
+    *,
+    scenario_id: str,
+    tasks: list[TaskSpec],
+    agent_configs: list[dict[str, str]],
+    output_dir: Path,
+    temperature: float,
+    max_turns: int,
+    experiment_mode: str,
+) -> dict[str, Any]:
+    if len(tasks) < 2:
+        raise ValueError("a stateful sequence requires at least two tasks")
+    return await _run_tasks(
+        scenario_id=scenario_id,
+        tasks=tasks,
+        agent_configs=agent_configs,
+        output_dir=output_dir,
+        temperature=temperature,
+        max_turns=max_turns,
+        experiment_mode=experiment_mode,
+    )
+
+
+async def _run_tasks(
+    *,
+    scenario_id: str,
+    tasks: list[TaskSpec],
+    agent_configs: list[dict[str, str]],
+    output_dir: Path,
+    temperature: float,
+    max_turns: int,
+    experiment_mode: str,
 ) -> dict[str, Any]:
     from autogen_agentchat.agents import BaseChatAgent
     from autogen_agentchat.base import Response
@@ -270,6 +362,7 @@ async def run_team(
 
     llm = OpenAICompatibleClient.from_env(temperature=temperature)
     cost_logger = CostLogger(output_dir)
+    current_task_id = "unassigned"
 
     class DeveloperAgent(BaseChatAgent):
         def __init__(self, config: dict[str, str]) -> None:
@@ -278,6 +371,7 @@ async def run_team(
                 description=config.get("description", config["name"]),
             )
             self.system_prompt = config["system_prompt"]
+            self._history: list[BaseChatMessage] = []
 
         @property
         def produced_message_types(self) -> Sequence[type[BaseChatMessage]]:
@@ -289,7 +383,8 @@ async def run_team(
             cancellation_token: CancellationToken,
         ) -> Response:
             del cancellation_token
-            prompt = _team_context_prompt(self.name, messages)
+            self._history.extend(messages)
+            prompt = _team_context_prompt(self.name, self._history)
             result = await asyncio.to_thread(
                 llm.complete,
                 [
@@ -299,6 +394,7 @@ async def run_team(
             )
             cost_logger.add(
                 {
+                    "task_id": current_task_id,
                     "agent": self.name,
                     "model": llm.model,
                     "prompt_tokens": result.usage["prompt_tokens"],
@@ -306,6 +402,8 @@ async def run_team(
                     "total_tokens": result.usage["total_tokens"],
                     "wall_time_ms": result.wall_time_ms,
                     "retry_count": result.retry_count,
+                    "prompt_chars": len(prompt),
+                    "history_message_count": len(self._history),
                     "ts": time.time(),
                 }
             )
@@ -315,6 +413,7 @@ async def run_team(
 
         async def on_reset(self, cancellation_token: CancellationToken) -> None:
             del cancellation_token
+            self._history.clear()
 
     agents = [DeveloperAgent(config) for config in agent_configs]
     kwargs: dict[str, Any] = {
@@ -330,35 +429,119 @@ async def run_team(
     except TypeError:
         kwargs.pop("max_turns", None)
         team = RoundRobinGroupChat(agents, **kwargs)
-    started = time.perf_counter()
-    result = await team.run(task=question)
-    wall_time_ms = int((time.perf_counter() - started) * 1000)
+
+    sequence_started = time.perf_counter()
+    sequence_run_id = uuid.uuid4().hex
+    task_payloads: list[dict[str, Any]] = []
+    quality_candidates: list[dict[str, Any]] = []
+    quality_mapping: list[dict[str, Any]] = []
+    for task_index, task in enumerate(tasks, start=1):
+        current_task_id = task.task_id
+        usage_start = len(cost_logger.rows)
+        task_started = time.perf_counter()
+        result = await team.run(task=task.question)
+        task_wall_time_ms = int((time.perf_counter() - task_started) * 1000)
+        task_usage = _summarize_usage_rows(cost_logger.rows[usage_start:])
+        final_source, raw_final_answer = _final_message(result)
+        delivery_valid = _is_valid_final_delivery(
+            source=final_source,
+            content=raw_final_answer,
+        )
+        final_answer = _strip_done_token(raw_final_answer)
+        stop_reason = str(getattr(result, "stop_reason", "") or "")
+        task_dir = output_dir / "tasks" / task.task_id
+        task_dir.mkdir(parents=True, exist_ok=True)
+        final_answer_path = task_dir / "final_answer.md"
+        final_answer_path.write_text(final_answer + "\n", encoding="utf-8")
+        task_payload = {
+            "task_id": task.task_id,
+            "task_index": task_index,
+            "question": task.question,
+            "wall_time_ms": task_wall_time_ms,
+            "llm_usage": task_usage,
+            "stop_reason": stop_reason,
+            "final_source": final_source,
+            "final_marker_present": _has_exact_done_token(raw_final_answer),
+            "delivery_valid": delivery_valid,
+            "final_answer": final_answer,
+            "final_answer_chars": len(final_answer),
+            "final_answer_path": str(final_answer_path),
+            "messages": _messages_to_dict(result),
+        }
+        (task_dir / "run_result.json").write_text(
+            json.dumps(task_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        task_payloads.append(task_payload)
+        blind_id = f"candidate_{uuid.uuid4().hex[:12]}"
+        quality_candidates.append(
+            {
+                "candidate_id": blind_id,
+                "question": task.question,
+                "answer": final_answer,
+            }
+        )
+        quality_mapping.append(
+            {
+                "candidate_id": blind_id,
+                "scenario_id": scenario_id,
+                "task_id": task.task_id,
+                "experiment_mode": experiment_mode,
+                "delivery_valid": delivery_valid,
+            }
+        )
+
+    wall_time_ms = int((time.perf_counter() - sequence_started) * 1000)
     usage_summary_path = cost_logger.write_summary()
-    final_answer = _final_answer(result)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "final_answer.md").write_text(final_answer + "\n", encoding="utf-8")
-    run_payload = {
-        "question": question,
+    summary = {
+        "scenario_id": scenario_id,
+        "sequence_run_id": sequence_run_id,
+        "experiment_mode": experiment_mode,
+        "same_team_instance": True,
+        "task_count": len(task_payloads),
+        "valid_delivery_count": sum(
+            int(task["delivery_valid"]) for task in task_payloads
+        ),
         "wall_time_ms": wall_time_ms,
         "llm_usage": cost_logger.summary(),
-        "agent_configs": agent_configs,
-        "messages": _messages_to_dict(result),
-        "final_answer_path": str(output_dir / "final_answer.md"),
+        "llm_total_tokens": cost_logger.summary()["llm_total_tokens"],
         "llm_usage_summary_path": str(usage_summary_path),
     }
-    (output_dir / "run_result.json").write_text(
-        json.dumps(run_payload, ensure_ascii=False, indent=2),
+    sequence_payload = {
+        "summary": summary,
+        "agent_configs": agent_configs,
+        "tasks": task_payloads,
+    }
+    (output_dir / "sequence_result.json").write_text(
+        json.dumps(sequence_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (output_dir / "quality_blind_candidates.json").write_text(
+        json.dumps(
+            {
+                "scenario_id": scenario_id,
+                "candidates": quality_candidates,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (output_dir / "quality_blind_mapping.json").write_text(
+        json.dumps(
+            {
+                "scenario_id": scenario_id,
+                "sequence_run_id": sequence_run_id,
+                "mapping": quality_mapping,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
         encoding="utf-8",
     )
     return {
-        "summary": {
-            "output_dir": str(output_dir),
-            "wall_time_ms": wall_time_ms,
-            "llm_total_tokens": cost_logger.summary()["llm_total_tokens"],
-            "final_answer_path": str(output_dir / "final_answer.md"),
-            "llm_usage_summary_path": str(usage_summary_path),
-        },
-        "raw": run_payload,
+        "summary": summary,
+        "raw": sequence_payload,
     }
 
 
@@ -397,6 +580,66 @@ def _load_agent_config(path: Path | None) -> list[dict[str, str]]:
     ]
 
 
+def _load_question_sequence(path: Path) -> tuple[str, list[TaskSpec]]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(value, dict):
+        scenario_id = str(value.get("scenario_id") or path.stem)
+        raw_tasks = value.get("tasks")
+    else:
+        scenario_id = path.stem
+        raw_tasks = value
+    if not isinstance(raw_tasks, list) or not raw_tasks:
+        raise ValueError("question sequence must contain a non-empty tasks list")
+    tasks: list[TaskSpec] = []
+    seen_ids: set[str] = set()
+    for index, item in enumerate(raw_tasks, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"task {index} must be a JSON object")
+        task_id = str(item.get("task_id") or "").strip()
+        question = str(item.get("question") or "").strip()
+        if not task_id or not question:
+            raise ValueError(f"task {index} requires task_id and question")
+        if task_id in seen_ids:
+            raise ValueError(f"duplicate task_id: {task_id}")
+        seen_ids.add(task_id)
+        tasks.append(TaskSpec(task_id=task_id, question=question))
+    return scenario_id, tasks
+
+
+def _summarize_usage_rows(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    by_agent: dict[str, dict[str, int]] = {}
+    for row in rows:
+        agent = str(row["agent"])
+        bucket = by_agent.setdefault(
+            agent,
+            {
+                "calls": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "wall_time_ms": 0,
+                "retry_count": 0,
+            },
+        )
+        bucket["calls"] += 1
+        bucket["prompt_tokens"] += int(row["prompt_tokens"])
+        bucket["completion_tokens"] += int(row["completion_tokens"])
+        bucket["total_tokens"] += int(row["total_tokens"])
+        bucket["wall_time_ms"] += int(row["wall_time_ms"])
+        bucket["retry_count"] += int(row.get("retry_count", 0))
+    return {
+        "calls": len(rows),
+        "llm_prompt_tokens": sum(int(row["prompt_tokens"]) for row in rows),
+        "llm_completion_tokens": sum(
+            int(row["completion_tokens"]) for row in rows
+        ),
+        "llm_total_tokens": sum(int(row["total_tokens"]) for row in rows),
+        "llm_wall_time_ms": sum(int(row["wall_time_ms"]) for row in rows),
+        "retry_count": sum(int(row.get("retry_count", 0)) for row in rows),
+        "by_agent": by_agent,
+    }
+
+
 def _messages_to_dict(result: Any) -> list[dict[str, Any]]:
     return [
         {
@@ -408,12 +651,35 @@ def _messages_to_dict(result: Any) -> list[dict[str, Any]]:
     ]
 
 
-def _final_answer(result: Any) -> str:
+def _final_message(result: Any) -> tuple[str, str]:
     for message in reversed(getattr(result, "messages", []) or []):
         content = str(getattr(message, "content", "") or "").strip()
         if content:
-            return content
-    return ""
+            source = str(getattr(message, "source", "") or "")
+            return source, content
+    return "", ""
+
+
+def _has_exact_done_token(content: str) -> bool:
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    return bool(lines and lines[-1] == DONE_TOKEN)
+
+
+def _is_valid_final_delivery(*, source: str, content: str) -> bool:
+    return source == "reviewer" and _has_exact_done_token(content)
+
+
+def _strip_done_token(content: str) -> str:
+    lines = content.rstrip().splitlines()
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if lines and lines[-1].strip() == DONE_TOKEN:
+        lines.pop()
+    return "\n".join(lines).rstrip()
+
+
+def _final_answer(result: Any) -> str:
+    return _final_message(result)[1]
 
 
 def _normalize_usage(value: Any) -> dict[str, int]:

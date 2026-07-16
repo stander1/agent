@@ -11,6 +11,7 @@
 |---|---|
 | `code_app.py` | 普通开发者风格的 AutoGen 多 Agent 代码端样例 |
 | `agent_config.json` | Planner / Writer / Reviewer 三个 Agent 的配置 |
+| `question_A_sequence.json` | A1-A10 结构化连续任务；由同一个有状态 Team 依次执行 |
 | `studio_agent_prompts.md` | AutoGen Studio 网页端手动配置 Agent 时可复制的提示词 |
 | `studio_team_config.template.json` | AutoGen Studio 可导入的 Team 配置模板，不包含真实 API Key |
 | `question_A.md` | A 组实验问题 |
@@ -40,96 +41,94 @@ $env:OPENAI_RETRY_BACKOFF_SECONDS="2"
 
 ## 代码端实验
 
-原生运行：
+正式代码端实验使用 `question_A_sequence.json`。程序只创建一次
+`RoundRobinGroupChat`，随后连续调用十次 `team.run()`；Agent 自己保存已经收到的
+消息，不会在任务之间调用 `reset()`。原生、观察和接管三组使用完全相同的程序、
+问题、Agent 配置和终止条件，只有启动方式不同。
+
+### 原生有状态组
 
 ```bash
 python experiments/ordinary-developer-autogen/code_app.py \
-  --question-file experiments/ordinary-developer-autogen/question_A.md \
+  --question-sequence-file experiments/ordinary-developer-autogen/question_A_sequence.json \
   --agent-config experiments/ordinary-developer-autogen/agent_config.json \
-  --output-dir runs/ordinary-developer/code-native-A
-
-  python experiments/ordinary-developer-autogen/code_app.py \
-  --question-file experiments/ordinary-developer-autogen/question_B.md \
-  --agent-config experiments/ordinary-developer-autogen/agent_config.json \
-  --output-dir runs/ordinary-developer/code-native-B
+  --experiment-mode native \
+  --output-dir runs/ordinary-developer/code-stateful-native-A
 ```
 
-AgentLite 观察不改写：
+### AgentLite 观察组
 
 ```bash
 agentlite autogen \
-  --data-dir .agentlite-exp/code-observed-A \
+  --data-dir .agentlite-exp/code-stateful-observed-A \
   --rewrite off \
   --broadcast-mode shadow-only \
   -- python experiments/ordinary-developer-autogen/code_app.py \
-    --question-file experiments/ordinary-developer-autogen/question_A.md \
+    --question-sequence-file experiments/ordinary-developer-autogen/question_A_sequence.json \
     --agent-config experiments/ordinary-developer-autogen/agent_config.json \
-    --output-dir runs/ordinary-developer/code-observed-A
-
-
-
-agentlite autogen \
-  --data-dir .agentlite-exp/code-observed-B \
-  --rewrite off \
-  --broadcast-mode shadow-only \
-  -- python experiments/ordinary-developer-autogen/code_app.py \
-    --question-file experiments/ordinary-developer-autogen/question_B.md \
-    --agent-config experiments/ordinary-developer-autogen/agent_config.json \
-    --output-dir runs/ordinary-developer/code-observed-B
+    --experiment-mode observed \
+    --output-dir runs/ordinary-developer/code-stateful-observed-A
 ```
 
-导出观察报告：
+### AgentLite 正式接管组
+
+```bash
+export AGENTLITE_MEMORY_SCOPE="code-stateful-A-本次实验唯一编号"
+agentlite autogen \
+  --data-dir .agentlite-exp/code-stateful-agentlite-A \
+  -- python experiments/ordinary-developer-autogen/code_app.py \
+    --question-sequence-file experiments/ordinary-developer-autogen/question_A_sequence.json \
+    --agent-config experiments/ordinary-developer-autogen/agent_config.json \
+    --experiment-mode managed \
+    --output-dir runs/ordinary-developer/code-stateful-agentlite-A
+```
+
+每次正式重复实验必须更换 `AGENTLITE_MEMORY_SCOPE`，并使用新的 `--data-dir` 和
+`--output-dir`，避免旧任务记忆污染 A1。
+
+### 导出 AgentLite 报告
 
 ```bash
 agentlite report autogen-session \
-  --data-dir .agentlite-exp/code-observed-A \
+  --data-dir .agentlite-exp/code-stateful-observed-A \
   --session-id latest \
   --format markdown \
-  --output runs/ordinary-developer/code-observed-A/agentlite_session_report.md
+  --output runs/ordinary-developer/code-stateful-observed-A/agentlite_session_report.md
 
 agentlite report autogen-session \
-  --data-dir .agentlite-exp/code-observed-B \
+  --data-dir .agentlite-exp/code-stateful-agentlite-A \
   --session-id latest \
   --format markdown \
-  --output runs/ordinary-developer/code-observed-B/agentlite_session_report.md
+  --output runs/ordinary-developer/code-stateful-agentlite-A/agentlite_session_report.md
 ```
 
-AgentLite 正式接管：
+每组都会生成：
+
+| 输出 | 作用 |
+|---|---|
+| `llm_usage.jsonl` | 每次模型调用的 provider usage、耗时、任务和 Agent |
+| `llm_usage_summary.json` | 全局、逐任务和逐 Agent 的实际 LLM Token 汇总 |
+| `sequence_result.json` | A1-A10 问题、完整消息、终止原因和最终交付状态 |
+| `tasks/A*/final_answer.md` | 去除终止标记后的用户可见最终答案 |
+| `quality_blind_candidates.json` | 不带实验组名称的质量盲评候选 |
+| `quality_blind_mapping.json` | 盲评编号与任务、实验组的映射，仅在评分后使用 |
+
+三组都运行完成后，自动核对任务并生成真实 Token 对比和统一盲评包：
 
 ```bash
-agentlite autogen \
-  --data-dir .agentlite-exp/code-agentlite-A \
-  -- python experiments/ordinary-developer-autogen/code_app.py \
-    --question-file experiments/ordinary-developer-autogen/question_A.md \
-    --agent-config experiments/ordinary-developer-autogen/agent_config.json \
-    --output-dir runs/ordinary-developer/code-agentlite-A
-
-agentlite autogen \
-  --data-dir .agentlite-exp/code-agentlite-B \
-  -- python experiments/ordinary-developer-autogen/code_app.py \
-    --question-file experiments/ordinary-developer-autogen/question_B.md \
-    --agent-config experiments/ordinary-developer-autogen/agent_config.json \
-    --output-dir runs/ordinary-developer/code-agentlite-B
+python experiments/ordinary-developer-autogen/compare_stateful_runs.py \
+  --native-dir runs/ordinary-developer/code-stateful-native-A \
+  --observed-dir runs/ordinary-developer/code-stateful-observed-A \
+  --managed-dir runs/ordinary-developer/code-stateful-agentlite-A \
+  --output-dir runs/ordinary-developer/code-stateful-comparison-A
 ```
 
-导出接管报告：
+在完成质量盲评前，只能查看 `quality_blind_batch.json`，不要打开
+`quality_blind_mapping.json`。汇总器不会仅凭 Token 较低就宣布 AgentLite 获胜；
+正式结论必须同时满足严格最终交付和质量不降低。
 
-```bash
-agentlite report autogen-session \
-  --data-dir .agentlite-exp/code-agentlite-A \
-  --session-id latest \
-  --format markdown \
-  --output runs/ordinary-developer/code-agentlite-A/agentlite_session_report.md
-
-
-agentlite report autogen-session \
-  --data-dir .agentlite-exp/code-agentlite-B \
-  --session-id latest \
-  --format markdown \
-  --output runs/ordinary-developer/code-agentlite-B/agentlite_session_report.md
-```
-
-B 组实验只需要把命令中的 `question_A.md` 和输出目录改成 `question_B.md` / `B`。
+单任务调试仍可使用 `--question` 或 `--question-file`。正式 A 组性能实验必须使用
+`--question-sequence-file`，否则不会形成有状态的十轮上下文。
 
 ## AutoGen Studio 原生网页实验
 
