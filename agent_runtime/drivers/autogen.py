@@ -142,6 +142,9 @@ class HookCallContext:
     memory_context: MemoryContext = field(
         default_factory=lambda: MemoryContext([], [])
     )
+    display_restore_enabled: bool = False
+    display_original_text: str = ""
+    display_original_source: str = "user"
 
 
 class AutoGenHookManager:
@@ -567,6 +570,33 @@ class AutoGenHookManager:
                 ],
             },
         )
+
+    def restore_call_result_for_display(
+        self,
+        context: HookCallContext,
+        result: Any,
+    ) -> Any:
+        """Hide the internal Team rewrite envelope from caller-facing results."""
+        if not context.display_restore_enabled:
+            return result
+        restored, restored_count = _restore_team_display_item(
+            result,
+            original_text=context.display_original_text,
+            original_source=context.display_original_source,
+        )
+        if restored_count:
+            self.trace.write(
+                "autogen_team_display_restored",
+                {
+                    "call_id": context.call_id,
+                    "agent_id": context.agent.agent_id,
+                    "target_kind": context.target_kind,
+                    "method": context.method_name,
+                    "result_type": type(result).__name__,
+                    "restored_message_count": restored_count,
+                },
+            )
+        return restored
 
     def record_call_end(self, context: HookCallContext, result: Any) -> None:
         decoded_messages = self.codec.decode_many(result)
@@ -1948,6 +1978,11 @@ class AutoGenHookManager:
                 broadcast_plan=broadcast_plan.to_dict(),
             )
             return None
+        display_text, display_source = _team_task_display_identity(task_value)
+        if display_text:
+            context.display_restore_enabled = True
+            context.display_original_text = display_text
+            context.display_original_source = display_source
         new_args, new_kwargs = _replace_team_task_argument(
             args,
             kwargs,
@@ -3414,7 +3449,7 @@ class AutoGenHookManager:
                     async for item in original(instance, *args, **kwargs):
                         last_item = item
                         self.record_stream_item(context, item)
-                        yield item
+                        yield self.restore_call_result_for_display(context, item)
                     self.record_call_end(context, last_item)
                 except Exception as exc:
                     self.record_call_error(context, exc)
@@ -3465,7 +3500,7 @@ class AutoGenHookManager:
                         send_message_entered = False
                     result = self.rewrite_call_result_if_safe(context, result)
                     self.record_call_end(context, result)
-                    return result
+                    return self.restore_call_result_for_display(context, result)
                 except Exception as exc:
                     if send_message_entered:
                         self._exit_core_send_message(
@@ -3499,7 +3534,7 @@ class AutoGenHookManager:
                     for item in original(instance, *args, **kwargs):
                         last_item = item
                         self.record_stream_item(context, item)
-                        yield item
+                        yield self.restore_call_result_for_display(context, item)
                     self.record_call_end(context, last_item)
                 except Exception as exc:
                     self.record_call_error(context, exc)
@@ -3526,7 +3561,7 @@ class AutoGenHookManager:
                 )
                 result = original(instance, *args, **kwargs)
                 self.record_call_end(context, result)
-                return result
+                return self.restore_call_result_for_display(context, result)
             except Exception as exc:
                 self.record_call_error(context, exc)
                 raise
@@ -4187,6 +4222,81 @@ def _clone_team_task_with_text_content(task: Any, content: str) -> Any | None:
     return cloned_messages
 
 
+def _team_task_display_identity(task: Any) -> tuple[str, str]:
+    if isinstance(task, str):
+        return task, "user"
+    if not isinstance(task, (list, tuple)):
+        return "", "user"
+    for message in task:
+        if not _is_simple_text_message(message):
+            continue
+        source = str(_field_value(message, "source") or "user")
+        return _text_message_content(message), source
+    return "", "user"
+
+
+def _restore_team_display_item(
+    item: Any,
+    *,
+    original_text: str,
+    original_source: str,
+) -> tuple[Any, int]:
+    if _is_internal_team_rewrite_message(
+        item,
+        original_source=original_source,
+    ):
+        restored = _clone_text_message_with_content(item, original_text)
+        return (restored, 1) if restored is not None else (item, 0)
+
+    messages = _field_value(item, "messages")
+    if not isinstance(messages, (list, tuple)):
+        return item, 0
+    restored_messages = []
+    restored_count = 0
+    for message in messages:
+        if _is_internal_team_rewrite_message(
+            message,
+            original_source=original_source,
+        ):
+            restored = _clone_text_message_with_content(message, original_text)
+            if restored is not None:
+                restored_messages.append(restored)
+                restored_count += 1
+                continue
+        restored_messages.append(message)
+    if not restored_count:
+        return item, 0
+    replacement = (
+        tuple(restored_messages) if isinstance(messages, tuple) else restored_messages
+    )
+    restored_item = _clone_message_with_text_field(
+        item,
+        field_name="messages",
+        content=replacement,
+    )
+    return (
+        (restored_item, restored_count)
+        if restored_item is not None
+        else (item, 0)
+    )
+
+
+def _is_internal_team_rewrite_message(
+    message: Any,
+    *,
+    original_source: str,
+) -> bool:
+    content = _field_value(message, "content")
+    if not isinstance(content, str):
+        return False
+    source = str(_field_value(message, "source") or "")
+    if source != original_source:
+        return False
+    return content.lstrip().startswith(
+        "AGENTLITE_TEAM_REAL_REWRITE v1"
+    )
+
+
 def _is_simple_text_message(message: Any) -> bool:
     if isinstance(message, dict):
         message_type = str(message.get("type") or "")
@@ -4253,7 +4363,7 @@ def _clone_message_with_text_field(
     message: Any,
     *,
     field_name: str,
-    content: str,
+    content: Any,
 ) -> Any | None:
     if not field_name:
         return None

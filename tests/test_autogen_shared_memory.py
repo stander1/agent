@@ -134,6 +134,44 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                 self.assertIn(SHARED_MEMORY_MARKER, rewritten)
                 self.assertIn("自然风景", rewritten)
                 self.assertEqual(rewritten.count(SHARED_MEMORY_MARKER), 1)
+                self.assertTrue(second.display_restore_enabled)
+
+                internal_stream_message = FakeTextMessage(rewritten, "user")
+                display_stream_message = manager.restore_call_result_for_display(
+                    second,
+                    internal_stream_message,
+                )
+                self.assertEqual(
+                    display_stream_message.content,
+                    studio_task[0]["content"],
+                )
+                self.assertIn(
+                    "AGENTLITE_TEAM_REAL_REWRITE v1",
+                    internal_stream_message.content,
+                )
+
+                internal_result = FakeTaskResult(
+                    messages=[
+                        internal_stream_message,
+                        FakeTextMessage("review complete", "reviewer"),
+                    ]
+                )
+                display_result = manager.restore_call_result_for_display(
+                    second,
+                    internal_result,
+                )
+                self.assertEqual(
+                    display_result.messages[0].content,
+                    studio_task[0]["content"],
+                )
+                self.assertEqual(
+                    display_result.messages[1].content,
+                    "review complete",
+                )
+                self.assertIn(
+                    "AGENTLITE_TEAM_REAL_REWRITE v1",
+                    internal_result.messages[0].content,
+                )
 
                 persisted = AutoGenHookManager(
                     self._context(root, "launch_two")
@@ -146,6 +184,23 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                     kwargs={"task": "A3 继续完善上一轮旅行方案"},
                 )
                 self.assertGreaterEqual(len(third.memory_context.refs), 1)
+                _, third_kwargs = persisted.rewrite_call_arguments_if_safe(
+                    third,
+                    (),
+                    {"task": "A3 继续完善上一轮旅行方案"},
+                )
+                internal_string_message = FakeTextMessage(
+                    third_kwargs["task"],
+                    "user",
+                )
+                display_string_message = persisted.restore_call_result_for_display(
+                    third,
+                    internal_string_message,
+                )
+                self.assertEqual(
+                    display_string_message.content,
+                    "A3 继续完善上一轮旅行方案",
+                )
                 trace = self._events(persisted.output_dir / "trace.jsonl")
                 retrievals = [
                     item

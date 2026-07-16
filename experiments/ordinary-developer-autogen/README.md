@@ -183,6 +183,8 @@ agentlite autogen \
 
 AutoGen Studio 会把网页输入包装为 `Sequence[ChatMessage]`。请确保使用包含 Studio 消息序列兼容修复的最新 AgentLite，并在完整 A1-A10 前先运行 A1、A2，确认第二个 Run 的 `memory_hit_count > 0`。Studio 页面固定显示的“Run 之间不共享数据”提示不会因 AgentLite 接管而消失，不能用它判断共享记忆是否生效。
 
+最新版本会把内部重写协议与 Studio 展示隔离。Team 内部仍接收 StateRef 和 MemoryView，但 Agent Steps、流式首条用户消息及最终 `TaskResult` 只显示原始问题，不应再出现 `AGENTLITE_TEAM_REAL_REWRITE v1`。内部接管证据保留在 `autogen_team_input_real_rewrite`、`autogen_memory_retrieval` 和 `autogen_team_display_restored` 事件中。
+
 导出报告示例：
 
 ```bash

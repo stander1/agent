@@ -139,7 +139,19 @@ def main() -> int:
 
     seed_candidates = _payloads(seed, "autogen_memory_candidate")
     recall_retrievals = _payloads(recall, "autogen_memory_retrieval")
+    recall_team_rewrites = _payloads(recall, "autogen_team_input_real_rewrite")
+    recall_display_restores = _payloads(
+        recall,
+        "autogen_team_display_restored",
+    )
     recall_item = _first_stream_item(recall)
+    recall_result_messages = (
+        recall.get("app_payload", {})
+        .get("task_result", {})
+        .get("messages", [])
+    )
+    if not isinstance(recall_result_messages, list):
+        recall_result_messages = []
     persisted_snapshot = (
         data_dir
         / "shared_memory"
@@ -171,14 +183,29 @@ def main() -> int:
             and int(item.get("retrieved_memory_tokens", 0) or 0) > 0
             for item in recall_retrievals
         ),
-        "recall_task_contains_memory_marker": bool(
-            recall_item.get("contains_shared_memory_marker")
+        "recall_internal_task_was_rewritten": any(
+            item.get("rewrite_applied") is True
+            and bool(item.get("memory_refs"))
+            for item in recall_team_rewrites
         ),
-        "recall_task_contains_seed_fact": bool(
-            recall_item.get("contains_memory_fact")
+        "recall_internal_prompt_contains_seed_fact": any(
+            MEMORY_FACT in str(item.get("prompt_view_preview", ""))
+            for item in recall_retrievals
         ),
-        "recall_task_was_rewritten": bool(
+        "recall_display_keeps_original_task": (
+            recall_item.get("content")
+            == "Continue the previous travel plan without restating old preferences."
+        ),
+        "recall_display_hides_internal_marker": not bool(
             recall_item.get("contains_team_rewrite_marker")
+        ),
+        "recall_result_hides_internal_marker": not any(
+            bool(item.get("contains_team_rewrite_marker"))
+            for item in recall_result_messages
+            if isinstance(item, dict)
+        ),
+        "recall_display_restore_traced": bool(
+            recall_display_restores
         ),
     }
     report = {
@@ -195,6 +222,8 @@ def main() -> int:
         },
         "seed_memory_candidates": seed_candidates,
         "recall_memory_retrievals": recall_retrievals,
+        "recall_team_rewrites": recall_team_rewrites,
+        "recall_display_restores": recall_display_restores,
         "recall_first_stream_item": recall_item,
         "persistent_snapshot": str(persisted_snapshot),
     }
