@@ -23,6 +23,7 @@ try:
     from autogen_agentchat.agents import UserProxyAgent
     from autogen_agentchat.base import TaskResult
     from autogen_agentchat.conditions import TextMentionTermination
+    from autogen_agentchat.messages import TextMessage
     from autogen_agentchat.teams import RoundRobinGroupChat
 except ImportError as exc:
     raise SystemExit(_missing_dependency(exc))
@@ -99,7 +100,9 @@ def _message_payload(message: Any) -> dict[str, Any]:
 async def run(mode: str) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     result_payload: dict[str, Any] = {}
-    async for item in _make_team(mode).run_stream(task=_task(mode)):
+    # AutoGen Studio passes a Sequence[ChatMessage], not a plain string.
+    studio_task = [TextMessage(source="user", content=_task(mode))]
+    async for item in _make_team(mode).run_stream(task=studio_task):
         if isinstance(item, TaskResult):
             result_payload = {
                 "stop_reason": str(getattr(item, "stop_reason", "")),

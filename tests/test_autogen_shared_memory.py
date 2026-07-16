@@ -101,21 +101,36 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                     (manager.output_dir / "pool_snapshot_latest.json").exists()
                 )
 
+                studio_task = [
+                    {
+                        "type": "TextMessage",
+                        "content": "A2 基于刚才偏好筛选三个目的地",
+                        "source": "user",
+                    }
+                ]
                 second = manager.record_call_start(
                     instance=team,
                     method_name="run_stream",
                     target_kind="agentchat_team",
                     args=(),
-                    kwargs={"task": "A2 基于刚才偏好筛选三个目的地"},
+                    kwargs={"task": studio_task},
                 )
                 self.assertGreaterEqual(len(second.memory_context.refs), 1)
                 new_args, new_kwargs = manager.rewrite_call_arguments_if_safe(
                     second,
                     (),
-                    {"task": "A2 基于刚才偏好筛选三个目的地"},
+                    {"task": studio_task},
                 )
                 self.assertEqual(new_args, ())
-                rewritten = new_kwargs["task"]
+                rewritten_task = new_kwargs["task"]
+                self.assertIsInstance(rewritten_task, list)
+                self.assertIsInstance(rewritten_task[0], dict)
+                self.assertEqual(rewritten_task[0]["source"], "user")
+                self.assertEqual(
+                    studio_task[0]["content"],
+                    "A2 基于刚才偏好筛选三个目的地",
+                )
+                rewritten = rewritten_task[0]["content"]
                 self.assertIn(SHARED_MEMORY_MARKER, rewritten)
                 self.assertIn("自然风景", rewritten)
                 self.assertEqual(rewritten.count(SHARED_MEMORY_MARKER), 1)

@@ -93,6 +93,9 @@ FALLBACK_REASON_BUCKETS = {
     TEAM_REAL_REWRITE_DISABLED_REASON: "team_rewrite_env_guard",
     "missing_team_task_argument": "team_task_contract_missing",
     "unsupported_team_task_type": "team_task_contract_invalid",
+    "empty_team_task_sequence": "input_contract_empty",
+    "team_task_sequence_missing_text_message": "unsupported_message_type",
+    "team_task_clone_failed": "message_clone_failed",
     "already_team_rewritten": "team_task_already_rewritten",
     "empty_team_task_payload": "empty_payload",
     "missing_team_participants": "team_participant_missing",
@@ -1780,7 +1783,25 @@ class AutoGenHookManager:
                 fallback_reasons=["missing_team_task_argument"],
             )
             return None
-        if not isinstance(task_value, str):
+        if isinstance(task_value, str):
+            pass
+        elif isinstance(task_value, (list, tuple)):
+            if not task_value:
+                self._record_team_rewrite_audit(
+                    context=context,
+                    applied=False,
+                    fallback_reasons=["empty_team_task_sequence"],
+                )
+                return None
+            if not any(_is_simple_text_message(message) for message in task_value):
+                self._record_team_rewrite_audit(
+                    context=context,
+                    applied=False,
+                    fallback_reasons=["team_task_sequence_missing_text_message"],
+                    native_text=native_task_text,
+                )
+                return None
+        else:
             self._record_team_rewrite_audit(
                 context=context,
                 applied=False,
@@ -1788,7 +1809,7 @@ class AutoGenHookManager:
                 native_text=_extract_text(task_value),
             )
             return None
-        native_text = task_value
+        native_text = native_task_text
         if "AGENTLITE_TEAM_REAL_REWRITE v1" in native_text:
             self._record_team_rewrite_audit(
                 context=context,
@@ -1814,7 +1835,7 @@ class AutoGenHookManager:
             )
             return None
 
-        decoded_messages = self.codec.decode_many(native_text)
+        decoded_messages = self.codec.decode_many(task_value)
         state_refs = self._safe_kernel_call(
             "write_autogen_team_real_rewrite_task_state",
             lambda: self.kernel.write_agent_state(
@@ -1911,11 +1932,27 @@ class AutoGenHookManager:
             )
             return None
 
+        rewritten_task = _clone_team_task_with_text_content(
+            task_value,
+            rewritten_content,
+        )
+        if rewritten_task is None:
+            self._record_team_rewrite_audit(
+                context=context,
+                applied=False,
+                fallback_reasons=["team_task_clone_failed"],
+                native_text=native_text,
+                rewritten_content=rewritten_content,
+                state_refs=state_ref_payload,
+                receiver_entries=receiver_entries,
+                broadcast_plan=broadcast_plan.to_dict(),
+            )
+            return None
         new_args, new_kwargs = _replace_team_task_argument(
             args,
             kwargs,
             source=source,
-            replacement=rewritten_content,
+            replacement=rewritten_task,
         )
         self._record_team_rewrite_audit(
             context=context,
@@ -4126,6 +4163,30 @@ def _replace_team_task_argument(
     return args, kwargs
 
 
+def _clone_team_task_with_text_content(task: Any, content: str) -> Any | None:
+    if isinstance(task, str):
+        return content
+    if not isinstance(task, (list, tuple)):
+        return None
+
+    cloned_messages = []
+    replaced = False
+    for message in task:
+        if not replaced and _is_simple_text_message(message):
+            cloned = _clone_text_message_with_content(message, content)
+            if cloned is None:
+                return None
+            cloned_messages.append(cloned)
+            replaced = True
+        else:
+            cloned_messages.append(message)
+    if not replaced:
+        return None
+    if isinstance(task, tuple):
+        return tuple(cloned_messages)
+    return cloned_messages
+
+
 def _is_simple_text_message(message: Any) -> bool:
     if isinstance(message, dict):
         message_type = str(message.get("type") or "")
@@ -4149,23 +4210,11 @@ def _clone_text_message_with_content(message: Any, content: str) -> Any | None:
 
 
 def _clone_message_with_content(message: Any, content: str) -> Any | None:
-    if isinstance(message, dict):
-        cloned = dict(message)
-        cloned["content"] = content
-        return cloned
-    model_copy = getattr(message, "model_copy", None)
-    if callable(model_copy):
-        try:
-            return model_copy(update={"content": content})
-        except Exception:
-            return None
-    copy_method = getattr(message, "copy", None)
-    if callable(copy_method):
-        try:
-            return copy_method(update={"content": content})
-        except Exception:
-            return None
-    return None
+    return _clone_message_with_text_field(
+        message,
+        field_name="content",
+        content=content,
+    )
 
 
 def _core_message_text_field(message: Any) -> tuple[str, str]:

@@ -181,6 +181,8 @@ agentlite autogen \
     --appdir runs/ordinary-developer/studio-agentlite-app-A
 ```
 
+AutoGen Studio 会把网页输入包装为 `Sequence[ChatMessage]`。请确保使用包含 Studio 消息序列兼容修复的最新 AgentLite，并在完整 A1-A10 前先运行 A1、A2，确认第二个 Run 的 `memory_hit_count > 0`。Studio 页面固定显示的“Run 之间不共享数据”提示不会因 AgentLite 接管而消失，不能用它判断共享记忆是否生效。
+
 导出报告示例：
 
 ```bash
