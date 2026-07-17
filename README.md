@@ -2,7 +2,7 @@
 
 本仓库用于迭代实现一个面向多 Agent 协作的跨框架运行时工具层，目标是在多 Agent 任务中通过结构化通信、非文本状态传递和共享记忆复用降低协作开销。
 
-当前开发版本：`v5.13i AutoGen provider usage + persistent shared memory bridge`
+当前开发版本：`v5.13j final delivery guard + honest memory/cost accounting`
 
 最新发行包门禁版本：`v5.13h package release gate`
 
@@ -57,7 +57,12 @@
 - [docs/experiments/v5.13h-package-gate-results.md](docs/experiments/v5.13h-package-gate-results.md)
 - [docs/experiments/v5.13h-autogen-web-backend-results.md](docs/experiments/v5.13h-autogen-web-backend-results.md)
 - [docs/experiments/v5.13i-autogen-shared-memory-results.md](docs/experiments/v5.13i-autogen-shared-memory-results.md)
+- [docs/experiments/v5.13j-final-delivery-memory-cost-repair.md](docs/experiments/v5.13j-final-delivery-memory-cost-repair.md)
 - [docs/release/v5.12z-final-release-notes.md](docs/release/v5.12z-final-release-notes.md)
+
+## v5.13j Current Note
+
+`v5.13j` adds a rules-first semantic delivery guard after the exact Reviewer marker, one context-pruned Reviewer repair for experiment failures, validated-FinalArtifact-only memory admission, finer travel memory slots, and a strict cost gate that no longer bypasses `token_not_reduced` when memory references exist. Session reports now separate actual rewrite cost, shadow compression potential, Provider usage, unique memory retrieval, and receiver fanout. A memory hit is no longer counted as useful without downstream evidence.
 
 ## v5.13i Current Note
 
@@ -65,7 +70,7 @@
 
 Shared memory is enabled by the normal `agentlite autogen -- ...` command. It is disabled in `--rewrite off` observation mode, so native/observed experiments remain uncontaminated. Different Team participant signatures use strict retrieval scopes and cannot retrieve one another's memory. The optional `AGENTLITE_MEMORY_SCOPE` environment variable can provide an explicit experiment or project namespace; otherwise AgentLite derives a stable scope from the target working directory.
 
-Real AutoGen 0.7.5 validation used two independent managed Python processes. The first process admitted one Team final result; the second process loaded the persistent snapshot, recorded one useful memory hit and a `127`-token MemoryView. That view entered three receiver prompts, so the session report correctly recorded `381` retrieved-memory tokens. The actual Team input contained both the shared-memory marker and the first process's confirmed fact. The ordinary AutoGen script did not import AgentLite.
+Real AutoGen 0.7.5 validation used two independent managed Python processes. The first process admitted one Team final result; the second process loaded the persistent snapshot and recorded one memory hit with a `127`-token MemoryView. That historical run labeled the hit as useful; v5.13j now classifies it as unassessed until downstream evidence exists. The view entered three receiver prompts, producing `381` fanout retrieved-memory tokens. The actual Team input contained both the shared-memory marker and the first process's confirmed fact. The ordinary AutoGen script did not import AgentLite.
 
 This bridge provides cross-task context continuity, but it does not by itself fix weak Agent prompts, an unsuitable Team selection policy, or a termination condition that stops before a complete answer. Those remain part of the Studio Team configuration and quality experiment.
 

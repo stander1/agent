@@ -3385,6 +3385,27 @@ AgentLite 的 AutoGen Core 接管已经不局限于单一 content dataclass；
 3. 真实 LLM agent 的质量和成本对比。
 ```
 
+## 48. v5.13j 最终交付与成本口径校准
+
+本次不新增方案，只补齐既定创新方案中此前实现不完整的四个守卫：
+
+| v5.13j 实现 | 对应既定方案 |
+|---|---|
+| 完成标记后的语义交付校验 | Contract Guard / 最终交付完整性守卫 |
+| 同 Reviewer 一次短上下文修复 | Context-Pruned Retry |
+| 未校验 Team 输出先进入候选、规则拒绝长期入池 | TLC-Memory 规则优先准入 |
+| 有记忆命中也必须通过 Token 成本比较 | CSCC 成本感知一致性控制 |
+| 命中、注入、有效、错误、待评估分栏 | useful/wrong memory 指标校准 |
+| actual、shadow、Provider 三种 Token 分栏 | 端到端成本与 cost shifting 防护 |
+
+当前 Driver phase：`v5.13j`。
+
+详细证据见：
+
+```text
+docs/experiments/v5.13j-final-delivery-memory-cost-repair.md
+```
+
 ## 47. v5.13i 补充：AutoGen 共享记忆桥接
 
 版本归属：

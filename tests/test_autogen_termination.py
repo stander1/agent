@@ -82,6 +82,64 @@ class ReviewerFinalTextTerminationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result)
         self.assertTrue(self.condition.terminated)
 
+    async def test_rejects_review_only_text_even_with_exact_marker(self) -> None:
+        result = await self.condition(
+            [
+                TextMessage(
+                    content=(
+                        "审查意见：当前草案没有交付预算表，请 Writer 继续补充后再提交。\n"
+                        f"{MARKER}"
+                    ),
+                    source="reviewer",
+                )
+            ]
+        )
+
+        self.assertIsNone(result)
+        self.assertFalse(self.condition.terminated)
+        self.assertIsNotNone(self.condition.last_assessment)
+        self.assertIn(
+            "review_feedback_not_final_artifact",
+            self.condition.last_assessment.reasons,
+        )
+
+    async def test_accepts_review_preface_followed_by_explicit_final_artifact(self) -> None:
+        result = await self.condition(
+            [
+                TextMessage(
+                    content=(
+                        "审查结论：合格。\n\n"
+                        "**【最终可交付规划方案：三天两晚预算方案】**\n"
+                        "第一天安排自然体验，第二天安排轻徒步，第三天返程；"
+                        "交通、住宿和餐饮预算均已列明，可由用户直接执行。\n"
+                        f"{MARKER}"
+                    ),
+                    source="reviewer",
+                )
+            ]
+        )
+
+        self.assertIsNotNone(result)
+        self.assertTrue(self.condition.terminated)
+
+    async def test_rejects_review_summary_mislabeled_as_delivery_highlights(self) -> None:
+        result = await self.condition(
+            [
+                TextMessage(
+                    content=(
+                        "审查结论：合格。\n"
+                        "**最终交付物核心要点：**预算已控制，住宿标准已保留。\n"
+                        "建议用户下一步依据 Writer 原文执行。\n"
+                        f"{MARKER}"
+                    ),
+                    source="reviewer",
+                )
+            ]
+        )
+
+        self.assertIsNone(result)
+        self.assertFalse(self.condition.terminated)
+
     async def test_component_round_trip_preserves_marker_and_source(self) -> None:
         loaded = ReviewerFinalTextTermination.load_component(
             self.condition.dump_component()
@@ -123,7 +181,7 @@ class ReviewerFinalTextTerminationTests(unittest.IsolatedAsyncioTestCase):
             agent_sources,
             ["planner", "writer", "reviewer", "planner", "writer", "reviewer"],
         )
-        self.assertIn("exact final answer marker", result.stop_reason or "")
+        self.assertIn("validated final artifact", result.stop_reason or "")
 
 
 if __name__ == "__main__":

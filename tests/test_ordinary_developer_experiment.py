@@ -177,7 +177,11 @@ class OrdinaryDeveloperExperimentTests(unittest.TestCase):
                 elif role_index == 1:
                     content = "完整草案"
                 else:
-                    content = "完整最终答案\nFINAL_ANSWER_READY"
+                    content = (
+                        "完整最终答案：已直接回应当前问题，并给出清晰、完整、可执行的交付内容。"
+                        "这里保留足够正文用于验证最终产物不是一句审查结论或流程说明。"
+                        "用户可以直接使用这份结果继续下一项任务。\nFINAL_ANSWER_READY"
+                    )
                 return result_type(
                     content=content,
                     usage={
@@ -237,6 +241,71 @@ class OrdinaryDeveloperExperimentTests(unittest.TestCase):
         )
         self.assertNotIn("experiment_mode", blind_payload["candidates"][0])
 
+    def test_invalid_reviewer_delivery_uses_one_context_pruned_retry(self) -> None:
+        client_type = APP_GLOBALS["OpenAICompatibleClient"]
+        result_type = APP_GLOBALS["LLMResult"]
+        run_team = APP_GLOBALS["run_team"]
+
+        class FakeClient:
+            model = "fake-model"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def complete(self, messages: list[dict[str, str]]) -> object:
+                self.calls += 1
+                replies = {
+                    1: "规划：先核对预算，再生成完整预算表。",
+                    2: "草案包含交通、住宿、餐饮和活动四类费用。",
+                    3: (
+                        "审查意见：当前草案缺少可核算明细，请 Writer 继续补充。\n"
+                        "FINAL_ANSWER_READY"
+                    ),
+                    4: (
+                        "## 最终预算表\n"
+                        "| 项目 | 金额 | 说明 |\n|---|---:|---|\n"
+                        "| 交通 | 800元 | 往返及市内交通 |\n"
+                        "| 住宿 | 1000元 | 两晚住宿 |\n"
+                        "| 餐饮 | 600元 | 三天餐饮 |\n"
+                        "| 活动 | 300元 | 门票与体验 |\n"
+                        "| 总计 | 2700元 | 保留300元机动金 |\n"
+                        "以上明细可以直接执行，并保留了必要的风险余量。\n"
+                        "FINAL_ANSWER_READY"
+                    ),
+                }
+                content = replies[self.calls]
+                return result_type(
+                    content=content,
+                    usage={
+                        "prompt_tokens": 10,
+                        "completion_tokens": 10,
+                        "total_tokens": 20,
+                    },
+                    wall_time_ms=1,
+                )
+
+        fake_client = FakeClient()
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            client_type,
+            "from_env",
+            return_value=fake_client,
+        ):
+            payload = asyncio.run(
+                run_team(
+                    question="请优化旅行预算并交付完整预算表",
+                    agent_configs=APP_GLOBALS["DEFAULT_AGENTS"],
+                    output_dir=Path(temp_dir),
+                    temperature=0.0,
+                    max_turns=3,
+                )
+            )
+
+        self.assertTrue(payload["summary"]["delivery_valid"])
+        self.assertEqual(payload["summary"]["semantic_retry_count"], 1)
+        self.assertEqual(payload["raw"]["llm_usage"]["calls"], 4)
+        self.assertEqual(fake_client.calls, 4)
+        self.assertIn("最终预算表", payload["raw"]["messages"][-1]["content"])
+
     def test_question_sequence_contains_ordered_a1_to_a10_tasks(self) -> None:
         loader = APP_GLOBALS["_load_question_sequence"]
 
@@ -290,7 +359,11 @@ class OrdinaryDeveloperExperimentTests(unittest.TestCase):
         self.assertTrue(
             validator(
                 source="reviewer",
-                content="完整最终答案\n\nFINAL_ANSWER_READY",
+                content=(
+                    "完整最终答案：已直接回应当前问题，并给出清晰、完整、可执行的交付内容。"
+                    "这里保留足够正文用于验证最终产物不是一句审查结论或流程说明。"
+                    "用户可以直接使用这份结果继续下一项任务。\nFINAL_ANSWER_READY"
+                ),
             )
         )
         self.assertFalse(
@@ -303,6 +376,15 @@ class OrdinaryDeveloperExperimentTests(unittest.TestCase):
             validator(
                 source="reviewer",
                 content="FINAL_ANSWER_READY 只是审查说明",
+            )
+        )
+        self.assertFalse(
+            validator(
+                source="reviewer",
+                content=(
+                    "审查意见：当前草案缺少完整预算表，请 Writer 继续补充后再提交。\n"
+                    "FINAL_ANSWER_READY"
+                ),
             )
         )
         self.assertEqual(

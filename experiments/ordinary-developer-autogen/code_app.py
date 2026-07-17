@@ -13,6 +13,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
+from agent_runtime.reliability.final_delivery_guard import (
+    FinalDeliveryAssessment,
+    assess_final_delivery,
+    has_exact_last_line_marker,
+    strip_exact_last_line_marker,
+)
+
 
 DEFAULT_QUESTION = (
     "请为 openEuler 上的多 Agent 协作运行时设计一个可落地方案，要求包含 Agent 分工、"
@@ -298,6 +305,12 @@ async def run_team(
         "messages": task_payload["messages"],
         "stop_reason": task_payload["stop_reason"],
         "delivery_valid": task_payload["delivery_valid"],
+        "delivery_status": task_payload["delivery_status"],
+        "delivery_guard_reasons": task_payload["delivery_guard_reasons"],
+        "missing_delivery_requirements": task_payload[
+            "missing_delivery_requirements"
+        ],
+        "semantic_retry_count": task_payload["semantic_retry_count"],
         "final_answer_path": str(final_answer_path),
         "llm_usage_summary_path": str(output_dir / "llm_usage_summary.json"),
     }
@@ -310,6 +323,8 @@ async def run_team(
             "wall_time_ms": task_payload["wall_time_ms"],
             "llm_total_tokens": task_payload["llm_usage"]["llm_total_tokens"],
             "delivery_valid": task_payload["delivery_valid"],
+            "delivery_status": task_payload["delivery_status"],
+            "semantic_retry_count": task_payload["semantic_retry_count"],
             "final_answer_path": str(final_answer_path),
             "llm_usage_summary_path": str(output_dir / "llm_usage_summary.json"),
         },
@@ -415,6 +430,9 @@ async def _run_tasks(
             del cancellation_token
             self._history.clear()
 
+        def remember_repaired_final(self, content: str) -> None:
+            self._history.append(TextMessage(content=content, source="reviewer"))
+
     agents = [DeveloperAgent(config) for config in agent_configs]
     kwargs: dict[str, Any] = {
         "termination_condition": ReviewerFinalTextTermination(
@@ -435,19 +453,57 @@ async def _run_tasks(
     task_payloads: list[dict[str, Any]] = []
     quality_candidates: list[dict[str, Any]] = []
     quality_mapping: list[dict[str, Any]] = []
+    reviewer_config = next(
+        (config for config in agent_configs if config.get("name") == "reviewer"),
+        agent_configs[-1],
+    )
     for task_index, task in enumerate(tasks, start=1):
         current_task_id = task.task_id
         usage_start = len(cost_logger.rows)
         task_started = time.perf_counter()
         result = await team.run(task=task.question)
-        task_wall_time_ms = int((time.perf_counter() - task_started) * 1000)
-        task_usage = _summarize_usage_rows(cost_logger.rows[usage_start:])
         final_source, raw_final_answer = _final_message(result)
-        delivery_valid = _is_valid_final_delivery(
+        assessment = _assess_task_delivery(
+            request=task.question,
             source=final_source,
             content=raw_final_answer,
         )
-        final_answer = _strip_done_token(raw_final_answer)
+        semantic_retry_count = 0
+        messages = _messages_to_dict(result)
+        if not assessment.valid:
+            semantic_retry_count = 1
+            writer_draft = _latest_message_content(result, "writer")
+            repaired = await _context_pruned_reviewer_retry(
+                llm=llm,
+                cost_logger=cost_logger,
+                task_id=current_task_id,
+                reviewer_system_prompt=reviewer_config["system_prompt"],
+                request=task.question,
+                writer_draft=writer_draft,
+                previous_reviewer_output=raw_final_answer,
+                assessment=assessment,
+            )
+            raw_final_answer = repaired
+            final_source = "reviewer"
+            assessment = _assess_task_delivery(
+                request=task.question,
+                source=final_source,
+                content=raw_final_answer,
+            )
+            messages.append(
+                {
+                    "type": "ContextPrunedRetryTextMessage",
+                    "source": "reviewer",
+                    "content": raw_final_answer,
+                }
+            )
+            for agent in agents:
+                agent.remember_repaired_final(raw_final_answer)
+
+        task_wall_time_ms = int((time.perf_counter() - task_started) * 1000)
+        task_usage = _summarize_usage_rows(cost_logger.rows[usage_start:])
+        delivery_valid = assessment.valid
+        final_answer = assessment.body
         stop_reason = str(getattr(result, "stop_reason", "") or "")
         task_dir = output_dir / "tasks" / task.task_id
         task_dir.mkdir(parents=True, exist_ok=True)
@@ -463,10 +519,16 @@ async def _run_tasks(
             "final_source": final_source,
             "final_marker_present": _has_exact_done_token(raw_final_answer),
             "delivery_valid": delivery_valid,
+            "delivery_status": assessment.status,
+            "delivery_guard_reasons": list(assessment.reasons),
+            "missing_delivery_requirements": list(
+                assessment.missing_requirements
+            ),
+            "semantic_retry_count": semantic_retry_count,
             "final_answer": final_answer,
             "final_answer_chars": len(final_answer),
             "final_answer_path": str(final_answer_path),
-            "messages": _messages_to_dict(result),
+            "messages": messages,
         }
         (task_dir / "run_result.json").write_text(
             json.dumps(task_payload, ensure_ascii=False, indent=2),
@@ -501,6 +563,12 @@ async def _run_tasks(
         "task_count": len(task_payloads),
         "valid_delivery_count": sum(
             int(task["delivery_valid"]) for task in task_payloads
+        ),
+        "degraded_delivery_count": sum(
+            int(not task["delivery_valid"]) for task in task_payloads
+        ),
+        "semantic_retry_count": sum(
+            int(task["semantic_retry_count"]) for task in task_payloads
         ),
         "wall_time_ms": wall_time_ms,
         "llm_usage": cost_logger.summary(),
@@ -651,6 +719,77 @@ def _messages_to_dict(result: Any) -> list[dict[str, Any]]:
     ]
 
 
+async def _context_pruned_reviewer_retry(
+    *,
+    llm: OpenAICompatibleClient,
+    cost_logger: CostLogger,
+    task_id: str,
+    reviewer_system_prompt: str,
+    request: str,
+    writer_draft: str,
+    previous_reviewer_output: str,
+    assessment: FinalDeliveryAssessment,
+) -> str:
+    missing = "、".join(assessment.missing_requirements) or "完整、可直接交付的正文"
+    reasons = "、".join(assessment.reasons) or "最终交付语义校验失败"
+    prompt = "\n".join(
+        [
+            "这是一次短上下文最终交付修复，只保留当前问题和本轮必要证据。",
+            "不要输出审查过程、修订意见或要求其他 Agent 继续修改。",
+            "请直接给用户一份自包含、完整、可执行的最终交付物。",
+            "",
+            "当前用户请求：",
+            request,
+            "",
+            "Writer 最新草案：",
+            writer_draft or "（本轮没有可用 Writer 草案，请根据用户请求直接完成。）",
+            "",
+            "Reviewer 上次未通过的输出：",
+            previous_reviewer_output,
+            "",
+            f"未通过原因：{reasons}",
+            f"必须补齐：{missing}",
+            f"最后一行必须单独写 {DONE_TOKEN}",
+        ]
+    )
+    started = time.perf_counter()
+    result = await asyncio.to_thread(
+        llm.complete,
+        [
+            {"role": "system", "content": reviewer_system_prompt},
+            {"role": "user", "content": prompt},
+        ],
+    )
+    cost_logger.add(
+        {
+            "task_id": task_id,
+            "agent": "reviewer",
+            "model": llm.model,
+            "prompt_tokens": result.usage["prompt_tokens"],
+            "completion_tokens": result.usage["completion_tokens"],
+            "total_tokens": result.usage["total_tokens"],
+            "wall_time_ms": result.wall_time_ms,
+            "retry_count": result.retry_count,
+            "semantic_delivery_retry": True,
+            "prompt_chars": len(prompt),
+            "history_message_count": 3,
+            "local_wall_time_ms": int((time.perf_counter() - started) * 1000),
+            "ts": time.time(),
+        }
+    )
+    return result.content
+
+
+def _latest_message_content(result: Any, source: str) -> str:
+    for message in reversed(getattr(result, "messages", []) or []):
+        if str(getattr(message, "source", "") or "") != source:
+            continue
+        content = str(getattr(message, "content", "") or "").strip()
+        if content:
+            return content
+    return ""
+
+
 def _final_message(result: Any) -> tuple[str, str]:
     for message in reversed(getattr(result, "messages", []) or []):
         content = str(getattr(message, "content", "") or "").strip()
@@ -661,21 +800,41 @@ def _final_message(result: Any) -> tuple[str, str]:
 
 
 def _has_exact_done_token(content: str) -> bool:
-    lines = [line.strip() for line in content.splitlines() if line.strip()]
-    return bool(lines and lines[-1] == DONE_TOKEN)
+    return has_exact_last_line_marker(content, DONE_TOKEN)
 
 
-def _is_valid_final_delivery(*, source: str, content: str) -> bool:
-    return source == "reviewer" and _has_exact_done_token(content)
+def _assess_task_delivery(
+    *,
+    request: str,
+    source: str,
+    content: str,
+) -> FinalDeliveryAssessment:
+    return assess_final_delivery(
+        request=request,
+        source=source,
+        expected_source="reviewer",
+        content=content,
+        marker=DONE_TOKEN,
+        require_marker=True,
+        minimum_body_chars=80,
+    )
+
+
+def _is_valid_final_delivery(
+    *,
+    source: str,
+    content: str,
+    request: str = "",
+) -> bool:
+    return _assess_task_delivery(
+        request=request,
+        source=source,
+        content=content,
+    ).valid
 
 
 def _strip_done_token(content: str) -> str:
-    lines = content.rstrip().splitlines()
-    while lines and not lines[-1].strip():
-        lines.pop()
-    if lines and lines[-1].strip() == DONE_TOKEN:
-        lines.pop()
-    return "\n".join(lines).rstrip()
+    return strip_exact_last_line_marker(content, DONE_TOKEN)
 
 
 def _final_answer(result: Any) -> str:

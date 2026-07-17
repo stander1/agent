@@ -390,15 +390,36 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "llm_call_count": 0,
         "memory_query_count": 0,
         "memory_hit_count": 0,
+        "memory_injected_count": 0,
         "useful_memory_hit_count": 0,
         "wrong_memory_hit_count": 0,
+        "unassessed_memory_hit_count": 0,
+        "unique_retrieved_memory_tokens": 0,
+        "fanout_retrieved_memory_tokens": 0,
         "end_to_end_collaboration_tokens": 0,
         "native_baseline_tokens": 0,
         "runtime_tokens": 0,
         "token_savings": 0,
         "token_savings_ratio": 0.0,
+        "actual_rewrite_event_count": 0,
+        "shadow_native_tokens": 0,
+        "shadow_candidate_tokens": 0,
+        "shadow_potential_savings": 0,
+        "shadow_potential_savings_ratio": 0.0,
+        "shadow_event_count": 0,
         "event_count": 0,
-        "source": "autogen_trace",
+        "source": "autogen_trace_actual_rewrite_audit",
+    }
+    actual_event_types = {
+        "autogen_agent_input_real_rewrite",
+        "autogen_team_input_real_rewrite",
+        "autogen_core_content_real_rewrite",
+        "autogen_core_response_real_rewrite",
+    }
+    shadow_event_types = {
+        "autogen_shp_handoff_shadow",
+        "autogen_core_transport_shadow",
+        "autogen_broadcast_replacement_shadow",
     }
     seen_cost_events = 0
     for event in trace_events:
@@ -408,12 +429,28 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
             breakdown["memory_query_count"] += _int(
                 payload.get("memory_query_count")
             )
-            breakdown["memory_hit_count"] += _int(payload.get("memory_hit_count"))
-            breakdown["useful_memory_hit_count"] += _int(
-                payload.get("useful_memory_hit_count")
-            )
+            hit_count = _int(payload.get("memory_hit_count"))
+            breakdown["memory_hit_count"] += hit_count
+            if "memory_injected_count" in payload:
+                breakdown["memory_injected_count"] += _int(
+                    payload.get("memory_injected_count")
+                )
+                breakdown["useful_memory_hit_count"] += _int(
+                    payload.get("useful_memory_hit_count")
+                )
+                breakdown["unassessed_memory_hit_count"] += _int(
+                    payload.get("unassessed_memory_hit_count")
+                )
+            else:
+                # Older traces equated hits with useful hits. Preserve the
+                # observed injection, but keep usefulness unassessed.
+                breakdown["memory_injected_count"] += hit_count
+                breakdown["unassessed_memory_hit_count"] += hit_count
             breakdown["wrong_memory_hit_count"] += _int(
                 payload.get("wrong_memory_hit_count")
+            )
+            breakdown["unique_retrieved_memory_tokens"] += _int(
+                payload.get("retrieved_memory_tokens")
             )
             continue
         if event_type == "autogen_model_client_usage":
@@ -434,7 +471,14 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
             breakdown["llm_total_tokens"] += total
             breakdown["llm_call_count"] += 1
             continue
-        if event_type == "autogen_agent_receive":
+        if event_type in shadow_event_types:
+            native, runtime, _, _, _ = _autogen_event_cost(payload)
+            if native > 0 or runtime > 0:
+                breakdown["shadow_native_tokens"] += native
+                breakdown["shadow_candidate_tokens"] += runtime
+                breakdown["shadow_event_count"] += 1
+            continue
+        if event_type not in actual_event_types:
             continue
         native, runtime, direct, prompt_view, retrieved_memory = _autogen_event_cost(
             payload
@@ -442,10 +486,23 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         if native <= 0 and runtime <= 0:
             continue
         seen_cost_events += 1
+        applied = bool(payload.get("rewrite_applied")) or _int(
+            payload.get("rewrite_applied_count")
+        ) > 0
+        if not applied:
+            runtime = native
+            direct = native
+            prompt_view = 0
+            retrieved_memory = 0
+        else:
+            injected_count = _int(payload.get("memory_injected_count"))
+            breakdown["memory_injected_count"] += injected_count
+            breakdown["unassessed_memory_hit_count"] += injected_count
         breakdown["native_baseline_tokens"] += native
         breakdown["direct_message_tokens"] += direct
         breakdown["prompt_view_tokens"] += prompt_view
         breakdown["retrieved_memory_tokens"] += retrieved_memory
+        breakdown["fanout_retrieved_memory_tokens"] += retrieved_memory
         if runtime > 0:
             breakdown["end_to_end_collaboration_tokens"] += runtime
         else:
@@ -458,6 +515,13 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
     breakdown["token_savings_ratio"] = (
         round(savings / native_total, 6) if native_total > 0 else 0.0
     )
+    shadow_native = breakdown["shadow_native_tokens"]
+    shadow_savings = shadow_native - breakdown["shadow_candidate_tokens"]
+    breakdown["shadow_potential_savings"] = shadow_savings
+    breakdown["shadow_potential_savings_ratio"] = (
+        round(shadow_savings / shadow_native, 6) if shadow_native > 0 else 0.0
+    )
+    breakdown["actual_rewrite_event_count"] = seen_cost_events
     breakdown["event_count"] = seen_cost_events
     return breakdown
 

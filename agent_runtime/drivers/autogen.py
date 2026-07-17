@@ -32,6 +32,7 @@ from agent_runtime.eval.metrics import MetricsCollector
 from agent_runtime.eval.token_counter import TokenCounter
 from agent_runtime.eval.trace_logger import TraceLogger
 from agent_runtime.memory.memory_store import MemoryStoreLite
+from agent_runtime.reliability.final_delivery_guard import assess_final_delivery
 from agent_runtime.state.state_pool import StatePoolLite, StateRef
 
 if TYPE_CHECKING:
@@ -61,7 +62,7 @@ SHARED_MEMORY_ENV = "AGENTLITE_AUTOGEN_SHARED_MEMORY"
 MEMORY_SCOPE_ENV = "AGENTLITE_MEMORY_SCOPE"
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
 CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
-DRIVER_PHASE = "v5.13i"
+DRIVER_PHASE = "v5.13j"
 TEAM_REAL_REWRITE_DISABLED_REASON = (
     "team_level_real_rewrite_not_enabled_for_guarded_agent_input"
 )
@@ -276,8 +277,11 @@ class AutoGenHookManager:
                 "memory_scope_id": self.memory_scope_id,
                 "memory_query_count": 1,
                 "memory_hit_count": len(memory_context.refs),
-                "useful_memory_hit_count": len(memory_context.refs),
+                "memory_injected_count": 0,
+                "useful_memory_hit_count": 0,
                 "wrong_memory_hit_count": 0,
+                "unassessed_memory_hit_count": 0,
+                "memory_use_status": "retrieved_pending_cost_gate",
                 "retrieved_memory_tokens": _count_tokens(
                     self.token_counter,
                     memory_text,
@@ -300,9 +304,24 @@ class AutoGenHookManager:
     ) -> Any | None:
         if not self.shared_memory_enabled or not state_refs:
             return None
+        delivery_assessment = None
         if context.target_kind == "agentchat_team" and context.method_name == "run_stream":
-            candidate_kind = "autogen_team_final"
-            confidence, importance, coverage = 0.86, 0.82, 0.78
+            candidate_text, candidate_source = _latest_visible_message(
+                decoded_messages,
+                text,
+            )
+            delivery_assessment = assess_final_delivery(
+                request=context.task.prompt,
+                content=candidate_text,
+                source=candidate_source,
+                marker="FINAL_ANSWER_READY",
+            )
+            if delivery_assessment.valid:
+                candidate_kind = "autogen_team_final"
+                confidence, importance, coverage = 0.86, 0.82, 0.78
+            else:
+                candidate_kind = "autogen_team_unvalidated"
+                confidence, importance, coverage = 0.30, 0.30, 0.20
         elif context.target_kind == "agentchat_agent" and context.method_name in {
             "on_messages",
             "on_messages_stream",
@@ -355,6 +374,11 @@ class AutoGenHookManager:
                     "candidate_id": getattr(report, "candidate_id", ""),
                     "admission_status": getattr(report, "admission_status", ""),
                     "admission_reasons": getattr(report, "admission_reasons", []),
+                    "delivery_assessment": (
+                        delivery_assessment.to_dict()
+                        if delivery_assessment is not None
+                        else {}
+                    ),
                     "memory_refs": (
                         [_memory_ref_payload(report.memory_ref)]
                         if getattr(report, "memory_ref", None) is not None
@@ -1937,17 +1961,13 @@ class AutoGenHookManager:
                 total_prompt_view_tokens + total_retrieved_memory_tokens
             ),
         )
-        if context.memory_context.refs:
-            fallback_reasons = [
-                reason for reason in fallback_reasons if reason != "token_not_reduced"
-            ]
         rewritten_content = _build_team_real_rewrite_content(
             receiver_entries=receiver_entries,
             state_refs=state_ref_payload,
         )
         native_tokens = _count_tokens(self.token_counter, native_text)
         rewritten_tokens = _count_tokens(self.token_counter, rewritten_content)
-        if native_tokens <= rewritten_tokens and not context.memory_context.refs:
+        if native_tokens <= rewritten_tokens:
             fallback_reasons.append("team_task_token_not_reduced")
         if fallback_reasons:
             self._record_team_rewrite_audit(
@@ -2843,6 +2863,9 @@ class AutoGenHookManager:
                 "fallback_bucket_counts": _count_values(fallback_buckets),
                 "state_refs": state_refs or [],
                 "memory_refs": memory_refs or [],
+                "memory_injected_count": (
+                    _unique_memory_ref_count(memory_refs or []) if applied else 0
+                ),
                 "shadow_wire_envelope": wire_envelope or {},
                 "prompt_view_available": bool(prompt_view_text.strip()),
                 "prompt_view_tokens": max(
@@ -2915,6 +2938,17 @@ class AutoGenHookManager:
                     for entry in receiver_entries
                     for ref in (entry.get("memory_refs", []) or [])
                 ],
+                "memory_injected_count": (
+                    _unique_memory_ref_count(
+                        [
+                            ref
+                            for entry in receiver_entries
+                            for ref in (entry.get("memory_refs", []) or [])
+                        ]
+                    )
+                    if applied
+                    else 0
+                ),
                 "retrieved_memory_tokens": retrieved_memory_tokens,
                 "receiver_count": len(receiver_entries),
                 "receiver_plans": _team_rewrite_receiver_audit(receiver_entries),
@@ -4524,6 +4558,18 @@ def _memory_ref_payload(ref: Any) -> dict[str, Any]:
     }
 
 
+def _unique_memory_ref_count(refs: list[dict[str, Any]]) -> int:
+    keys = {
+        (
+            str(ref.get("memory_id", "") or ""),
+            int(ref.get("version_id", 0) or 0),
+        )
+        for ref in refs
+        if isinstance(ref, dict) and ref.get("memory_id")
+    }
+    return len(keys)
+
+
 def _memory_summary(messages: list[Any], fallback: str, *, limit: int) -> str:
     for message in reversed(messages):
         content = str(getattr(message, "content_text", "") or "").strip()
@@ -4538,10 +4584,44 @@ def _memory_summary(messages: list[Any], fallback: str, *, limit: int) -> str:
     return " ".join(fallback.split())[:limit]
 
 
+def _latest_visible_message(
+    messages: list[Any],
+    fallback: str,
+) -> tuple[str, str]:
+    for message in reversed(messages):
+        content = str(getattr(message, "content_text", "") or "").strip()
+        source = str(getattr(message, "source", "") or "").strip()
+        native_type = str(getattr(message, "native_type", "") or "")
+        message_kind = str(getattr(message, "message_kind", "") or "")
+        if not content or source == "user" or message_kind != "text":
+            continue
+        if native_type.endswith("Event") or native_type == "ThoughtEvent":
+            continue
+        return content, source
+    return fallback.strip(), ""
+
+
 def _autogen_memory_slot_hint(prompt: str, summary: str) -> str:
-    text = f"{prompt}\n{summary}".lower()
-    if any(term in text for term in ("旅行", "行程", "预算", "travel", "itinerary")):
-        return "travel_preference"
+    request = prompt.lower()
+    text = f"{request}\n{summary.lower()}"
+    if any(term in request for term in ("最终旅行手册", "旅行手册", "final travel guide")):
+        return "travel_final_deliverable"
+    if "决策日志" in request or "decision log" in request:
+        return "travel_decision_log"
+    if any(term in request for term in ("不吃辣", "不辣", "伴手礼", "特色餐", "dining")):
+        return "travel_dining_constraint"
+    if any(term in request for term in ("下雨", "雨天", "天气预报", "weather risk")):
+        return "travel_weather_risk"
+    if any(term in request for term in ("预算", "2600", "3000", "budget")) and any(
+        term in request for term in ("优化", "预算表", "控制", "检查", "重新", "optimize")
+    ):
+        return "travel_budget"
+    if any(term in request for term in ("行程", "第一天", "第二天", "第三天", "itinerary")):
+        return "travel_itinerary"
+    if any(term in request for term in ("候选目的地", "目的地", "筛选 3 个", "destination")):
+        return "travel_destination_decision"
+    if any(term in request for term in ("旅行", "偏好", "需求和约束", "travel")):
+        return "travel_requirement"
     if any(term in text for term in ("安全", "审计", "证据链", "security", "audit")):
         return "security_audit"
     if _looks_like_final_task(text):

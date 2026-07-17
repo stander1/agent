@@ -14,40 +14,58 @@ from autogen_agentchat.messages import (
 from autogen_core import Component
 from pydantic import BaseModel
 
+from agent_runtime.reliability.final_delivery_guard import (
+    FinalDeliveryAssessment,
+    assess_final_delivery,
+    has_exact_last_line_marker,
+)
+
 
 class ReviewerFinalTextTerminationConfig(BaseModel):
     marker: str
     source: str = "reviewer"
+    semantic_guard: bool = True
 
 
 class ReviewerFinalTextTermination(
     TerminationCondition,
     Component[ReviewerFinalTextTerminationConfig],
 ):
-    """Stop only when a reviewer's visible answer ends with an exact marker."""
+    """Stop only on a reviewer marker attached to a valid final artifact."""
 
     component_config_schema = ReviewerFinalTextTerminationConfig
     component_provider_override = (
         "agent_runtime.adapters.autogen_termination.ReviewerFinalTextTermination"
     )
     component_description = (
-        "Stops on an exact final marker in the last non-empty line of a reviewer's "
-        "visible TextMessage. Internal reasoning events are ignored."
+        "Stops on an exact final marker in a reviewer's visible TextMessage only "
+        "after a rules-first semantic delivery check. Internal events are ignored."
     )
     component_label = "Reviewer Final Answer Termination"
 
-    def __init__(self, marker: str, source: str = "reviewer") -> None:
+    def __init__(
+        self,
+        marker: str,
+        source: str = "reviewer",
+        semantic_guard: bool = True,
+    ) -> None:
         if not marker.strip():
             raise ValueError("marker must not be empty")
         if not source.strip():
             raise ValueError("source must not be empty")
         self._marker = marker.strip()
         self._source = source.strip()
+        self._semantic_guard = semantic_guard
         self._terminated = False
+        self._last_assessment: FinalDeliveryAssessment | None = None
 
     @property
     def terminated(self) -> bool:
         return self._terminated
+
+    @property
+    def last_assessment(self) -> FinalDeliveryAssessment | None:
+        return self._last_assessment
 
     async def __call__(
         self,
@@ -57,14 +75,30 @@ class ReviewerFinalTextTermination(
             raise TerminatedException("Termination condition has already been reached")
 
         for message in messages:
-            if not isinstance(message, TextMessage) or message.source != self._source:
+            if not isinstance(message, TextMessage):
                 continue
-            lines = [line.strip() for line in message.content.splitlines() if line.strip()]
-            if lines and lines[-1] == self._marker:
+            if message.source == "user":
+                continue
+            if message.source != self._source or not has_exact_last_line_marker(
+                message.content,
+                self._marker,
+            ):
+                continue
+            assessment = assess_final_delivery(
+                request="",
+                content=message.content,
+                source=message.source,
+                expected_source=self._source,
+                marker=self._marker,
+                require_marker=True,
+            )
+            self._last_assessment = assessment
+            if assessment.valid or not self._semantic_guard:
                 self._terminated = True
                 return StopMessage(
                     content=(
-                        f"Reviewer '{self._source}' emitted the exact final answer marker"
+                        f"Reviewer '{self._source}' emitted a validated final artifact "
+                        "with the exact final answer marker"
                     ),
                     source="ReviewerFinalTextTermination",
                 )
@@ -72,11 +106,13 @@ class ReviewerFinalTextTermination(
 
     async def reset(self) -> None:
         self._terminated = False
+        self._last_assessment = None
 
     def _to_config(self) -> ReviewerFinalTextTerminationConfig:
         return ReviewerFinalTextTerminationConfig(
             marker=self._marker,
             source=self._source,
+            semantic_guard=self._semantic_guard,
         )
 
     @classmethod
@@ -84,4 +120,8 @@ class ReviewerFinalTextTermination(
         cls,
         config: ReviewerFinalTextTerminationConfig,
     ) -> Self:
-        return cls(marker=config.marker, source=config.source)
+        return cls(
+            marker=config.marker,
+            source=config.source,
+            semantic_guard=config.semantic_guard,
+        )

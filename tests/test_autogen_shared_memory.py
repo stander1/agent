@@ -8,7 +8,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_runtime.bootstrap.startup import BootstrapContext
-from agent_runtime.drivers.autogen import AutoGenHookManager, SHARED_MEMORY_MARKER
+from agent_runtime.drivers.autogen import (
+    AutoGenHookManager,
+    SHARED_MEMORY_MARKER,
+    _autogen_memory_slot_hint,
+)
 
 
 @dataclass
@@ -36,6 +40,72 @@ class FakeAgent:
 
 
 class AutoGenSharedMemoryTest(unittest.TestCase):
+    def test_travel_outputs_use_separate_semantic_slots(self) -> None:
+        cases = {
+            "请整理旅行需求和约束": "travel_requirement",
+            "请筛选 3 个候选目的地": "travel_destination_decision",
+            "请生成 3 天 2 晚行程": "travel_itinerary",
+            "请重新优化预算到 2600 元": "travel_budget",
+            "第二天下雨，请增加室内备选": "travel_weather_risk",
+            "一位朋友不吃辣并预留伴手礼": "travel_dining_constraint",
+            "请生成最终旅行手册和决策日志": "travel_final_deliverable",
+        }
+        for prompt, expected in cases.items():
+            with self.subTest(prompt=prompt):
+                self.assertEqual(
+                    _autogen_memory_slot_hint(prompt, "完整交付内容"),
+                    expected,
+                )
+
+    def test_review_only_team_output_is_rejected_from_long_term_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = {
+                "AGENTLITE_AUTOGEN_BROADCAST_MODE": "real-rewrite",
+                "AGENTLITE_AUTOGEN_TEAM_REWRITE": "1",
+                "AGENTLITE_AUTOGEN_SHARED_MEMORY": "1",
+                "AGENTLITE_MEMORY_SCOPE": "review-rejection-test",
+            }
+            with patch.dict("os.environ", env, clear=False):
+                manager = AutoGenHookManager(self._context(root, "launch_bad_final"))
+                context = manager.record_call_start(
+                    instance=FakeTeam(),
+                    method_name="run_stream",
+                    target_kind="agentchat_team",
+                    args=(),
+                    kwargs={"task": "请优化旅行预算并交付完整预算表"},
+                )
+                manager.record_call_end(
+                    context,
+                    FakeTaskResult(
+                        messages=[
+                            FakeTextMessage("请优化旅行预算并交付完整预算表", "user"),
+                            FakeTextMessage(
+                                "审查意见：当前草案缺少预算表，请 Writer 继续补充。\n"
+                                "FINAL_ANSWER_READY",
+                                "reviewer",
+                            ),
+                        ]
+                    ),
+                )
+
+                snapshot = manager.kernel.memory_store.snapshot()
+                self.assertEqual(snapshot["memories"], [])
+                self.assertEqual(
+                    snapshot["memory_candidates"][-1]["admission_status"],
+                    "rejected",
+                )
+                events = self._events(manager.output_dir / "trace.jsonl")
+                candidate = next(
+                    item
+                    for item in reversed(events)
+                    if item.get("event_type") == "autogen_memory_candidate"
+                )
+                self.assertEqual(
+                    candidate["payload"]["candidate_kind"],
+                    "autogen_team_unvalidated",
+                )
+
     def test_rules_first_admission_then_cross_launch_memory_injection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -101,10 +171,15 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                     (manager.output_dir / "pool_snapshot_latest.json").exists()
                 )
 
+                long_follow_up = (
+                    "A2 基于刚才偏好筛选三个目的地，并逐项比较交通、住宿、餐饮、"
+                    "自然体验、步行强度和拥挤风险。"
+                    + "请保留既有约束并给出可核查理由。" * 120
+                )
                 studio_task = [
                     {
                         "type": "TextMessage",
-                        "content": "A2 基于刚才偏好筛选三个目的地",
+                        "content": long_follow_up,
                         "source": "user",
                     }
                 ]
@@ -128,13 +203,23 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                 self.assertEqual(rewritten_task[0]["source"], "user")
                 self.assertEqual(
                     studio_task[0]["content"],
-                    "A2 基于刚才偏好筛选三个目的地",
+                    long_follow_up,
                 )
                 rewritten = rewritten_task[0]["content"]
                 self.assertIn(SHARED_MEMORY_MARKER, rewritten)
                 self.assertIn("自然风景", rewritten)
                 self.assertEqual(rewritten.count(SHARED_MEMORY_MARKER), 1)
                 self.assertTrue(second.display_restore_enabled)
+                applied_events = self._events(manager.output_dir / "trace.jsonl")
+                applied_rewrite = next(
+                    item
+                    for item in reversed(applied_events)
+                    if item.get("event_type") == "autogen_team_input_real_rewrite"
+                )
+                self.assertEqual(
+                    applied_rewrite["payload"]["memory_injected_count"],
+                    1,
+                )
 
                 internal_stream_message = FakeTextMessage(rewritten, "user")
                 display_stream_message = manager.restore_call_result_for_display(
@@ -143,7 +228,7 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                 )
                 self.assertEqual(
                     display_stream_message.content,
-                    studio_task[0]["content"],
+                    long_follow_up,
                 )
                 self.assertIn(
                     "AGENTLITE_TEAM_REAL_REWRITE v1",
@@ -188,6 +273,27 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                     third,
                     (),
                     {"task": "A3 继续完善上一轮旅行方案"},
+                )
+                self.assertEqual(
+                    third_kwargs["task"],
+                    "A3 继续完善上一轮旅行方案",
+                )
+                strict_gate_events = self._events(
+                    persisted.output_dir / "trace.jsonl"
+                )
+                strict_gate = next(
+                    item
+                    for item in reversed(strict_gate_events)
+                    if item.get("event_type") == "autogen_team_input_real_rewrite"
+                )
+                self.assertFalse(strict_gate["payload"]["rewrite_applied"])
+                self.assertEqual(
+                    strict_gate["payload"]["memory_injected_count"],
+                    0,
+                )
+                self.assertIn(
+                    "token_not_reduced",
+                    strict_gate["payload"]["fallback_reasons"],
                 )
                 internal_string_message = FakeTextMessage(
                     third_kwargs["task"],

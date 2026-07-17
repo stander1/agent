@@ -46,6 +46,10 @@ def build_autogen_session_report(request: SessionReportRequest) -> dict[str, Any
         "event_counts": summary.get("event_counts") or {},
         "token_summary": {
             **token_summary,
+            "actual_native_transport_tokens": native,
+            "actual_agentlite_transport_tokens": runtime,
+            "actual_transport_token_savings": savings,
+            "actual_transport_token_savings_ratio": round(ratio, 6),
             "native_collaboration_tokens": native,
             "agentlite_runtime_tokens": runtime,
             "agentlite_token_savings": savings,
@@ -53,9 +57,10 @@ def build_autogen_session_report(request: SessionReportRequest) -> dict[str, Any
         },
         "metric_rows": rows,
         "notes": [
-            "native_collaboration_tokens 表示按原生 AutoGen 文本传递或广播估计的协作通信成本。",
-            "agentlite_runtime_tokens 表示 AgentLite 接管后的直接消息与 Prompt View 等协作成本。",
+            "actual_* 仅汇总真实改写审计事件；改写回退时按原生传输成本计入，不能记作节省。",
+            "shadow_* 是未实际替换消息的理论候选成本，只表示潜力，不是已实现节省。",
             "llm_* 字段来自 AutoGen 模型客户端 usage hook；如果目标框架没有暴露 usage，则仍应保存 provider 后台记录作为旁证。",
+            "记忆命中、注入与有效采用是三个不同阶段；未取得下游引用证据的命中保持 unassessed。",
         ],
     }
 
@@ -120,10 +125,20 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
     llm_call_count = _int(token_summary.get("llm_call_count"))
     memory_query_count = _int(token_summary.get("memory_query_count"))
     memory_hit_count = _int(token_summary.get("memory_hit_count"))
+    memory_injected_count = _int(token_summary.get("memory_injected_count"))
     useful_memory_hit_count = _int(
         token_summary.get("useful_memory_hit_count")
     )
     wrong_memory_hit_count = _int(token_summary.get("wrong_memory_hit_count"))
+    unassessed_memory_hit_count = _int(
+        token_summary.get("unassessed_memory_hit_count")
+    )
+    unique_retrieved = _int(token_summary.get("unique_retrieved_memory_tokens"))
+    fanout_retrieved = _int(token_summary.get("fanout_retrieved_memory_tokens"))
+    shadow_native = _int(token_summary.get("shadow_native_tokens"))
+    shadow_candidate = _int(token_summary.get("shadow_candidate_tokens"))
+    shadow_savings = shadow_native - shadow_candidate if shadow_native else 0
+    shadow_ratio = shadow_savings / shadow_native if shadow_native > 0 else 0.0
     savings = native - runtime if native else _int(token_summary.get("token_savings"))
     ratio = savings / native if native > 0 else 0.0
     return [
@@ -131,27 +146,51 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
         _row("llm_prompt_tokens", llm_prompt, "LLM 输入 token；网页端可由 provider usage 补充"),
         _row("llm_completion_tokens", llm_completion, "LLM 输出 token；网页端可由 provider usage 补充"),
         _row("llm_total_tokens", llm_total, "LLM 实际调用总 token"),
-        _row("native_collaboration_tokens", native, "原生 AutoGen 协作通信成本"),
+        _row("actual_native_transport_tokens", native, "真实改写审计覆盖范围内的原生传输成本"),
         _row("agentlite_direct_message_tokens", direct, "AgentLite 在线传输的短消息成本"),
         _row("agentlite_prompt_view_tokens", prompt_view, "下游 Agent 读取 Prompt View 的成本"),
         _row("agentlite_retrieved_memory_tokens", retrieved, "记忆检索读取成本"),
         _row("agentlite_memory_query_count", memory_query_count, "共享记忆查询次数"),
         _row("agentlite_memory_hit_count", memory_hit_count, "共享记忆命中条数"),
         _row(
+            "agentlite_memory_injected_count",
+            memory_injected_count,
+            "实际进入 Prompt View 的记忆条数",
+        ),
+        _row(
             "agentlite_useful_memory_hit_count",
             useful_memory_hit_count,
-            "进入 Prompt View 的有效记忆条数",
+            "有下游输出采用证据的有效记忆条数",
         ),
         _row(
             "agentlite_wrong_memory_hit_count",
             wrong_memory_hit_count,
             "被判定为错误或过期的记忆命中条数",
         ),
+        _row(
+            "agentlite_unassessed_memory_hit_count",
+            unassessed_memory_hit_count,
+            "已注入但尚无采用或错误判定证据的记忆条数",
+        ),
+        _row(
+            "agentlite_unique_retrieved_memory_tokens",
+            unique_retrieved,
+            "每次检索视图只计一次的 Token",
+        ),
+        _row(
+            "agentlite_fanout_retrieved_memory_tokens",
+            fanout_retrieved,
+            "记忆视图向多个接收者展开后的总读取 Token",
+        ),
         _row("agentlite_control_llm_tokens", control, "控制模块 LLM 成本"),
         _row("agentlite_retry_tokens", retry, "重试带来的额外成本"),
-        _row("agentlite_runtime_tokens", runtime, "AgentLite 端到端协作成本"),
-        _row("agentlite_token_savings", savings, "原生协作成本减去 AgentLite 协作成本"),
-        _row("agentlite_token_savings_ratio", round(ratio, 6), "协作通信成本节省比例"),
+        _row("actual_agentlite_transport_tokens", runtime, "真实应用或回退后的 AgentLite 传输成本"),
+        _row("actual_transport_token_savings", savings, "真实审计范围内的传输成本差额"),
+        _row("actual_transport_token_savings_ratio", round(ratio, 6), "真实审计范围内的传输节省比例"),
+        _row("shadow_native_transport_tokens", shadow_native, "影子推演对应的原生候选成本"),
+        _row("shadow_candidate_transport_tokens", shadow_candidate, "影子推演的压缩候选成本，未实际传输"),
+        _row("shadow_potential_token_savings", shadow_savings, "影子方案的理论节省量"),
+        _row("shadow_potential_token_savings_ratio", round(shadow_ratio, 6), "影子方案理论节省比例，不代表真实收益"),
     ]
 
 

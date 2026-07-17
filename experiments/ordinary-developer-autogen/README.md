@@ -127,6 +127,23 @@ python experiments/ordinary-developer-autogen/compare_stateful_runs.py \
 `quality_blind_mapping.json`。汇总器不会仅凭 Token 较低就宣布 AgentLite 获胜；
 正式结论必须同时满足严格最终交付和质量不降低。
 
+质量盲评采用 10 分制，并在打开映射文件前冻结分数：
+
+- 任务完成度 `0-4`：是否直接交付本轮要求的清单、行程、预算或最终手册；
+- 上下文保持 `0-3`：是否保留此前已经确认的约束和修改；
+- 正确性与一致性 `0-2`：事实、预算算术和内部表述是否一致；
+- 清晰度与可执行性 `0-1`：是否能够被用户直接理解和执行；
+- 若只输出审查意见或流程说明，没有实际交付物，总分最高 `4` 分。
+
+`compare_stateful_runs.py` 只负责核对三组实验条件、汇总真实 Provider Token，并生成匿名候选包；
+它不会自动伪造质量分数。评分者先读取 `quality_blind_batch.json`，记录候选分数和
+`delivery_complete`，冻结后再打开 `quality_blind_mapping.json` 解盲并按组汇总均分。
+
+每一步可见的 Planner、Writer、Reviewer 输出都保存在 `sequence_result.json` 的任务消息列表和
+`tasks/A*/run_result.json` 中；触发短上下文语义修复时，修复输出也会追加到同一消息列表。
+`llm_usage.jsonl` 只保存逐次调用的 Provider Token、耗时、重试次数和 Agent 等元数据，不保存完整
+Prompt 或隐藏推理过程。`quality_blind_candidates.json` 只保存面向用户的最终答案，不包含中间输出。
+
 单任务调试仍可使用 `--question` 或 `--question-file`。正式 A 组性能实验必须使用
 `--question-sequence-file`，否则不会形成有状态的十轮上下文。
 
@@ -156,7 +173,11 @@ http://127.0.0.1:8081
 
 新版 Team 最多运行 6 轮。前三轮完成规划、草案和首次审查；若 Reviewer 发现重大问题，则后三轮用于修订。首次审查合格时会立即输出完整答案并结束，不会强制消耗六轮。
 
-Team 使用 AgentLite 提供的严格终止条件：只有 `reviewer` 的可见文本最后一行精确等于 `FINAL_ANSWER_READY` 才会结束。Planner、Writer、Reviewer 的模型思考过程、审查意见正文或其他 Agent 偶然提到该字符串都不会触发终止，避免把“退回修改”误当成最终交付。
+Team 使用 AgentLite 提供的严格终止条件：`reviewer` 的可见文本最后一行精确等于
+`FINAL_ANSWER_READY` 只会成为终止候选信号；系统还会执行规则优先的语义交付检查，确认正文不是
+“退回修改”的审查意见，并且确实包含本轮要求的实际交付物，才允许终止。若 6 轮结束后仍未形成
+完整交付，代码端实验会使用“当前问题 + 最新 Writer 草案 + Reviewer 审查结果 + 缺失项”进行一次
+同 Reviewer 的短上下文修复；仍不合格则记录为 `degraded_fallback`，不会伪装成成功交付。
 
 AgentLite 观察不改写 Studio 后端：
 
