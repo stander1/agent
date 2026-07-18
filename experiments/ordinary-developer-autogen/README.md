@@ -140,7 +140,8 @@ python experiments/ordinary-developer-autogen/compare_stateful_runs.py \
 `delivery_complete`，冻结后再打开 `quality_blind_mapping.json` 解盲并按组汇总均分。
 
 每一步可见的 Planner、Writer、Reviewer 输出都保存在 `sequence_result.json` 的任务消息列表和
-`tasks/A*/run_result.json` 中；触发短上下文语义修复时，修复输出也会追加到同一消息列表。
+`tasks/A*/run_result.json` 中。实验程序不会因为内容质量不合格而追加 Agent 轮次或额外 LLM 调用；
+不合格输出按原样保存并标记为 `task_failed`。
 `llm_usage.jsonl` 只保存逐次调用的 Provider Token、耗时、重试次数和 Agent 等元数据，不保存完整
 Prompt 或隐藏推理过程。`quality_blind_candidates.json` 只保存面向用户的最终答案，不包含中间输出。
 
@@ -171,13 +172,9 @@ http://127.0.0.1:8081
 
 也可以导入 `studio_team_config.template.json`。导入前需要在本地把三处 `REPLACE_WITH_YOUR_API_KEY` 替换为实验 Key，或导入后在 Studio 中重新绑定已配置的模型；不要把包含真实 Key 的 Team 导出文件提交到 Git。
 
-新版 Team 最多运行 6 轮。前三轮完成规划、草案和首次审查；若 Reviewer 发现重大问题，则后三轮用于修订。首次审查合格时会立即输出完整答案并结束，不会强制消耗六轮。
-
-Team 使用 AgentLite 提供的严格终止条件：`reviewer` 的可见文本最后一行精确等于
-`FINAL_ANSWER_READY` 只会成为终止候选信号；系统还会执行规则优先的语义交付检查，确认正文不是
-“退回修改”的审查意见，并且确实包含本轮要求的实际交付物，才允许终止。若 6 轮结束后仍未形成
-完整交付，代码端实验会使用“当前问题 + 最新 Writer 草案 + Reviewer 审查结果 + 缺失项”进行一次
-同 Reviewer 的短上下文修复；仍不合格则记录为 `degraded_fallback`，不会伪装成成功交付。
+Team 统一运行最多 6 个 turn，即两个完整的 Planner、Writer、Reviewer 周期。原生组、观察组和接管组
+使用同一 Agent 配置、同一模型、同一轮次上限和 AutoGen 标准 `TextMentionTermination`。若到达上限仍未
+形成合格交付，实验只记录 `delivery_valid=false` 和 `delivery_status=task_failed`，不会自动增加轮次或生成修复答案。
 
 AgentLite 观察不改写 Studio 后端：
 
@@ -224,3 +221,5 @@ agentlite report autogen-session \
 | final quality | 最终答案质量 | `final_answer.md` 或 Studio Playground 输出 |
 
 注意：浏览器页面本身不是可靠的数据源。AutoGen Studio 网页负责模拟真实用户操作，AgentLite report 负责结构化实验数据。
+
+正式对比中唯一允许变化的是 AgentLite 的底层观察或通信改写状态。Question A/B 的字段要求只用于实验结束后的盲评，不注入运行时、状态池或记忆池。

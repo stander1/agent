@@ -241,7 +241,7 @@ class OrdinaryDeveloperExperimentTests(unittest.TestCase):
         )
         self.assertNotIn("experiment_mode", blind_payload["candidates"][0])
 
-    def test_invalid_reviewer_delivery_uses_one_context_pruned_retry(self) -> None:
+    def test_invalid_reviewer_delivery_is_recorded_without_semantic_retry(self) -> None:
         client_type = APP_GLOBALS["OpenAICompatibleClient"]
         result_type = APP_GLOBALS["LLMResult"]
         run_team = APP_GLOBALS["run_team"]
@@ -259,17 +259,6 @@ class OrdinaryDeveloperExperimentTests(unittest.TestCase):
                     2: "草案包含交通、住宿、餐饮和活动四类费用。",
                     3: (
                         "审查意见：当前草案缺少可核算明细，请 Writer 继续补充。\n"
-                        "FINAL_ANSWER_READY"
-                    ),
-                    4: (
-                        "## 最终预算表\n"
-                        "| 项目 | 金额 | 说明 |\n|---|---:|---|\n"
-                        "| 交通 | 800元 | 往返及市内交通 |\n"
-                        "| 住宿 | 1000元 | 两晚住宿 |\n"
-                        "| 餐饮 | 600元 | 三天餐饮 |\n"
-                        "| 活动 | 300元 | 门票与体验 |\n"
-                        "| 总计 | 2700元 | 保留300元机动金 |\n"
-                        "以上明细可以直接执行，并保留了必要的风险余量。\n"
                         "FINAL_ANSWER_READY"
                     ),
                 }
@@ -300,11 +289,16 @@ class OrdinaryDeveloperExperimentTests(unittest.TestCase):
                 )
             )
 
-        self.assertTrue(payload["summary"]["delivery_valid"])
-        self.assertEqual(payload["summary"]["semantic_retry_count"], 1)
-        self.assertEqual(payload["raw"]["llm_usage"]["calls"], 4)
-        self.assertEqual(fake_client.calls, 4)
-        self.assertIn("最终预算表", payload["raw"]["messages"][-1]["content"])
+        self.assertFalse(payload["summary"]["delivery_valid"])
+        self.assertEqual(payload["summary"]["delivery_status"], "task_failed")
+        self.assertEqual(payload["summary"]["semantic_retry_count"], 0)
+        self.assertEqual(payload["raw"]["llm_usage"]["calls"], 3)
+        self.assertEqual(fake_client.calls, 3)
+        self.assertEqual(payload["raw"]["messages"][-1]["source"], "reviewer")
+        self.assertIn(
+            "请 Writer 继续补充",
+            payload["raw"]["messages"][-1]["content"],
+        )
 
     def test_question_sequence_contains_ordered_a1_to_a10_tasks(self) -> None:
         loader = APP_GLOBALS["_load_question_sequence"]
@@ -403,15 +397,11 @@ class OrdinaryDeveloperExperimentTests(unittest.TestCase):
         self.assertEqual(payload["config"]["max_turns"], 6)
         self.assertEqual(
             payload["config"]["termination_condition"]["provider"],
-            "agent_runtime.adapters.autogen_termination.ReviewerFinalTextTermination",
+            "autogen_agentchat.conditions.TextMentionTermination",
         )
         self.assertEqual(
-            payload["config"]["termination_condition"]["config"]["marker"],
+            payload["config"]["termination_condition"]["config"]["text"],
             "FINAL_ANSWER_READY",
-        )
-        self.assertEqual(
-            payload["config"]["termination_condition"]["config"]["source"],
-            "reviewer",
         )
         self.assertTrue(
             all(
@@ -433,14 +423,12 @@ class OrdinaryDeveloperExperimentTests(unittest.TestCase):
             )
         )
 
-        from agent_runtime.adapters.autogen_termination import (
-            ReviewerFinalTextTermination,
-        )
+        from autogen_agentchat.conditions import TextMentionTermination
 
-        termination = ReviewerFinalTextTermination.load_component(
+        termination = TextMentionTermination.load_component(
             payload["config"]["termination_condition"]
         )
-        self.assertIsInstance(termination, ReviewerFinalTextTermination)
+        self.assertIsInstance(termination, TextMentionTermination)
 
     def test_mimo_default_model_uses_provider_supported_name(self) -> None:
         client_type = APP_GLOBALS["OpenAICompatibleClient"]

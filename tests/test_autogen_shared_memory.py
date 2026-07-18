@@ -11,7 +11,6 @@ from agent_runtime.bootstrap.startup import BootstrapContext
 from agent_runtime.drivers.autogen import (
     AutoGenHookManager,
     SHARED_MEMORY_MARKER,
-    _autogen_memory_slot_hint,
 )
 
 
@@ -40,23 +39,6 @@ class FakeAgent:
 
 
 class AutoGenSharedMemoryTest(unittest.TestCase):
-    def test_travel_outputs_use_separate_semantic_slots(self) -> None:
-        cases = {
-            "请整理旅行需求和约束": "travel_requirement",
-            "请筛选 3 个候选目的地": "travel_destination_decision",
-            "请生成 3 天 2 晚行程": "travel_itinerary",
-            "请重新优化预算到 2600 元": "travel_budget",
-            "第二天下雨，请增加室内备选": "travel_weather_risk",
-            "一位朋友不吃辣并预留伴手礼": "travel_dining_constraint",
-            "请生成最终旅行手册和决策日志": "travel_final_deliverable",
-        }
-        for prompt, expected in cases.items():
-            with self.subTest(prompt=prompt):
-                self.assertEqual(
-                    _autogen_memory_slot_hint(prompt, "完整交付内容"),
-                    expected,
-                )
-
     def test_review_only_team_output_is_rejected_from_long_term_memory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -81,7 +63,11 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                         messages=[
                             FakeTextMessage("请优化旅行预算并交付完整预算表", "user"),
                             FakeTextMessage(
-                                "审查意见：当前草案缺少预算表，请 Writer 继续补充。\n"
+                                "**ReviewerAgent 审查意见（第一轮）**\n"
+                                "**重大问题清单：** 当前草案缺少预算表。\n"
+                                "**可执行修订清单（供Planner/Writer遵循）：**\n"
+                                "请下一轮补充完整预算表。\n"
+                                "**当前产出不合格。请依据上述清单进行修订。**\n"
                                 "FINAL_ANSWER_READY",
                                 "reviewer",
                             ),
@@ -333,15 +319,72 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                     instance=FakeAgent(),
                     method_name="on_messages_stream",
                     target_kind="agentchat_agent",
-                    args=([{"type": "TextMessage", "source": "user", "content": "x" * 800}],),
+                    args=([{
+                        "type": "TextMessage",
+                        "source": "user",
+                        "content": "请保留莫干山自然体验、既有预算和全部旅行约束。" * 600,
+                    }],),
                     kwargs={},
                 )
+                self.assertEqual(direct.task.group_id, third.task.group_id)
+                self.assertGreaterEqual(len(direct.memory_context.refs), 1)
                 rewritten_args, _ = persisted.rewrite_call_arguments_if_safe(
                     direct,
-                    ([{"type": "TextMessage", "source": "user", "content": "x" * 800}],),
+                    ([{
+                        "type": "TextMessage",
+                        "source": "user",
+                        "content": "请保留莫干山自然体验、既有预算和全部旅行约束。" * 600,
+                    }],),
                     {},
                 )
                 self.assertIsInstance(rewritten_args[0], list)
+                direct_events = self._events(persisted.output_dir / "trace.jsonl")
+                direct_rewrite = next(
+                    item
+                    for item in reversed(direct_events)
+                    if item.get("event_type") == "autogen_agent_input_real_rewrite"
+                    and item.get("payload", {}).get("call_id") == direct.call_id
+                )
+                self.assertTrue(direct_rewrite["payload"]["rewrite_applied"])
+                self.assertEqual(
+                    direct_rewrite["payload"]["memory_injected_count"],
+                    1,
+                )
+
+                short_messages = [
+                    {
+                        "type": "TextMessage",
+                        "source": "user",
+                        "content": "继续优化莫干山预算",
+                    }
+                ]
+                short = persisted.record_call_start(
+                    instance=FakeAgent(),
+                    method_name="on_messages_stream",
+                    target_kind="agentchat_agent",
+                    args=(short_messages,),
+                    kwargs={},
+                )
+                self.assertGreaterEqual(len(short.memory_context.refs), 1)
+                short_args, _ = persisted.rewrite_call_arguments_if_safe(
+                    short,
+                    (short_messages,),
+                    {},
+                )
+                self.assertEqual(short_args[0], short_messages)
+                short_events = self._events(persisted.output_dir / "trace.jsonl")
+                short_rewrite = next(
+                    item
+                    for item in reversed(short_events)
+                    if item.get("event_type") == "autogen_agent_input_real_rewrite"
+                    and item.get("payload", {}).get("call_id") == short.call_id
+                )
+                self.assertFalse(short_rewrite["payload"]["rewrite_applied"])
+                self.assertEqual(short_rewrite["payload"]["memory_injected_count"], 0)
+                self.assertIn(
+                    "token_not_reduced",
+                    short_rewrite["payload"]["fallback_reasons"],
+                )
 
     def test_observe_mode_does_not_activate_shared_memory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

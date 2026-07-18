@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 
 _REVIEW_HEADING_RE = re.compile(
-    r"(?im)^\s*(?:[#>*-]+\s*)?(?:reviewer\s*)?(?:最终)?"
+    r"(?im)^\s*(?:[#>*-]+\s*)?(?:reviewer(?:\s*agent)?\s*)?(?:最终)?"
     r"(?:审查意见|审查结论|审查报告|评审意见|审核意见|review findings?)\s*[:：]?"
 )
 _DELEGATED_REVISION_RE = re.compile(
@@ -15,17 +15,21 @@ _DELEGATED_REVISION_RE = re.compile(
     r"(?:planner|writer|规划者|撰写者|写作者).{0,32}"
     r"(?:修订|补充|重写|继续|完善|据此修改)"
 )
+_REVIEW_ONLY_SIGNAL_RE = re.compile(
+    r"(?is)(?:重大问题(?:清单|发现)|可执行修订清单|修订清单|"
+    r"当前产出(?:不合格|未通过)|审查不通过|"
+    r"请(?:在)?下一轮(?:产出|修订|提交)|供\s*(?:planner|writer).{0,12}(?:遵循|修订))"
+)
 _DELIVERY_BOUNDARY_RE = re.compile(
     r"(?im)(?:"
     r"^\s*(?:#{1,4}\s*)?(?:\*{1,2})?(?:【)?最终(?:可交付|可执行)?"
-    r"(?:交付物|答案|规划方案|方案|手册|版本)(?=\s*[:：\-—（(】])|"
-    r"^\s*#{1,4}\s*(?!.*审查).{0,80}(?:最终旅行手册|完整旅行手册)|"
-    r"^\s*(?:#{1,4}\s*)?(?:完整(?:方案|手册|行程|答案)|"
-    r"需求(?:与约束)?清单|每日安排|预算表|决策日志)\s*[:：]?"
+    r"(?:交付物|答案|规划方案|方案|文档|报告|结果|实现|手册|版本)"
+    r"(?=\s*[:：\-—（(】])|"
+    r"^\s*#{1,4}\s*(?!.*审查).{0,80}(?:最终|完整)"
+    r"(?:答案|方案|文档|报告|结果|实现|手册)|"
+    r"^\s*(?:#{1,4}\s*)?完整(?:答案|方案|文档|报告|结果|实现|手册)\s*[:：]?"
     r")"
 )
-_TABLE_RE = re.compile(r"(?m)^\s*\|.*\|\s*$")
-_MONEY_RE = re.compile(r"(?:¥|￥)?\s*\d+(?:\.\d+)?\s*(?:元|块)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,21 +78,21 @@ def assess_final_delivery(
 
     review_heading = bool(_REVIEW_HEADING_RE.search(body))
     delegated_revision = bool(_DELEGATED_REVISION_RE.search(body))
+    review_only_signal = bool(_REVIEW_ONLY_SIGNAL_RE.search(body))
     delivery_boundary = bool(_DELIVERY_BOUNDARY_RE.search(body))
-    review_only = delegated_revision or (review_heading and not delivery_boundary)
+    review_only = not delivery_boundary and (
+        review_heading or delegated_revision or review_only_signal
+    )
     if review_only:
         reasons.append("review_feedback_not_final_artifact")
 
-    missing = _missing_task_requirements(request, body)
-    if missing:
-        reasons.append("task_delivery_requirements_missing")
-
+    del request
     unique_reasons = tuple(dict.fromkeys(reasons))
     return FinalDeliveryAssessment(
         valid=not unique_reasons,
         status="validated_final_artifact" if not unique_reasons else "degraded_fallback",
         reasons=unique_reasons,
-        missing_requirements=tuple(missing),
+        missing_requirements=(),
         review_only=review_only,
         body=body,
     )
@@ -108,81 +112,3 @@ def strip_exact_last_line_marker(content: str, marker: str) -> str:
     if lines and marker.strip() and lines[-1].strip() == marker.strip():
         lines.pop()
     return "\n".join(lines).rstrip()
-
-
-def _missing_task_requirements(request: str, body: str) -> list[str]:
-    request_text = " ".join(request.split()).lower()
-    body_text = " ".join(body.split()).lower()
-    missing: list[str] = []
-
-    if "需求和约束" in request_text or "需求与约束" in request_text:
-        _require_terms(body_text, missing, "需求与约束清单", ("需求",), ("约束",))
-
-    if re.search(r"(?:筛选|列出|推荐)\s*3\s*个", request_text):
-        numbered = all(
-            re.search(
-                rf"(?m)^\s*(?:#{{1,6}}\s*)?(?:{number}|{'一二三'[number - 1]})\s*[.、)]",
-                body,
-            )
-            for number in (1, 2, 3)
-        )
-        if not numbered:
-            missing.append("三个候选项")
-
-    asks_itinerary = "行程" in request_text and bool(
-        re.search(r"3\s*天\s*2\s*晚", request_text)
-    )
-    asks_final_manual = "最终旅行手册" in request_text
-    if asks_itinerary or asks_final_manual:
-        if not all(_contains_day(body_text, day) for day in (1, 2, 3)):
-            missing.append("三天逐日安排")
-
-    if "预算" in request_text and any(
-        term in request_text for term in ("优化", "预算表", "控制", "检查", "手册")
-    ):
-        budget_terms = sum(
-            term in body_text for term in ("交通", "住宿", "餐饮", "活动", "合计", "总计")
-        )
-        if len(_MONEY_RE.findall(body)) < 3 or (not _TABLE_RE.search(body) and budget_terms < 3):
-            missing.append("可核算预算明细")
-
-    if asks_final_manual:
-        _require_terms(body_text, missing, "注意事项", ("注意事项", "提醒"))
-        _require_terms(body_text, missing, "备选方案", ("备选", "替代方案"))
-
-    if "决策日志" in request_text:
-        _require_terms(body_text, missing, "决策日志", ("决策日志",))
-    if "晕车" in request_text:
-        _require_terms(body_text, missing, "晕车约束", ("晕车", "盘山路"))
-    if re.search(r"10\s*点以后", request_text):
-        _require_terms(body_text, missing, "首日十点后出发", ("10:00", "10 点", "十点"))
-    if "下雨" in request_text or "雨天" in request_text:
-        _require_terms(body_text, missing, "雨天低风险备选", ("室内", "低风险", "雨天备选"))
-    if "2600" in request_text:
-        _require_terms(body_text, missing, "2600元预算上限", ("2600",))
-    if "不吃辣" in request_text:
-        _require_terms(body_text, missing, "不吃辣餐饮约束", ("不吃辣", "不辣", "免辣"))
-    if "伴手礼" in request_text:
-        _require_terms(body_text, missing, "伴手礼预算", ("伴手礼",), ("200",))
-
-    return list(dict.fromkeys(missing))
-
-
-def _contains_day(text: str, day: int) -> bool:
-    chinese = {1: "一", 2: "二", 3: "三"}[day]
-    return bool(
-        re.search(
-            rf"(?:第\s*(?:{day}|{chinese})\s*天|day\s*{day}\b|d{day}\b)",
-            text,
-        )
-    )
-
-
-def _require_terms(
-    text: str,
-    missing: list[str],
-    label: str,
-    *term_groups: tuple[str, ...],
-) -> None:
-    if any(not any(term.lower() in text for term in group) for group in term_groups):
-        missing.append(label)

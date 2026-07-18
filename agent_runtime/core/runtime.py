@@ -1276,9 +1276,11 @@ class V0Runtime:
         return ids[index + 1] if index + 1 < len(ids) else "runtime"
 
     def _is_final_task(self, task: TaskSpec) -> bool:
+        configured = task.metadata.get("is_final_task")
+        if configured is not None:
+            return bool(configured)
         title = task.title.strip().lower()
-        explicit_final_id = re.search(r"(?:^|[^0-9])10$", task.task_id) is not None
-        return explicit_final_id or title.startswith("\u6700\u7ec8") or title.startswith("final")
+        return title.startswith("\u6700\u7ec8") or title.startswith("final")
 
     @staticmethod
     def _is_stress_baseline_mode(mode: Mode) -> bool:
@@ -1335,13 +1337,15 @@ class V0Runtime:
             return len(self._background_memory_jobs)
 
     def _slot_hint_for_task(self, task: TaskSpec, agent_id: str) -> str:
+        configured = task.metadata.get("memory_slot_hint")
+        if isinstance(configured, dict):
+            configured = configured.get(agent_id, configured.get("default"))
+        if isinstance(configured, str) and configured.strip():
+            return configured.strip()
         if self._is_final_task(task):
             return "final_deliverable"
-        group = task.group_id.lower()
-        if "travel" in group or task.task_id.startswith("A"):
-            return "travel_preference" if agent_id != "reviewer" else "reuse_strategy"
-        if "security" in group or task.task_id.startswith("B"):
-            return "security_audit" if agent_id != "reviewer" else "failure_reason"
+        if agent_id == "reviewer":
+            return "failure_reason"
         return "reuse_strategy"
 
     @staticmethod

@@ -3,8 +3,8 @@
   "component_type": "team",
   "version": 1,
   "component_version": 1,
-  "description": "支持共享记忆、质量审查和必要修订的 Planner、Writer、Reviewer 顺序协作团队",
-  "label": "AgentLite Memory-Aware PWR Team",
+  "description": "支持共享记忆与多轮修订的旅游规划专家团队",
+  "label": "AgentLite Travel Expert Team",
   "config": {
     "participants": [
       {
@@ -12,12 +12,12 @@
         "component_type": "agent",
         "version": 1,
         "component_version": 1,
-        "description": "识别当前任务、历史记忆和验收标准，负责任务拆解与修订规划",
-        "label": "Planner Agent",
+        "description": "旅行需求分析与路线策略专家",
+        "label": "Travel Strategy Planner",
         "config": {
           "name": "planner",
-          "description": "识别当前任务、可复用记忆和验收标准，负责规划或修订清单。",
-          "system_message": "你是 PlannerAgent。先识别用户当前真正要求、交付形式和约束，不要把所有问题套入固定模板。如果输入含 AGENTLITE_SHARED_MEMORY v1 或 MemoryView，它们是历史上已通过准入的共享记忆：只复用与当前任务直接相关且未被用户新要求否定的内容；用户当前指令和修正始终优先。首次规划时输出：任务目标、交付物、关键约束、可复用记忆、仍需确认的信息、Writer 的执行步骤和 Reviewer 的验收标准。若上下文中已有 Reviewer 的审查意见，则不要重新规划，改为把意见整理成明确的修订清单。你只负责规划，不直接写最终答案，也不要附加任何完成标记。",
+          "description": "旅行需求分析与路线策略专家。",
+          "system_message": "你是旅行需求分析与路线策略专家。准确提取人数、时间、预算、出发地、偏好、健康限制和已经确认的旅行决策；如上下文存在有效的 AGENTLITE_SHARED_MEMORY v1 / MemoryView，则结合其中内容给出目的地筛选、交通、住宿、活动和风险控制的执行计划。用户当前指令始终优先，历史记忆与新要求冲突时采用新要求。若 Reviewer 提出问题，逐项形成可执行修订任务。不要代替 Writer 输出最终旅行方案，也不要附加完成标记。",
           "model_client": {
             "provider": "autogen_ext.models.openai.OpenAIChatCompletionClient",
             "component_type": "model",
@@ -61,12 +61,12 @@
         "component_type": "agent",
         "version": 1,
         "component_version": 1,
-        "description": "依据当前问题、规划、共享记忆和审查意见生成完整答案",
-        "label": "Writer Agent",
+        "description": "旅行产品设计与行程编排专家",
+        "label": "Itinerary Designer",
         "config": {
           "name": "writer",
-          "description": "依据当前问题、规划、共享记忆和审查意见生成完整答案。",
-          "system_message": "你是 WriterAgent。请以用户当前问题为中心，阅读 Planner 的规划、已有团队消息以及可能存在的 AGENTLITE_SHARED_MEMORY v1 / MemoryView，生成与任务类型匹配的完整答案；不要无条件加入架构、实验或指标，只有当前任务确实需要时才写。共享记忆只能作为已确认历史上下文，若与用户新要求冲突必须采用新要求。首次写作要给出可独立阅读、具体且可执行的完整草案，不得只写摘要或复述规划。若已有 Reviewer 审查意见，则逐项修正并重新输出完整版本，不要只给差异或修改说明。不要附加任何完成标记。",
+          "description": "旅行产品设计与行程编排专家。",
+          "system_message": "你是旅行产品设计与行程编排专家。根据用户当前要求、Planner 计划、上下文中的已确认历史约束和 Reviewer 修订意见，输出可独立阅读、时间可执行、预算可核算的完整旅行方案；如存在有效 MemoryView，也将其作为上下文使用。不得静默更换已经确认的目的地或删除约束；用户明确提出变更时，应说明变更影响。Reviewer 指出问题后必须逐项修正并重新输出完整版本。不要附加完成标记。",
           "model_client": {
             "provider": "autogen_ext.models.openai.OpenAIChatCompletionClient",
             "component_type": "model",
@@ -110,12 +110,12 @@
         "component_type": "agent",
         "version": 1,
         "component_version": 1,
-        "description": "负责质量审查，必要时触发一次修订，并输出完整最终答案",
-        "label": "Reviewer Agent",
+        "description": "旅行可行性、预算与风险审查专家",
+        "label": "Travel Feasibility Reviewer",
         "config": {
           "name": "reviewer",
-          "description": "负责质量审查，必要时触发一次修订，并输出完整最终答案。",
-          "system_message": "你是 ReviewerAgent，也是质量门和最终交付者。以用户当前任务和验收要求为最高标准，检查 Writer 是否答非所问、遗漏关键约束、误用或盲从历史 MemoryView、内容不完整、事实矛盾、不可执行或过度承诺。如果这是第一次审查且存在会显著影响交付质量的问题，只输出具体、可执行的修订清单，不得附加末尾完成标记，让 Planner 和 Writer 再完成一轮修订。如果草案已经合格，或上下文中已经出现过你的审查意见，则必须直接整合并输出一份可独立阅读的完整最终答案，不能只给评价或修改建议。最终答案不要讨论团队内部过程；只有输出完整最终答案时，最后一行才必须单独输出：FINAL_ANSWER_READY",
+          "description": "旅行可行性、预算与风险审查专家。",
+          "system_message": "你是旅行可行性、预算与风险审查专家。检查 Writer 是否遗漏当前要求、违反上下文中的已确认约束、预算不可核算、交通时间不合理、住宿或活动不适合同行人、雨天与健康风险没有处理；如存在有效 MemoryView，也将其作为审查依据。只要存在实质问题，就只输出明确修订清单且不得附加完成标记，让 Planner 和 Writer 继续修订；不要因为之前已经审查过就强行交付。只有草案达到可直接执行标准时，才整合输出完整最终旅行方案，并在最后一行单独写 FINAL_ANSWER_READY。",
           "model_client": {
             "provider": "autogen_ext.models.openai.OpenAIChatCompletionClient",
             "component_type": "model",
@@ -156,15 +156,14 @@
       }
     ],
     "termination_condition": {
-      "provider": "agent_runtime.adapters.autogen_termination.ReviewerFinalTextTermination",
+      "provider": "autogen_agentchat.conditions.TextMentionTermination",
       "component_type": "termination",
       "version": 1,
       "component_version": 1,
-      "description": "仅当 Reviewer 的可见文本最后一行精确匹配完成标记时终止；忽略模型思考事件",
-      "label": "Reviewer Exact Final Answer Termination",
+      "description": "Terminate the conversation if a specific text is mentioned.",
+      "label": "TextMentionTermination",
       "config": {
-        "marker": "FINAL_ANSWER_READY",
-        "source": "reviewer"
+        "text": "FINAL_ANSWER_READY"
       }
     },
     "max_turns": 6

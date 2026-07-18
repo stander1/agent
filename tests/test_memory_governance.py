@@ -38,7 +38,7 @@ class MemoryGovernanceTest(unittest.TestCase):
             task_topic="travel preference",
             summary="预算优先，交通方案先选慢车。",
             tags=["travel_A"],
-            slot_hint="travel_preference",
+            slot_hint="reuse_strategy",
             confidence=0.62,
         )
         second = store.write_memory_with_report(
@@ -47,7 +47,7 @@ class MemoryGovernanceTest(unittest.TestCase):
             task_topic="travel preference",
             summary="预算优先，但交通方案改为高铁优先。",
             tags=["travel_A"],
-            slot_hint="travel_preference",
+            slot_hint="reuse_strategy",
             confidence=0.91,
         )
 
@@ -73,7 +73,7 @@ class MemoryGovernanceTest(unittest.TestCase):
             task_topic="security evidence",
             summary="初始结论：弱口令风险较低。",
             tags=["security_B"],
-            slot_hint="security_audit",
+            slot_hint="failure_reason",
             confidence=0.55,
         )
         latest = store.write_memory_with_report(
@@ -82,7 +82,7 @@ class MemoryGovernanceTest(unittest.TestCase):
             task_topic="security evidence",
             summary="修正结论：弱口令风险高，需要立即整改。",
             tags=["security_B"],
-            slot_hint="security_audit",
+            slot_hint="failure_reason",
             confidence=0.88,
         )
 
@@ -285,7 +285,7 @@ class MemoryGovernanceTest(unittest.TestCase):
                 task_topic="persistent travel constraint",
                 summary="Avoid overnight trains in future travel plans.",
                 tags=["travel_reload"],
-                slot_hint="travel_preference",
+                slot_hint="reuse_strategy",
                 source_state_ids=["state_reload"],
                 evidence_refs=["evidence_reload"],
                 confidence=0.93,

@@ -21,6 +21,7 @@ class TaskSpec:
     prompt: str
     documents: list[str] = field(default_factory=list)
     expected_agents: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

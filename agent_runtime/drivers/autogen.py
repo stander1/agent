@@ -217,6 +217,7 @@ class AutoGenHookManager:
         self._lock = threading.Lock()
         self._memory_lock = threading.RLock()
         self._promoted_memory_fingerprints: set[str] = set()
+        self._collaboration_group_by_agent: dict[str, str] = {}
         self._core_response_rewrite_depth = 0
         self._patched_methods: set[str] = set()
         self._patched_modules: set[str] = set()
@@ -488,6 +489,19 @@ class AutoGenHookManager:
             agent_id=agent.agent_id,
             team_participants=team_participants,
         )
+        if self.shared_memory_enabled:
+            normalized_agent_id = _safe_identifier(agent.agent_id)
+            with self._memory_lock:
+                if target_kind == "agentchat_team":
+                    for participant in team_participants:
+                        self._collaboration_group_by_agent[
+                            _safe_identifier(participant)
+                        ] = collaboration_group_id
+                elif target_kind == "agentchat_agent":
+                    collaboration_group_id = self._collaboration_group_by_agent.get(
+                        normalized_agent_id,
+                        collaboration_group_id,
+                    )
         task = TaskSpec(
             task_id=call_id,
             group_id=(
@@ -2296,7 +2310,7 @@ class AutoGenHookManager:
             fallback_reasons.append("message_clone_failed")
         original_tokens = _count_tokens(self.token_counter, native_text)
         rewritten_tokens = _count_tokens(self.token_counter, rewritten_content)
-        if original_tokens <= rewritten_tokens and not memory_refs:
+        if original_tokens <= rewritten_tokens:
             fallback_reasons.append("token_not_reduced")
         if fallback_reasons:
             self._record_agent_rewrite_audit(
@@ -4602,38 +4616,18 @@ def _latest_visible_message(
 
 
 def _autogen_memory_slot_hint(prompt: str, summary: str) -> str:
-    request = prompt.lower()
-    text = f"{request}\n{summary.lower()}"
-    if any(term in request for term in ("最终旅行手册", "旅行手册", "final travel guide")):
-        return "travel_final_deliverable"
-    if "决策日志" in request or "decision log" in request:
-        return "travel_decision_log"
-    if any(term in request for term in ("不吃辣", "不辣", "伴手礼", "特色餐", "dining")):
-        return "travel_dining_constraint"
-    if any(term in request for term in ("下雨", "雨天", "天气预报", "weather risk")):
-        return "travel_weather_risk"
-    if any(term in request for term in ("预算", "2600", "3000", "budget")) and any(
-        term in request for term in ("优化", "预算表", "控制", "检查", "重新", "optimize")
-    ):
-        return "travel_budget"
-    if any(term in request for term in ("行程", "第一天", "第二天", "第三天", "itinerary")):
-        return "travel_itinerary"
-    if any(term in request for term in ("候选目的地", "目的地", "筛选 3 个", "destination")):
-        return "travel_destination_decision"
-    if any(term in request for term in ("旅行", "偏好", "需求和约束", "travel")):
-        return "travel_requirement"
-    if any(term in text for term in ("安全", "审计", "证据链", "security", "audit")):
-        return "security_audit"
+    text = f"{prompt.lower()}\n{summary.lower()}"
     if _looks_like_final_task(text):
         return "final_deliverable"
+    if any(term in text for term in ("review", "failure", "审查", "失败")):
+        return "failure_reason"
     return "reuse_strategy"
 
 
 def _looks_like_final_task(text: str) -> bool:
     lowered = text.lower()
     return bool(
-        re.search(r"(?:^|[^a-z0-9])(?:a|b)?10(?:[^0-9]|$)", lowered)
-        or "最终" in lowered
+        "最终" in lowered
         or "final deliverable" in lowered
         or "final answer" in lowered
     )

@@ -8,7 +8,7 @@ from agent_runtime.core.runtime import V0Runtime
 from agent_runtime.eval.metrics import MetricsCollector
 from agent_runtime.eval.token_counter import TokenCounter
 from agent_runtime.eval.trace_logger import TraceLogger
-from agent_runtime.llm.agents import build_mimo_travel_agents
+from agent_runtime.llm.agents import build_default_collaboration_agents
 from agent_runtime.llm.client import OpenAICompatibleChatClient
 from agent_runtime.llm.config import LlmConfig
 from agent_runtime.memory.memory_store import MemoryStoreLite
@@ -45,7 +45,7 @@ def run_llm_benchmark(
     )
     client = OpenAICompatibleChatClient(llm_config)
     runtime = V0Runtime(
-        agents=build_mimo_travel_agents(client),
+        agents=build_default_collaboration_agents(client),
         token_counter=token_counter,
         metrics=metrics,
         trace=trace,

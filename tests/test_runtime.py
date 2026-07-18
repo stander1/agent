@@ -112,11 +112,22 @@ class RuntimeTest(unittest.TestCase):
                     mode="runtime_lite",
                 )
 
-    def test_final_task_matching_does_not_treat_110_as_10(self) -> None:
+    def test_final_task_uses_metadata_or_title_not_task_number(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime, _ = self._runtime(Path(tmp), build_default_agents())
             try:
-                self.assertTrue(runtime._is_final_task(TaskSpec("A10", "A", "step", "x")))
+                self.assertFalse(runtime._is_final_task(TaskSpec("A10", "A", "step", "x")))
+                self.assertTrue(
+                    runtime._is_final_task(
+                        TaskSpec(
+                            "custom-last-step",
+                            "custom",
+                            "step",
+                            "x",
+                            metadata={"is_final_task": True},
+                        )
+                    )
+                )
                 self.assertFalse(runtime._is_final_task(TaskSpec("A110", "A", "step", "x")))
                 self.assertFalse(
                     runtime._is_final_task(

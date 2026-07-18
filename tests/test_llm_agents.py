@@ -19,8 +19,19 @@ class LlmAgentFinalTaskTest(unittest.TestCase):
             )
         )
 
-    def test_explicit_final_id_and_final_prefix_are_global_final_tasks(self) -> None:
-        self.assertTrue(is_final_task(TaskSpec("A10", "travel_A", "step", "x")))
+    def test_final_task_requires_metadata_or_final_prefix(self) -> None:
+        self.assertFalse(is_final_task(TaskSpec("A10", "travel_A", "step", "x")))
+        self.assertTrue(
+            is_final_task(
+                TaskSpec(
+                    "custom-last-step",
+                    "custom",
+                    "step",
+                    "x",
+                    metadata={"is_final_task": True},
+                )
+            )
+        )
         self.assertTrue(
             is_final_task(
                 TaskSpec(

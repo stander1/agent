@@ -103,6 +103,26 @@ class ReviewerFinalTextTerminationTests(unittest.IsolatedAsyncioTestCase):
             self.condition.last_assessment.reasons,
         )
 
+    async def test_rejects_revieweragent_revision_report_with_marker(self) -> None:
+        result = await self.condition(
+            [
+                TextMessage(
+                    content=(
+                        "**ReviewerAgent 审查意见（第一轮）**\n"
+                        "**重大问题清单：** 当前产出答非所问。\n"
+                        "**可执行修订清单（供Planner/Writer遵循）：**\n"
+                        "请下一轮产出完整的可执行方案。\n"
+                        "**当前产出不合格。请依据上述清单进行修订。**\n"
+                        f"{MARKER}"
+                    ),
+                    source="reviewer",
+                )
+            ]
+        )
+
+        self.assertIsNone(result)
+        self.assertFalse(self.condition.terminated)
+
     async def test_accepts_review_preface_followed_by_explicit_final_artifact(self) -> None:
         result = await self.condition(
             [

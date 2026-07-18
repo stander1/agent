@@ -3391,12 +3391,24 @@ AgentLite 的 AutoGen Core 接管已经不局限于单一 content dataclass；
 
 | v5.13j 实现 | 对应既定方案 |
 |---|---|
-| 完成标记后的语义交付校验 | Contract Guard / 最终交付完整性守卫 |
-| 同 Reviewer 一次短上下文修复 | Context-Pruned Retry |
+| 完成标记后的通用审查稿识别 | Contract Guard / 最终交付完整性守卫 |
 | 未校验 Team 输出先进入候选、规则拒绝长期入池 | TLC-Memory 规则优先准入 |
 | 有记忆命中也必须通过 Token 成本比较 | CSCC 成本感知一致性控制 |
 | 命中、注入、有效、错误、待评估分栏 | useful/wrong memory 指标校准 |
 | actual、shadow、Provider 三种 Token 分栏 | 端到端成本与 cost shifting 防护 |
+
+2026-07-18 P0 补齐：
+
+```text
+通用 FinalDeliveryGuard 只识别审查意见不等于最终交付，不包含 Question A 字段规则；
+Question A/B Delivery Policy、领域记忆槽位和 benchmark Schema 不进入正式运行路径；
+A2/A6/A8 等任务要求只作为离线盲评口径，不驱动重试、记忆准入或上下文改写；
+Team 参与者与 Agent 输入共享同一 collaboration_group_id，MemoryView 能在 Agent 输入层检索；
+记忆命中不再绕过 token_not_reduced，完整 Prompt View 不省 Token 时保持原生输入；
+不合格审查稿只能进入低置信候选并由通用规则拒绝长期入池；任务语义正确性由盲评判断。
+```
+
+离线重放已取回的 A1-A10 结果：A1/A2/A6/A8 四个错误判断曾用于定位通用守卫缺陷，但这些题目规则现已退出运行时，只保留为盲评诊断。领域边界校准后全量回归为 159 项通过；真实 MiMo 三组实验仍需在本轮代码推送后重新运行，不能把离线重放表述为新的端到端实验结果。
 
 当前 Driver phase：`v5.13j`。
 

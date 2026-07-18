@@ -194,7 +194,7 @@ class MemoryStoreLiteTest(unittest.TestCase):
                 }
             ],
             tags=["travel_A", "A2", "writer"],
-            slot_hint="travel_preference",
+            slot_hint="reuse_strategy",
             source_state_ids=["state_a"],
         )
 
@@ -248,7 +248,7 @@ class MemoryStoreLiteTest(unittest.TestCase):
             },
             claim_cards=[],
             tags=["security_B", "B3", "reviewer"],
-            slot_hint="security_audit",
+            slot_hint="failure_reason",
         )
 
         self.assertEqual(report.admission_status, "audit_only")
@@ -264,7 +264,7 @@ class MemoryStoreLiteTest(unittest.TestCase):
             task_topic="审计线索",
             summary="弱口令线索已经被证据链确认。",
             tags=["security_B", "B4", "writer"],
-            slot_hint="security_audit",
+            slot_hint="failure_reason",
         )
 
         ok = store.validate_read_set([ref])
@@ -285,12 +285,57 @@ class MemoryStoreLiteTest(unittest.TestCase):
 
 
 class DeliverableSchemaTest(unittest.TestCase):
-    def test_travel_final_task_has_required_schema(self) -> None:
+    def test_task_uses_explicit_deliverable_schema_metadata(self) -> None:
         task = TaskSpec(
-            task_id="A10",
-            group_id="travel_A",
+            task_id="custom-final",
+            group_id="custom",
             title="最终修订版旅行手册与决策日志",
             prompt="生成最终旅行手册",
+            metadata={
+                "is_final_task": True,
+                "deliverable_schema": {
+                    "schema_id": "experiment.travel.final.v1",
+                    "title": "最终旅行手册",
+                    "required_sections": ["每日行程表", "预算表", "决策日志"],
+                    "required_fields": [
+                        "itinerary_table",
+                        "budget_table",
+                        "selected_destination",
+                        "duration",
+                        "day1_plan",
+                        "day2_plan",
+                        "day3_plan",
+                        "total_budget",
+                        "transport_plan",
+                        "lodging_plan",
+                        "local_food_plan",
+                        "non_spicy_option",
+                        "souvenir_budget",
+                        "weather_fallback",
+                        "motion_sickness_guard",
+                        "decision_log",
+                    ],
+                    "field_aliases": {
+                        "itinerary_table": ["每日行程表"],
+                        "budget_table": ["预算表"],
+                        "selected_destination": ["目的地"],
+                        "duration": ["3 天 2 晚"],
+                        "day1_plan": ["第一天"],
+                        "day2_plan": ["第二天"],
+                        "day3_plan": ["第三天"],
+                        "total_budget": ["总预算"],
+                        "transport_plan": ["交通"],
+                        "lodging_plan": ["住宿"],
+                        "local_food_plan": ["当地特色餐"],
+                        "non_spicy_option": ["不吃辣"],
+                        "souvenir_budget": ["伴手礼"],
+                        "weather_fallback": ["雨天备选"],
+                        "motion_sickness_guard": ["晕车"],
+                        "decision_log": ["决策日志"],
+                    },
+                    "instruction": "生成可执行的完整手册。",
+                },
+            },
         )
         schema = schema_for_task(task)
         self.assertIsNotNone(schema)
@@ -320,16 +365,14 @@ class DeliverableSchemaTest(unittest.TestCase):
         )
         self.assertIsNone(schema_for_task(task))
 
-    def test_security_final_task_has_required_schema(self) -> None:
+    def test_task_without_explicit_schema_has_no_domain_inference(self) -> None:
         task = TaskSpec(
             task_id="B10",
             group_id="security_B",
             title="最终审计手册与系统决策日志",
             prompt="生成最终合成安全审计手册",
         )
-        schema = schema_for_task(task)
-        self.assertIsNotNone(schema)
-        self.assertIn("evidence_refs", schema.required_fields)
+        self.assertIsNone(schema_for_task(task))
 
 
 if __name__ == "__main__":

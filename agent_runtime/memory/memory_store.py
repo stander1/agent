@@ -27,16 +27,6 @@ CANONICAL_SLOTS = {
     "slot.system.reuse_strategy",
     "slot.paper.evidence",
     "slot.project.requirement",
-    "slot.project.requirement.travel",
-    "slot.project.requirement.travel.constraints",
-    "slot.project.decision.travel.destination",
-    "slot.project.itinerary.travel",
-    "slot.project.budget.travel",
-    "slot.project.risk.travel.weather",
-    "slot.project.preference.travel.dining",
-    "slot.project.decision.travel.log",
-    "slot.project.deliverable.travel",
-    "slot.project.requirement.security_audit",
     "slot.system.deliverable_requirement",
 }
 
@@ -51,17 +41,6 @@ ALIAS_MAPPING = {
     "error_pattern": "slot.system.failure_pattern",
     "reuse_hint": "slot.system.reuse_strategy",
     "reuse_strategy": "slot.system.reuse_strategy",
-    "travel_preference": "slot.project.requirement.travel",
-    "travel_requirement": "slot.project.requirement.travel.constraints",
-    "travel_destination_decision": "slot.project.decision.travel.destination",
-    "travel_itinerary": "slot.project.itinerary.travel",
-    "travel_budget": "slot.project.budget.travel",
-    "travel_weather_risk": "slot.project.risk.travel.weather",
-    "travel_dining_constraint": "slot.project.preference.travel.dining",
-    "travel_decision_log": "slot.project.decision.travel.log",
-    "travel_final_deliverable": "slot.project.deliverable.travel",
-    "security_audit": "slot.project.requirement.security_audit",
-    "evidence_chain": "slot.project.requirement.security_audit",
     "final_deliverable": "slot.system.deliverable_requirement",
 }
 
@@ -330,8 +309,17 @@ class SlotResolution:
 class MemoryStoreLite:
     """In-memory v3-lite ClaimCard and MemoryView store."""
 
-    def __init__(self, storage_dir: Path | None = None) -> None:
-        self.schema_registry = SchemaRegistryLite(CANONICAL_SLOTS, ALIAS_MAPPING)
+    def __init__(
+        self,
+        storage_dir: Path | None = None,
+        *,
+        canonical_slots: set[str] | None = None,
+        alias_mapping: dict[str, str] | None = None,
+    ) -> None:
+        resolved_slots = set(CANONICAL_SLOTS) | set(canonical_slots or set())
+        resolved_aliases = dict(ALIAS_MAPPING)
+        resolved_aliases.update(alias_mapping or {})
+        self.schema_registry = SchemaRegistryLite(resolved_slots, resolved_aliases)
         self.storage_dir = storage_dir
         if self.storage_dir is not None:
             self.storage_dir.mkdir(parents=True, exist_ok=True)
@@ -1576,10 +1564,6 @@ class MemoryStoreLite:
 
     def _infer_slot_hint(self, tags: list[str], task_topic: str) -> str:
         joined = " ".join(tags + [task_topic]).lower()
-        if "travel" in joined or "旅行" in joined or "budget" in joined:
-            return "travel_preference"
-        if "security" in joined or "audit" in joined or "审计" in joined:
-            return "security_audit"
         if "reviewer" in joined or "failure" in joined:
             return "failure_reason"
         if "memory_manager" in joined or "writer" in joined:

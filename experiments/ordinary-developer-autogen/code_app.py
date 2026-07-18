@@ -32,26 +32,34 @@ DEFAULT_MODEL = "mimo-v2.5"
 DEFAULT_AGENTS = [
     {
         "name": "planner",
-        "description": "负责拆解任务、规划协作路线。",
+        "description": "旅行需求分析与路线策略专家。",
         "system_prompt": (
-            "你是 PlannerAgent。请把用户任务拆解为可执行步骤，明确每个 Agent 的职责、"
-            "输入输出和协作顺序。不要写最终答案，只给规划。"
+            "你是旅行需求分析与路线策略专家。准确提取人数、时间、预算、出发地、偏好、"
+            "健康限制和已经确认的旅行决策；如上下文存在有效 MemoryView，则结合其中内容给出目的地筛选、"
+            "交通、住宿、活动和风险控制的执行计划。若 Reviewer 提出问题，逐项形成修订任务。"
+            "不要代替 Writer 输出最终旅行方案，也不要附加完成标记。"
         ),
     },
     {
         "name": "writer",
-        "description": "负责整合上下文并生成方案草案。",
+        "description": "旅行产品设计与行程编排专家。",
         "system_prompt": (
-            "你是 WriterAgent。请根据用户问题和已有团队消息，生成完整、可执行的方案草案。"
-            "必须覆盖架构、运行流程、实验指标和预期结果。"
+            "你是旅行产品设计与行程编排专家。根据用户当前要求、Planner 计划、上下文中的已确认历史约束"
+            "和 Reviewer 修订意见，输出可独立阅读、时间可执行、预算可核算的完整旅行方案；如存在有效 MemoryView，也将其作为上下文使用。"
+            "不得静默更换已经确认的目的地或删除约束；如果用户明确提出变更，应说明变更影响。"
+            "不要附加完成标记。"
         ),
     },
     {
         "name": "reviewer",
-        "description": "负责审查方案并给出最终答案。",
+        "description": "旅行可行性、预算与风险审查专家。",
         "system_prompt": (
-            "你是 ReviewerAgent。请检查团队方案是否完整、准确、可执行，补齐遗漏后输出最终答案。"
-            f"最终答案末尾必须包含 {DONE_TOKEN}。"
+            "你是旅行可行性、预算与风险审查专家。检查 Writer 是否遗漏当前要求、违反上下文中的已确认约束、"
+            "预算不可核算、交通时间不合理、住宿或活动不适合同行人、雨天与健康风险没有处理。"
+            "如存在有效 MemoryView，也将其作为审查依据。"
+            "若存在实质问题，只输出明确的修订清单，不得附加完成标记，让 Planner 和 Writer 再修订；"
+            "只有草案达到可直接交付标准时，才整合输出完整最终方案，并在最后一行单独写 "
+            f"{DONE_TOKEN}。"
         ),
     },
 ]
@@ -367,13 +375,10 @@ async def _run_tasks(
 ) -> dict[str, Any]:
     from autogen_agentchat.agents import BaseChatAgent
     from autogen_agentchat.base import Response
+    from autogen_agentchat.conditions import TextMentionTermination
     from autogen_agentchat.messages import BaseChatMessage, TextMessage
     from autogen_agentchat.teams import RoundRobinGroupChat
     from autogen_core import CancellationToken
-
-    from agent_runtime.adapters.autogen_termination import (
-        ReviewerFinalTextTermination,
-    )
 
     llm = OpenAICompatibleClient.from_env(temperature=temperature)
     cost_logger = CostLogger(output_dir)
@@ -430,15 +435,9 @@ async def _run_tasks(
             del cancellation_token
             self._history.clear()
 
-        def remember_repaired_final(self, content: str) -> None:
-            self._history.append(TextMessage(content=content, source="reviewer"))
-
     agents = [DeveloperAgent(config) for config in agent_configs]
     kwargs: dict[str, Any] = {
-        "termination_condition": ReviewerFinalTextTermination(
-            marker=DONE_TOKEN,
-            source="reviewer",
-        )
+        "termination_condition": TextMentionTermination(DONE_TOKEN)
     }
     if max_turns > 0:
         kwargs["max_turns"] = max_turns
@@ -453,10 +452,6 @@ async def _run_tasks(
     task_payloads: list[dict[str, Any]] = []
     quality_candidates: list[dict[str, Any]] = []
     quality_mapping: list[dict[str, Any]] = []
-    reviewer_config = next(
-        (config for config in agent_configs if config.get("name") == "reviewer"),
-        agent_configs[-1],
-    )
     for task_index, task in enumerate(tasks, start=1):
         current_task_id = task.task_id
         usage_start = len(cost_logger.rows)
@@ -470,35 +465,6 @@ async def _run_tasks(
         )
         semantic_retry_count = 0
         messages = _messages_to_dict(result)
-        if not assessment.valid:
-            semantic_retry_count = 1
-            writer_draft = _latest_message_content(result, "writer")
-            repaired = await _context_pruned_reviewer_retry(
-                llm=llm,
-                cost_logger=cost_logger,
-                task_id=current_task_id,
-                reviewer_system_prompt=reviewer_config["system_prompt"],
-                request=task.question,
-                writer_draft=writer_draft,
-                previous_reviewer_output=raw_final_answer,
-                assessment=assessment,
-            )
-            raw_final_answer = repaired
-            final_source = "reviewer"
-            assessment = _assess_task_delivery(
-                request=task.question,
-                source=final_source,
-                content=raw_final_answer,
-            )
-            messages.append(
-                {
-                    "type": "ContextPrunedRetryTextMessage",
-                    "source": "reviewer",
-                    "content": raw_final_answer,
-                }
-            )
-            for agent in agents:
-                agent.remember_repaired_final(raw_final_answer)
 
         task_wall_time_ms = int((time.perf_counter() - task_started) * 1000)
         task_usage = _summarize_usage_rows(cost_logger.rows[usage_start:])
@@ -519,7 +485,9 @@ async def _run_tasks(
             "final_source": final_source,
             "final_marker_present": _has_exact_done_token(raw_final_answer),
             "delivery_valid": delivery_valid,
-            "delivery_status": assessment.status,
+            "delivery_status": (
+                assessment.status if delivery_valid else "task_failed"
+            ),
             "delivery_guard_reasons": list(assessment.reasons),
             "missing_delivery_requirements": list(
                 assessment.missing_requirements
@@ -717,77 +685,6 @@ def _messages_to_dict(result: Any) -> list[dict[str, Any]]:
         }
         for message in (getattr(result, "messages", []) or [])
     ]
-
-
-async def _context_pruned_reviewer_retry(
-    *,
-    llm: OpenAICompatibleClient,
-    cost_logger: CostLogger,
-    task_id: str,
-    reviewer_system_prompt: str,
-    request: str,
-    writer_draft: str,
-    previous_reviewer_output: str,
-    assessment: FinalDeliveryAssessment,
-) -> str:
-    missing = "、".join(assessment.missing_requirements) or "完整、可直接交付的正文"
-    reasons = "、".join(assessment.reasons) or "最终交付语义校验失败"
-    prompt = "\n".join(
-        [
-            "这是一次短上下文最终交付修复，只保留当前问题和本轮必要证据。",
-            "不要输出审查过程、修订意见或要求其他 Agent 继续修改。",
-            "请直接给用户一份自包含、完整、可执行的最终交付物。",
-            "",
-            "当前用户请求：",
-            request,
-            "",
-            "Writer 最新草案：",
-            writer_draft or "（本轮没有可用 Writer 草案，请根据用户请求直接完成。）",
-            "",
-            "Reviewer 上次未通过的输出：",
-            previous_reviewer_output,
-            "",
-            f"未通过原因：{reasons}",
-            f"必须补齐：{missing}",
-            f"最后一行必须单独写 {DONE_TOKEN}",
-        ]
-    )
-    started = time.perf_counter()
-    result = await asyncio.to_thread(
-        llm.complete,
-        [
-            {"role": "system", "content": reviewer_system_prompt},
-            {"role": "user", "content": prompt},
-        ],
-    )
-    cost_logger.add(
-        {
-            "task_id": task_id,
-            "agent": "reviewer",
-            "model": llm.model,
-            "prompt_tokens": result.usage["prompt_tokens"],
-            "completion_tokens": result.usage["completion_tokens"],
-            "total_tokens": result.usage["total_tokens"],
-            "wall_time_ms": result.wall_time_ms,
-            "retry_count": result.retry_count,
-            "semantic_delivery_retry": True,
-            "prompt_chars": len(prompt),
-            "history_message_count": 3,
-            "local_wall_time_ms": int((time.perf_counter() - started) * 1000),
-            "ts": time.time(),
-        }
-    )
-    return result.content
-
-
-def _latest_message_content(result: Any, source: str) -> str:
-    for message in reversed(getattr(result, "messages", []) or []):
-        if str(getattr(message, "source", "") or "") != source:
-            continue
-        content = str(getattr(message, "content", "") or "").strip()
-        if content:
-            return content
-    return ""
 
 
 def _final_message(result: Any) -> tuple[str, str]:

@@ -44,7 +44,7 @@ class PoolSnapshotTest(unittest.TestCase):
             task_topic="travel memory",
             summary="budget and food preference can be reused",
             tags=["travel_A", "writer"],
-            slot_hint="travel_preference",
+            slot_hint="reuse_strategy",
             source_state_ids=["state_a"],
             evidence_refs=["state_a"],
         )

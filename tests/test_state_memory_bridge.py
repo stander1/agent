@@ -15,7 +15,7 @@ class StateToMemoryBridgeLiteTest(unittest.TestCase):
             task_topic="travel plan",
             fallback_summary="保留预算约束和交通偏好，供后续行程复用。",
             tags=["travel_A", "A1", "writer"],
-            slot_hint="travel_preference",
+            slot_hint="reuse_strategy",
             source_state_ids=["state_writer"],
             evidence_refs=["state_writer"],
             reuse_intent="供 travel_A 后续连续任务复用",
@@ -39,7 +39,7 @@ class StateToMemoryBridgeLiteTest(unittest.TestCase):
             task_topic="security audit",
             fallback_summary="控制头降级，只允许审查或重试。",
             tags=["security_B", "B1", "reviewer"],
-            slot_hint="security_audit",
+            slot_hint="failure_reason",
             source_state_ids=["state_failure"],
             evidence_refs=["state_failure"],
             reuse_intent="供 security_B 后续连续任务复用",
@@ -55,4 +55,3 @@ class StateToMemoryBridgeLiteTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-import re
-
 from agent_runtime.core.models import AgentOutput, TaskSpec
 from agent_runtime.llm.client import OpenAICompatibleChatClient
 
 
 def is_final_task(task: TaskSpec) -> bool:
+    configured = task.metadata.get("is_final_task")
+    if configured is not None:
+        return bool(configured)
     title = task.title.strip().lower()
-    explicit_final_id = re.search(r"(?:^|[^0-9])10$", task.task_id) is not None
-    return explicit_final_id or title.startswith("\u6700\u7ec8") or title.startswith("final")
+    return title.startswith("\u6700\u7ec8") or title.startswith("final")
 
 
 class LlmAgent:
@@ -136,7 +136,9 @@ class LlmAgent:
         )
 
 
-def build_mimo_travel_agents(client: OpenAICompatibleChatClient) -> list[LlmAgent]:
+def build_default_collaboration_agents(
+    client: OpenAICompatibleChatClient,
+) -> list[LlmAgent]:
     return [
         LlmAgent(
             agent_id="planner",
