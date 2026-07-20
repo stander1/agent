@@ -2,7 +2,7 @@
 
 本仓库用于迭代实现一个面向多 Agent 协作的跨框架运行时工具层，目标是在多 Agent 任务中通过结构化通信、非文本状态传递和共享记忆复用降低协作开销。
 
-当前开发版本：`v5.13j final delivery guard + honest memory/cost accounting`
+当前开发版本：`v5.13m chronology-aware rewrite + grounded final delivery`
 
 最新发行包门禁版本：`v5.13h package release gate`
 
@@ -58,7 +58,17 @@
 - [docs/experiments/v5.13h-autogen-web-backend-results.md](docs/experiments/v5.13h-autogen-web-backend-results.md)
 - [docs/experiments/v5.13i-autogen-shared-memory-results.md](docs/experiments/v5.13i-autogen-shared-memory-results.md)
 - [docs/experiments/v5.13j-final-delivery-memory-cost-repair.md](docs/experiments/v5.13j-final-delivery-memory-cost-repair.md)
+- [docs/experiments/v5.13k-termination-memory-accounting-root-cause.md](docs/experiments/v5.13k-termination-memory-accounting-root-cause.md)
+- [docs/experiments/v5.13m-chronology-grounding-results.md](docs/experiments/v5.13m-chronology-grounding-results.md)
 - [docs/release/v5.12z-final-release-notes.md](docs/release/v5.12z-final-release-notes.md)
+
+## v5.13m Current Note
+
+`v5.13m` makes managed Agent input chronology-aware: the current raw user task and latest upstream artifact are preserved, prior raw user requests provide authoritative grounding, and repeated rewritten message clones are collapsed into one Prompt View. The final-delivery guard now accepts an explicitly bounded corrected result while rejecting direct claims of user confirmation that are absent from raw user history. Rejected candidates cannot terminate the Team or enter long-term memory. The full suite passes 171 tests. The final MiMo A1-A3 managed smoke completed all tasks in one Planner/Writer/Reviewer cycle each: 9 calls, 51,572 LLM tokens, no Provider retries, and 11.11% measured transport-token savings. This is a managed smoke result, not a replacement for a same-version three-group quality comparison.
+
+## v5.13k Current Note
+
+`v5.13k` aligns AutoGen termination, experiment delivery status, and long-term memory admission around the same exact final marker. Team outputs without the marker remain auditable candidates but cannot become long-term memory. The ordinary-developer code and Studio templates now use `ReviewerFinalTextTermination`, stage-aware travel prompts, and the same 9-turn cap across native, observed, and managed groups. Token reports split direct wire, Prompt View, and retrieved memory into mutually exclusive components, and `agentlite report autogen-session --provider-usage ...` can merge usage from custom model clients that bypass AutoGen's standard usage hook.
 
 ## v5.13j Current Note
 

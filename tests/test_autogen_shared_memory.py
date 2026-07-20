@@ -39,6 +39,88 @@ class FakeAgent:
 
 
 class AutoGenSharedMemoryTest(unittest.TestCase):
+    def test_real_rewrite_prioritizes_current_task_and_latest_upstream_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = {
+                "AGENTLITE_AUTOGEN_BROADCAST_MODE": "real-rewrite",
+                "AGENTLITE_AUTOGEN_TEAM_REWRITE": "1",
+                "AGENTLITE_AUTOGEN_SHARED_MEMORY": "1",
+                "AGENTLITE_MEMORY_SCOPE": "chronology-view-test",
+            }
+            with patch.dict("os.environ", env, clear=False):
+                manager = AutoGenHookManager(self._context(root, "launch_chronology"))
+                prior_task = "我们偏好自然风景、轻徒步和当地美食。"
+                manager.record_call_start(
+                    instance=FakeTeam(),
+                    method_name="run_stream",
+                    target_kind="agentchat_team",
+                    args=(),
+                    kwargs={"task": prior_task},
+                )
+                current_task = "基于上一轮候选项，选择一个并交付完整三日计划。"
+                manager.record_call_start(
+                    instance=FakeTeam(),
+                    method_name="run_stream",
+                    target_kind="agentchat_team",
+                    args=(),
+                    kwargs={"task": current_task},
+                )
+                old_context = "旧轮次候选分析" + ("旧内容" * 1800)
+                planner_middle_marker = "SHOULD_NOT_DOMINATE_CURRENT_VIEW"
+                planner_output = (
+                    "规划说明开头" + ("规划细节" * 700) + planner_middle_marker
+                    + ("后续规划" * 700) + "规划说明结尾"
+                )
+                latest_writer = (
+                    "LATEST_WRITER_ARTIFACT_BEGIN\n"
+                    "第一天完整安排。\n第二天完整安排。\n第三天完整安排。\n"
+                    "LATEST_WRITER_ARTIFACT_END\nFINAL_ANSWER_READY"
+                )
+                messages = [
+                    {"type": "TextMessage", "content": old_context, "source": "reviewer"},
+                    {"type": "TextMessage", "content": current_task, "source": "user"},
+                    {"type": "TextMessage", "content": planner_output, "source": "planner"},
+                    {"type": "TextMessage", "content": latest_writer, "source": "writer"},
+                ]
+                context = manager.record_call_start(
+                    instance=FakeAgent(),
+                    method_name="on_messages_stream",
+                    target_kind="agentchat_agent",
+                    args=(messages,),
+                    kwargs={},
+                )
+
+                rewritten_args, _ = manager.rewrite_call_arguments_if_safe(
+                    context,
+                    (messages,),
+                    {},
+                )
+
+                self.assertEqual(len(rewritten_args[0]), 1)
+                rewritten = rewritten_args[0][0]["content"]
+                self.assertEqual(rewritten.count("CURRENT_USER_TASK"), 1)
+                self.assertIn(current_task, rewritten)
+                self.assertIn("GROUNDING_RULE", rewritten)
+                self.assertIn(prior_task, rewritten)
+                self.assertIn("LATEST_WRITER_ARTIFACT_BEGIN", rewritten)
+                self.assertIn("LATEST_WRITER_ARTIFACT_END", rewritten)
+                self.assertNotIn("SHOULD_NOT_DOMINATE_CURRENT_VIEW", rewritten)
+                self.assertNotIn("FINAL_ANSWER_READY", rewritten)
+
+                events = self._events(manager.output_dir / "trace.jsonl")
+                rewrite = next(
+                    item
+                    for item in reversed(events)
+                    if item.get("event_type") == "autogen_agent_input_real_rewrite"
+                    and item.get("payload", {}).get("call_id") == context.call_id
+                )
+                self.assertTrue(rewrite["payload"]["rewrite_applied"])
+                self.assertGreater(
+                    rewrite["payload"]["native_input_tokens"],
+                    rewrite["payload"]["rewritten_input_tokens"],
+                )
+
     def test_review_only_team_output_is_rejected_from_long_term_memory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -68,6 +150,58 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                                 "**可执行修订清单（供Planner/Writer遵循）：**\n"
                                 "请下一轮补充完整预算表。\n"
                                 "**当前产出不合格。请依据上述清单进行修订。**\n"
+                                "FINAL_ANSWER_READY",
+                                "reviewer",
+                            ),
+                        ]
+                    ),
+                )
+
+                snapshot = manager.kernel.memory_store.snapshot()
+                self.assertEqual(snapshot["memories"], [])
+                self.assertEqual(
+                    snapshot["memory_candidates"][-1]["admission_status"],
+                    "rejected",
+                )
+                events = self._events(manager.output_dir / "trace.jsonl")
+                candidate = next(
+                    item
+                    for item in reversed(events)
+                    if item.get("event_type") == "autogen_memory_candidate"
+                )
+                self.assertEqual(
+                    candidate["payload"]["candidate_kind"],
+                    "autogen_team_unvalidated",
+                )
+
+    def test_ungrounded_user_confirmation_is_rejected_from_long_term_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = {
+                "AGENTLITE_AUTOGEN_BROADCAST_MODE": "real-rewrite",
+                "AGENTLITE_AUTOGEN_TEAM_REWRITE": "1",
+                "AGENTLITE_AUTOGEN_SHARED_MEMORY": "1",
+                "AGENTLITE_MEMORY_SCOPE": "grounding-rejection-test",
+            }
+            with patch.dict("os.environ", env, clear=False):
+                manager = AutoGenHookManager(self._context(root, "launch_grounding"))
+                task = "请从既有候选项中选择一个，并生成三天两晚完整行程"
+                context = manager.record_call_start(
+                    instance=FakeTeam(),
+                    method_name="run_stream",
+                    target_kind="agentchat_team",
+                    args=(),
+                    kwargs={"task": task},
+                )
+                manager.record_call_end(
+                    context,
+                    FakeTaskResult(
+                        messages=[
+                            FakeTextMessage(task, "user"),
+                            FakeTextMessage(
+                                "## 最终可交付成果\n"
+                                "根据您的最新确认（“膝盖不好，不能爬陡坡”），"
+                                "现给出三天两晚完整行程与预算。\n"
                                 "FINAL_ANSWER_READY",
                                 "reviewer",
                             ),
@@ -140,7 +274,8 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                         messages=[
                             FakeTextMessage("整理旅行偏好", "user"),
                             FakeTextMessage(
-                                "已确认：三天两晚，总预算三千元，偏好自然风景、轻徒步和当地美食，避开拥挤商业景点。",
+                                "已确认：三天两晚，总预算三千元，偏好自然风景、轻徒步和当地美食，避开拥挤商业景点。\n"
+                                "FINAL_ANSWER_READY",
                                 "reviewer",
                             ),
                         ]
@@ -195,6 +330,7 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                 self.assertIn(SHARED_MEMORY_MARKER, rewritten)
                 self.assertIn("自然风景", rewritten)
                 self.assertEqual(rewritten.count(SHARED_MEMORY_MARKER), 1)
+
                 self.assertTrue(second.display_restore_enabled)
                 applied_events = self._events(manager.output_dir / "trace.jsonl")
                 applied_rewrite = next(
@@ -345,10 +481,14 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                     if item.get("event_type") == "autogen_agent_input_real_rewrite"
                     and item.get("payload", {}).get("call_id") == direct.call_id
                 )
-                self.assertTrue(direct_rewrite["payload"]["rewrite_applied"])
+                self.assertFalse(direct_rewrite["payload"]["rewrite_applied"])
                 self.assertEqual(
                     direct_rewrite["payload"]["memory_injected_count"],
-                    1,
+                    0,
+                )
+                self.assertIn(
+                    "token_not_reduced",
+                    direct_rewrite["payload"]["fallback_reasons"],
                 )
 
                 short_messages = [
@@ -385,6 +525,50 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                     "token_not_reduced",
                     short_rewrite["payload"]["fallback_reasons"],
                 )
+
+    def test_team_output_without_exact_marker_cannot_enter_long_term_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = {
+                "AGENTLITE_AUTOGEN_BROADCAST_MODE": "real-rewrite",
+                "AGENTLITE_AUTOGEN_TEAM_REWRITE": "1",
+                "AGENTLITE_AUTOGEN_SHARED_MEMORY": "1",
+                "AGENTLITE_MEMORY_SCOPE": "missing-marker-test",
+            }
+            with patch.dict("os.environ", env, clear=False):
+                manager = AutoGenHookManager(self._context(root, "launch_no_marker"))
+                context = manager.record_call_start(
+                    instance=FakeTeam(),
+                    method_name="run_stream",
+                    target_kind="agentchat_team",
+                    args=(),
+                    kwargs={"task": "整理并确认当前需求"},
+                )
+                manager.record_call_end(
+                    context,
+                    FakeTaskResult(
+                        messages=[
+                            FakeTextMessage("整理并确认当前需求", "user"),
+                            FakeTextMessage(
+                                "当前草案尚未达到交付标准，需 Planner 与 Writer 协同修订。",
+                                "reviewer",
+                            ),
+                        ]
+                    ),
+                )
+
+                snapshot = manager.kernel.memory_store.snapshot()
+                self.assertEqual(snapshot["memories"], [])
+                candidate = snapshot["memory_candidates"][-1]
+                self.assertEqual(candidate["admission_status"], "rejected")
+                events = self._events(manager.output_dir / "trace.jsonl")
+                event = next(
+                    item
+                    for item in reversed(events)
+                    if item.get("event_type") == "autogen_memory_candidate"
+                )
+                assessment = event["payload"]["delivery_assessment"]
+                self.assertIn("exact_final_marker_missing", assessment["reasons"])
 
     def test_observe_mode_does_not_activate_shared_memory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -117,7 +117,7 @@ class ManagedProcessLauncherTest(unittest.TestCase):
 
             self.assertEqual(activation.status, "active")
             self.assertTrue(activation.hooks_active)
-            self.assertEqual(activation.details["phase"], "v5.13j")
+            self.assertEqual(activation.details["phase"], "v5.13m")
             self.assertEqual(activation.details["broadcast_mode"], "shadow-only")
             self.assertEqual(
                 activation.details["hook_mode"], "managed_import_patch"
@@ -191,7 +191,7 @@ class ManagedProcessLauncherTest(unittest.TestCase):
             self.assertTrue(status["framework_available"])
             self.assertEqual(status["driver_status"], "active")
             details = status["driver_details"]
-            self.assertEqual(details["phase"], "v5.13j")
+            self.assertEqual(details["phase"], "v5.13m")
             self.assertEqual(details["broadcast_mode"], "shadow-only")
             self.assertIn("autogen_agentchat", details["available_modules"])
 
@@ -418,6 +418,8 @@ class AgentLiteCliTest(unittest.TestCase):
                 "csv",
                 "--output",
                 "reports/session.csv",
+                "--provider-usage",
+                "runs/llm_usage_summary.json",
             ]
         )
 
@@ -427,6 +429,10 @@ class AgentLiteCliTest(unittest.TestCase):
         self.assertEqual(args.session_id, "latest")
         self.assertEqual(args.format, "csv")
         self.assertEqual(args.output, Path("reports/session.csv"))
+        self.assertEqual(
+            args.provider_usage,
+            Path("runs/llm_usage_summary.json"),
+        )
 
     def test_autogen_rewrite_all_sets_release_env_switches(self) -> None:
         env = build_managed_environment_overlay(

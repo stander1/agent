@@ -92,12 +92,14 @@ agentlite autogen \
 agentlite report autogen-session \
   --data-dir .agentlite-exp/code-stateful-observed-A \
   --session-id latest \
+  --provider-usage runs/ordinary-developer/code-stateful-observed-A/llm_usage_summary.json \
   --format markdown \
   --output runs/ordinary-developer/code-stateful-observed-A/agentlite_session_report.md
 
 agentlite report autogen-session \
   --data-dir .agentlite-exp/code-stateful-agentlite-A \
   --session-id latest \
+  --provider-usage runs/ordinary-developer/code-stateful-agentlite-A/llm_usage_summary.json \
   --format markdown \
   --output runs/ordinary-developer/code-stateful-agentlite-A/agentlite_session_report.md
 ```
@@ -172,8 +174,9 @@ http://127.0.0.1:8081
 
 也可以导入 `studio_team_config.template.json`。导入前需要在本地把三处 `REPLACE_WITH_YOUR_API_KEY` 替换为实验 Key，或导入后在 Studio 中重新绑定已配置的模型；不要把包含真实 Key 的 Team 导出文件提交到 Git。
 
-Team 统一运行最多 6 个 turn，即两个完整的 Planner、Writer、Reviewer 周期。原生组、观察组和接管组
-使用同一 Agent 配置、同一模型、同一轮次上限和 AutoGen 标准 `TextMentionTermination`。若到达上限仍未
+Team 统一运行最多 9 个 turn，即三个完整的 Planner、Writer、Reviewer 周期。原生组、观察组和接管组
+使用同一 Agent 配置、同一模型、同一轮次上限和 `ReviewerFinalTextTermination`。该终止器只接受 Reviewer
+最后一行的精确完成标记，不会因为审查意见在正文中提到标记而提前结束。若到达上限仍未
 形成合格交付，实验只记录 `delivery_valid=false` 和 `delivery_status=task_failed`，不会自动增加轮次或生成修复答案。
 
 AgentLite 观察不改写 Studio 后端：

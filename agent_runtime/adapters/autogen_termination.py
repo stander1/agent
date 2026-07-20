@@ -58,6 +58,7 @@ class ReviewerFinalTextTermination(
         self._semantic_guard = semantic_guard
         self._terminated = False
         self._last_assessment: FinalDeliveryAssessment | None = None
+        self._grounding_contexts: list[str] = []
 
     @property
     def terminated(self) -> bool:
@@ -67,12 +68,21 @@ class ReviewerFinalTextTermination(
     def last_assessment(self) -> FinalDeliveryAssessment | None:
         return self._last_assessment
 
+    def record_user_task(self, task: str) -> None:
+        normalized = str(task or "").strip()
+        if normalized and normalized not in self._grounding_contexts:
+            self._grounding_contexts.append(normalized)
+
     async def __call__(
         self,
         messages: Sequence[BaseAgentEvent | BaseChatMessage],
     ) -> StopMessage | None:
         if self._terminated:
             raise TerminatedException("Termination condition has already been reached")
+
+        for message in messages:
+            if isinstance(message, TextMessage) and message.source == "user":
+                self.record_user_task(message.content)
 
         for message in messages:
             if not isinstance(message, TextMessage):
@@ -91,6 +101,7 @@ class ReviewerFinalTextTermination(
                 expected_source=self._source,
                 marker=self._marker,
                 require_marker=True,
+                grounding_contexts=self._grounding_contexts,
             )
             self._last_assessment = assessment
             if assessment.valid or not self._semantic_guard:

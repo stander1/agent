@@ -226,6 +226,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Optional file path. Prints to stdout when omitted.",
     )
+    session_report_parser.add_argument(
+        "--provider-usage",
+        type=Path,
+        help=(
+            "Optional Provider usage JSON/JSONL. Used when a custom model client "
+            "does not expose usage to the AutoGen hook."
+        ),
+    )
 
     subparsers.add_parser("version", help="Print AgentLite package version.")
     return parser
@@ -383,6 +391,7 @@ def _report(args: argparse.Namespace) -> int:
                 session_id=args.session_id,
                 output=args.output,
                 report_format=args.format,
+                provider_usage=args.provider_usage,
             )
         )
     except (OSError, ValueError) as exc:

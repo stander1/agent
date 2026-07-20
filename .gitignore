@@ -12,6 +12,8 @@ env/
 runs/
 artifacts/
 reports/
+.agentlite-exp/
+analysis/
 .env
 configs/*.local.json
 configs/llm.local.json

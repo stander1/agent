@@ -103,6 +103,32 @@ class ReviewerFinalTextTerminationTests(unittest.IsolatedAsyncioTestCase):
             self.condition.last_assessment.reasons,
         )
 
+    async def test_rejects_ungrounded_user_confirmation_and_keeps_running(self) -> None:
+        await self.condition(
+            [TextMessage(content="请从候选项中选一个并生成三天行程。", source="user")]
+        )
+
+        result = await self.condition(
+            [
+                TextMessage(
+                    content=(
+                        "## 最终可交付方案\n"
+                        "根据您的最新确认（“膝盖不是很好，不能爬陡坡或走太久”），"
+                        "现给出完整三天计划。\n"
+                        f"{MARKER}"
+                    ),
+                    source="reviewer",
+                )
+            ]
+        )
+
+        self.assertIsNone(result)
+        self.assertFalse(self.condition.terminated)
+        self.assertIn(
+            "ungrounded_user_confirmation_claim",
+            self.condition.last_assessment.reasons,
+        )
+
     async def test_rejects_revieweragent_revision_report_with_marker(self) -> None:
         result = await self.condition(
             [

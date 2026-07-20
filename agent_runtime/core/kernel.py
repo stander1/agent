@@ -452,6 +452,20 @@ class CollaborationKernel:
 
         artifact_id = f"artifact_{task.task_id}_{round_id}_{agent.agent_id}"
         sha256 = hashlib.sha256(output.content.encode("utf-8")).hexdigest()
+        prompt_view_summary = str(
+            output.metadata.get("prompt_view_summary", "") or ""
+        ).strip()
+        artifact_summary_source = prompt_view_summary or output.content
+        artifact_payload_summary_limit = (
+            len(artifact_summary_source)
+            if prompt_view_summary
+            else self.ARTIFACT_PAYLOAD_SUMMARY_CHARS
+        )
+        artifact_state_summary_limit = (
+            len(artifact_summary_source)
+            if prompt_view_summary
+            else self.ARTIFACT_STATE_SUMMARY_CHARS
+        )
         return [
             commit_state(
                 state_type="artifact_state",
@@ -463,12 +477,13 @@ class CollaborationKernel:
                     "file_path": None,
                     "sha256": sha256,
                     "summary": self._summary(
-                        output.content, self.ARTIFACT_PAYLOAD_SUMMARY_CHARS
+                        artifact_summary_source,
+                        artifact_payload_summary_limit,
                     ),
                 },
                 summary=(
                     f"{agent.agent_id} 产物状态："
-                    f"{self._summary(output.content, self.ARTIFACT_STATE_SUMMARY_CHARS)}"
+                    f"{self._summary(artifact_summary_source, artifact_state_summary_limit)}"
                 ),
                 usage_hint="artifact_summary",
                 contains_embedding_refs=False,

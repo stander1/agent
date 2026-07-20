@@ -555,15 +555,12 @@ def _autogen_event_cost(payload: dict[str, Any]) -> tuple[int, int, int, int, in
     )
     prompt_view = _int(payload.get("prompt_view_tokens"))
     retrieved_memory = _int(payload.get("retrieved_memory_tokens"))
-    direct = _first_positive(
+    explicit_wire = _first_positive(
         payload,
         [
+            "rewritten_wire_tokens",
             "shadow_wire_tokens",
             "shp_shadow_envelope_tokens",
-            "rewritten_content_tokens",
-            "rewritten_input_tokens",
-            "rewritten_task_tokens",
-            "candidate_input_tokens",
         ],
     )
     runtime = _first_positive(
@@ -578,9 +575,13 @@ def _autogen_event_cost(payload: dict[str, Any]) -> tuple[int, int, int, int, in
         ],
     )
     if runtime <= 0:
-        runtime = direct + prompt_view + retrieved_memory
-    if direct <= 0 and runtime > prompt_view + retrieved_memory:
-        direct = runtime - prompt_view - retrieved_memory
+        runtime = explicit_wire + prompt_view + retrieved_memory
+    direct = explicit_wire
+    if direct <= 0:
+        # Historical agent/core traces only recorded the complete rewritten
+        # input. Prompt View and memory are contained in that value, so the
+        # direct wire component must be the residual rather than the full input.
+        direct = max(0, runtime - prompt_view - retrieved_memory)
     return native, runtime, direct, prompt_view, retrieved_memory
 
 

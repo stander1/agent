@@ -61,6 +61,6 @@ semantic_retry_count=0
 
 - Team：旅游专家 Planner、Writer、Reviewer；
 - 调度：`RoundRobinGroupChat`；
-- 终止：AutoGen 标准 `TextMentionTermination`；
-- 最大轮次：`6`，即两个完整三 Agent 周期；
+- 终止：三组统一使用 `ReviewerFinalTextTermination`，只接受 Reviewer 最后一行的精确完成标记；
+- 最大轮次：`9`，即三个完整三 Agent 周期；
 - 质量：任务结束后生成匿名候选，由统一盲评评分，不影响运行过程。

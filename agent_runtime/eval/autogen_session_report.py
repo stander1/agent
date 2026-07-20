@@ -19,6 +19,7 @@ class SessionReportRequest:
     session_id: str | None = None
     output: Path | None = None
     report_format: ReportFormat = "markdown"
+    provider_usage: Path | None = None
 
 
 def build_autogen_session_report(request: SessionReportRequest) -> dict[str, Any]:
@@ -28,7 +29,27 @@ def build_autogen_session_report(request: SessionReportRequest) -> dict[str, Any
         session_id=request.session_id,
     )
     snapshot = build_session_snapshot(session_dir, session_id=resolved_session_id)
-    token_summary = snapshot.get("token_summary", {})
+    token_summary = dict(snapshot.get("token_summary", {}))
+    provider_usage = (
+        _load_provider_usage(request.provider_usage)
+        if request.provider_usage is not None
+        else None
+    )
+    llm_usage_source = (
+        "autogen_model_client_hook"
+        if _int(token_summary.get("llm_total_tokens")) > 0
+        else "unavailable"
+    )
+    if provider_usage is not None:
+        token_summary["external_provider_usage"] = provider_usage
+        if _int(token_summary.get("llm_total_tokens")) <= 0:
+            token_summary["llm_call_count"] = provider_usage["llm_call_count"]
+            token_summary["llm_prompt_tokens"] = provider_usage["llm_prompt_tokens"]
+            token_summary["llm_completion_tokens"] = provider_usage[
+                "llm_completion_tokens"
+            ]
+            token_summary["llm_total_tokens"] = provider_usage["llm_total_tokens"]
+            llm_usage_source = "external_provider_usage_file"
     summary = snapshot.get("summary", {})
     rows = _metric_rows(token_summary)
     native = _int(token_summary.get("native_baseline_tokens"))
@@ -44,6 +65,12 @@ def build_autogen_session_report(request: SessionReportRequest) -> dict[str, Any
         "driver_status": summary.get("driver_status") or "",
         "hooks_active": bool(summary.get("hooks_active")),
         "event_counts": summary.get("event_counts") or {},
+        "llm_usage_source": llm_usage_source,
+        "provider_usage_path": (
+            str(request.provider_usage.expanduser().resolve())
+            if request.provider_usage is not None
+            else ""
+        ),
         "token_summary": {
             **token_summary,
             "actual_native_transport_tokens": native,
@@ -59,8 +86,9 @@ def build_autogen_session_report(request: SessionReportRequest) -> dict[str, Any
         "notes": [
             "actual_* 仅汇总真实改写审计事件；改写回退时按原生传输成本计入，不能记作节省。",
             "shadow_* 是未实际替换消息的理论候选成本，只表示潜力，不是已实现节省。",
-            "llm_* 字段来自 AutoGen 模型客户端 usage hook；如果目标框架没有暴露 usage，则仍应保存 provider 后台记录作为旁证。",
+            "llm_* 优先来自 AutoGen 模型客户端 usage hook；钩子无数据且提供 --provider-usage 时，改用外部 Provider 用量文件。",
             "记忆命中、注入与有效采用是三个不同阶段；未取得下游引用证据的命中保持 unassessed。",
+            "unique_retrieved_memory_tokens 统计检索候选，fanout_retrieved_memory_tokens 只统计实际注入；成本门禁拒绝候选时，后者可以更小。",
         ],
     }
 
@@ -175,12 +203,12 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
         _row(
             "agentlite_unique_retrieved_memory_tokens",
             unique_retrieved,
-            "每次检索视图只计一次的 Token",
+            "检索阶段生成的记忆视图 Token；每次查询只计一次，包含未通过注入成本门禁的候选",
         ),
         _row(
             "agentlite_fanout_retrieved_memory_tokens",
             fanout_retrieved,
-            "记忆视图向多个接收者展开后的总读取 Token",
+            "实际改写后进入下游 Prompt View 的记忆读取 Token；可能因成本门禁少于检索候选",
         ),
         _row("agentlite_control_llm_tokens", control, "控制模块 LLM 成本"),
         _row("agentlite_retry_tokens", retry, "重试带来的额外成本"),
@@ -196,6 +224,60 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _row(metric: str, value: int | float, meaning: str) -> dict[str, Any]:
     return {"metric": metric, "value": value, "meaning": meaning}
+
+
+def _load_provider_usage(path: Path) -> dict[str, int]:
+    resolved = path.expanduser().resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(f"Provider usage file not found: {resolved}")
+    text = resolved.read_text(encoding="utf-8").strip()
+    if not text:
+        raise ValueError(f"Provider usage file is empty: {resolved}")
+
+    if resolved.suffix.lower() == ".jsonl":
+        rows = [json.loads(line) for line in text.splitlines() if line.strip()]
+        prompt = sum(
+            _int(row.get("prompt_tokens") or row.get("llm_prompt_tokens"))
+            for row in rows
+        )
+        completion = sum(
+            _int(
+                row.get("completion_tokens")
+                or row.get("llm_completion_tokens")
+            )
+            for row in rows
+        )
+        total = sum(
+            _int(row.get("total_tokens") or row.get("llm_total_tokens"))
+            for row in rows
+        )
+        if total <= 0:
+            total = prompt + completion
+        return {
+            "llm_call_count": len(rows),
+            "llm_prompt_tokens": prompt,
+            "llm_completion_tokens": completion,
+            "llm_total_tokens": total,
+        }
+
+    payload = json.loads(text)
+    if not isinstance(payload, dict):
+        raise ValueError("Provider usage JSON must contain an object")
+    prompt = _int(payload.get("llm_prompt_tokens") or payload.get("prompt_tokens"))
+    completion = _int(
+        payload.get("llm_completion_tokens") or payload.get("completion_tokens")
+    )
+    total = _int(payload.get("llm_total_tokens") or payload.get("total_tokens"))
+    if total <= 0:
+        total = prompt + completion
+    return {
+        "llm_call_count": _int(
+            payload.get("calls") or payload.get("llm_call_count")
+        ),
+        "llm_prompt_tokens": prompt,
+        "llm_completion_tokens": completion,
+        "llm_total_tokens": total,
+    }
 
 
 def _render_csv(report: dict[str, Any]) -> str:
@@ -215,6 +297,8 @@ def _render_markdown(report: dict[str, Any]) -> str:
         f"- status: `{report['status']}`",
         f"- framework: `{report['framework']}`",
         f"- hooks_active: `{report['hooks_active']}`",
+        f"- llm_usage_source: `{report['llm_usage_source']}`",
+        f"- provider_usage_path: `{report['provider_usage_path']}`",
         f"- session_dir: `{report['session_dir']}`",
         f"- trace_path: `{report['trace_path']}`",
         "",

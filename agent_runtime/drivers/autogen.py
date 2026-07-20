@@ -60,9 +60,10 @@ CORE_CONTENT_REWRITE_ENV = "AGENTLITE_AUTOGEN_CORE_CONTENT_REWRITE"
 CORE_RECEIVER_HYDRATE_ENV = "AGENTLITE_AUTOGEN_CORE_RECEIVER_HYDRATE"
 SHARED_MEMORY_ENV = "AGENTLITE_AUTOGEN_SHARED_MEMORY"
 MEMORY_SCOPE_ENV = "AGENTLITE_MEMORY_SCOPE"
+FINAL_DELIVERY_MARKER_ENV = "AGENTLITE_AUTOGEN_FINAL_MARKER"
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
 CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
-DRIVER_PHASE = "v5.13j"
+DRIVER_PHASE = "v5.13m"
 TEAM_REAL_REWRITE_DISABLED_REASON = (
     "team_level_real_rewrite_not_enabled_for_guarded_agent_input"
 )
@@ -179,6 +180,10 @@ class AutoGenHookManager:
             broadcast_mode=self.broadcast_mode,
             raw_value=os.getenv(SHARED_MEMORY_ENV),
         )
+        self.final_delivery_marker = (
+            os.getenv(FINAL_DELIVERY_MARKER_ENV, "FINAL_ANSWER_READY").strip()
+            or "FINAL_ANSWER_READY"
+        )
         self.memory_scope_id = _resolve_memory_scope_id(context)
         memory_store = (
             MemoryStoreLite(
@@ -211,6 +216,7 @@ class AutoGenHookManager:
                 "tool_summary_rewrite_enabled": self.tool_summary_rewrite_enabled,
                 "shared_memory_enabled": self.shared_memory_enabled,
                 "memory_scope_id": self.memory_scope_id,
+                "final_delivery_marker": self.final_delivery_marker,
             },
         )
         self._sequence = 0
@@ -218,6 +224,8 @@ class AutoGenHookManager:
         self._memory_lock = threading.RLock()
         self._promoted_memory_fingerprints: set[str] = set()
         self._collaboration_group_by_agent: dict[str, str] = {}
+        self._current_team_task_by_group: dict[str, str] = {}
+        self._user_task_history_by_group: dict[str, list[str]] = {}
         self._core_response_rewrite_depth = 0
         self._patched_methods: set[str] = set()
         self._patched_modules: set[str] = set()
@@ -307,6 +315,13 @@ class AutoGenHookManager:
             return None
         delivery_assessment = None
         if context.target_kind == "agentchat_team" and context.method_name == "run_stream":
+            with self._memory_lock:
+                grounding_contexts = tuple(
+                    self._user_task_history_by_group.get(
+                        context.task.group_id,
+                        (),
+                    )
+                )
             candidate_text, candidate_source = _latest_visible_message(
                 decoded_messages,
                 text,
@@ -315,7 +330,9 @@ class AutoGenHookManager:
                 request=context.task.prompt,
                 content=candidate_text,
                 source=candidate_source,
-                marker="FINAL_ANSWER_READY",
+                marker=self.final_delivery_marker,
+                require_marker=True,
+                grounding_contexts=grounding_contexts,
             )
             if delivery_assessment.valid:
                 candidate_kind = "autogen_team_final"
@@ -513,6 +530,25 @@ class AutoGenHookManager:
             prompt=prompt,
             expected_agents=[agent.agent_id],
         )
+        if target_kind == "agentchat_team":
+            task_value, _ = _extract_team_task_argument(args, kwargs)
+            task_text, _ = _team_task_display_identity(task_value)
+            if not task_text:
+                task_text = _extract_text(task_value)
+            if task_text.strip():
+                with self._memory_lock:
+                    self._current_team_task_by_group[task.group_id] = task_text.strip()
+                    history = self._user_task_history_by_group.setdefault(
+                        task.group_id,
+                        [],
+                    )
+                    if not history or history[-1] != task_text.strip():
+                        history.append(task_text.strip())
+                        del history[:-8]
+                termination = getattr(instance, "_termination_condition", None)
+                recorder = getattr(termination, "record_user_task", None)
+                if callable(recorder):
+                    recorder(task_text.strip())
         memory_context = self._prepare_shared_memory_context(
             task=task,
             target_kind=target_kind,
@@ -1201,6 +1237,10 @@ class AutoGenHookManager:
             self.token_counter,
             prompt_view_text,
         )
+        rewritten_wire_tokens = max(
+            0,
+            rewritten_tokens - total_prompt_view_tokens,
+        )
         fallback_buckets = _fallback_buckets(fallback_reasons)
         self.trace.write(
             "autogen_core_content_real_rewrite",
@@ -1230,8 +1270,14 @@ class AutoGenHookManager:
                 "shadow_wire_envelope": wire_envelope or {},
                 "schema_valid": _wire_envelope_schema_valid(wire_envelope or {}),
                 "prompt_view_available": bool(prompt_view_text.strip()),
+                "prompt_view_tokens": max(
+                    0,
+                    total_prompt_view_tokens - retrieved_memory_tokens,
+                ),
+                "retrieved_memory_tokens": retrieved_memory_tokens,
                 "native_content_tokens": native_tokens,
                 "rewritten_content_tokens": rewritten_tokens,
+                "rewritten_wire_tokens": rewritten_wire_tokens,
                 "token_delta_native_minus_rewrite": native_tokens - rewritten_tokens,
                 "rewritten_preview": _preview(rewritten_content),
                 "semantic_checks": semantic_checks or {},
@@ -2218,6 +2264,20 @@ class AutoGenHookManager:
                 native_text=native_text,
             )
             return None
+        with self._memory_lock:
+            current_team_task = self._current_team_task_by_group.get(
+                context.task.group_id,
+                "",
+            )
+            user_task_history = list(
+                self._user_task_history_by_group.get(context.task.group_id, ())
+            )
+        chronology_view = _build_chronology_prompt_view(
+            decoded_messages,
+            current_task=current_team_task,
+            user_task_history=user_task_history,
+            final_delivery_marker=self.final_delivery_marker,
+        )
         state_refs = self._safe_kernel_call(
             "write_autogen_real_rewrite_input_state",
             lambda: self.kernel.write_agent_state(
@@ -2234,6 +2294,7 @@ class AutoGenHookManager:
                         "method": context.method_name,
                         "native_result_type": "agent_real_rewrite_input",
                         "real_rewrite_input_state": True,
+                        "prompt_view_summary": chronology_view,
                         "autogen_decoded_messages": [
                             message.to_dict() for message in decoded_messages
                         ],
@@ -2257,6 +2318,7 @@ class AutoGenHookManager:
                 lambda ref=state_ref: self.kernel.state_pool.render_prompt_view(
                     ref,
                     context.agent.agent_id,
+                    budget_chars=max(900, len(chronology_view) + 512),
                 ),
             )
             if isinstance(view, str) and view:
@@ -2302,11 +2364,12 @@ class AutoGenHookManager:
             wire_envelope=wire_envelope,
             prompt_view_text=prompt_view_text,
         )
-        rewritten_messages = [
-            _clone_text_message_with_content(message, rewritten_content)
-            for message in messages
-        ]
-        if any(message is None for message in rewritten_messages):
+        rewritten_message = _clone_text_message_with_content(
+            messages[-1],
+            rewritten_content,
+        )
+        rewritten_messages = [rewritten_message]
+        if rewritten_message is None:
             fallback_reasons.append("message_clone_failed")
         original_tokens = _count_tokens(self.token_counter, native_text)
         rewritten_tokens = _count_tokens(self.token_counter, rewritten_content)
@@ -2855,6 +2918,10 @@ class AutoGenHookManager:
             self.token_counter,
             prompt_view_text,
         )
+        rewritten_wire_tokens = max(
+            0,
+            rewritten_tokens - total_prompt_view_tokens,
+        )
         fallback_buckets = _fallback_buckets(fallback_reasons)
         self.trace.write(
             "autogen_agent_input_real_rewrite",
@@ -2889,6 +2956,7 @@ class AutoGenHookManager:
                 "retrieved_memory_tokens": retrieved_memory_tokens,
                 "native_input_tokens": native_tokens,
                 "rewritten_input_tokens": rewritten_tokens,
+                "rewritten_wire_tokens": rewritten_wire_tokens,
                 "token_delta_native_minus_rewrite": native_tokens - rewritten_tokens,
                 "rewritten_preview": _preview(rewritten_content),
                 "rewrite_safety": rewrite_safety or {},
@@ -4647,6 +4715,109 @@ def _join_state_and_memory_views(
             ]
         )
     return "\n".join(sections)
+
+
+def _build_chronology_prompt_view(
+    messages: list[Any],
+    *,
+    current_task: str = "",
+    user_task_history: list[str] | tuple[str, ...] = (),
+    final_delivery_marker: str = "",
+) -> str:
+    """Build a receiver view that preserves task and newest upstream semantics."""
+
+    visible: list[tuple[str, str]] = []
+    for message in messages:
+        content = str(getattr(message, "content_text", "") or "").strip()
+        source = str(getattr(message, "source", "") or "").strip() or "unknown"
+        native_type = str(getattr(message, "native_type", "") or "")
+        message_kind = str(getattr(message, "message_kind", "") or "")
+        if not content or message_kind != "text":
+            continue
+        if native_type.endswith("Event") or native_type == "ThoughtEvent":
+            continue
+        visible.append(
+            (
+                source,
+                _strip_exact_control_line(content, final_delivery_marker),
+            )
+        )
+
+    latest_user = next(
+        (content for source, content in reversed(visible) if source.lower() == "user"),
+        "",
+    )
+    task_text = _strip_exact_control_line(
+        latest_user or current_task,
+        final_delivery_marker,
+    ).strip()
+    upstream = [
+        (source, content)
+        for source, content in visible
+        if source.lower() != "user" and content.strip()
+    ]
+
+    sections: list[str] = []
+    if task_text:
+        sections.extend(
+            [
+                "CURRENT_USER_TASK (highest priority):",
+                task_text,
+            ]
+        )
+    prior_user_tasks = [
+        _strip_exact_control_line(str(task), final_delivery_marker).strip()
+        for task in user_task_history
+        if str(task).strip() and str(task).strip() != task_text
+    ]
+    if prior_user_tasks:
+        sections.extend(
+            [
+                "GROUNDING_RULE:",
+                "Only USER_REQUEST_HISTORY can establish what the user explicitly confirmed. Agent assumptions must remain assumptions.",
+                "USER_REQUEST_HISTORY (authoritative, oldest to newest):",
+                *[
+                    f"[{index}] {task}"
+                    for index, task in enumerate(prior_user_tasks[-7:], start=1)
+                ],
+            ]
+        )
+    if upstream:
+        latest_source, latest_content = upstream[-1]
+        sections.extend(
+            [
+                f"LATEST_UPSTREAM_MESSAGE [{latest_source}] (use in full):",
+                latest_content,
+            ]
+        )
+    if len(upstream) > 1:
+        previous_source, previous_content = upstream[-2]
+        sections.extend(
+            [
+                f"PRIOR_UPSTREAM_DIGEST [{previous_source}]:",
+                _head_tail_digest(previous_content, limit=360),
+            ]
+        )
+    if sections:
+        return "\n".join(sections)
+    return ""
+
+
+def _strip_exact_control_line(content: str, marker: str) -> str:
+    if not marker.strip():
+        return content.strip()
+    return "\n".join(
+        line for line in content.splitlines() if line.strip() != marker.strip()
+    ).strip()
+
+
+def _head_tail_digest(content: str, *, limit: int) -> str:
+    normalized = " ".join(content.split())
+    if len(normalized) <= limit:
+        return normalized
+    head = max(1, (limit - 5) // 2)
+    tail = max(1, limit - head - 5)
+    return f"{normalized[:head]} ... {normalized[-tail:]}"
 
 
 def _build_real_rewrite_content(

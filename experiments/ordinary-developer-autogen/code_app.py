@@ -46,6 +46,8 @@ DEFAULT_AGENTS = [
         "system_prompt": (
             "你是旅行产品设计与行程编排专家。根据用户当前要求、Planner 计划、上下文中的已确认历史约束"
             "和 Reviewer 修订意见，输出可独立阅读、时间可执行、预算可核算的完整旅行方案；如存在有效 MemoryView，也将其作为上下文使用。"
+            "用户给出的预算、时间、人数和强度等数字上限均为硬约束；各项区间与总计必须一致，"
+            "总计区间上限不得超过用户上限，不得用‘可以控制’替代实际满足上限。"
             "不得静默更换已经确认的目的地或删除约束；如果用户明确提出变更，应说明变更影响。"
             "不要附加完成标记。"
         ),
@@ -56,9 +58,12 @@ DEFAULT_AGENTS = [
         "system_prompt": (
             "你是旅行可行性、预算与风险审查专家。检查 Writer 是否遗漏当前要求、违反上下文中的已确认约束、"
             "预算不可核算、交通时间不合理、住宿或活动不适合同行人、雨天与健康风险没有处理。"
+            "对于预算、时间、人数和强度等数字硬约束，必须核对各项区间、总计和上下限；"
+            "总计区间上限超过用户上限即为不合格，不能以‘可以控制’代替修正。"
             "如存在有效 MemoryView，也将其作为审查依据。"
             "若存在实质问题，只输出明确的修订清单，不得附加完成标记，让 Planner 和 Writer 再修订；"
-            "只有草案达到可直接交付标准时，才整合输出完整最终方案，并在最后一行单独写 "
+            "只有草案达到可直接交付标准或你已经完成必要修正时，第一行才写‘## 最终可交付成果’，"
+            "随后只输出面向用户的完整成果，不要输出审查过程，并在最后一行单独写 "
             f"{DONE_TOKEN}。"
         ),
     },
@@ -240,7 +245,7 @@ def main() -> int:
     parser.add_argument("--agent-config", type=Path)
     parser.add_argument("--output-dir", type=Path, default=Path("runs/developer-code-app"))
     parser.add_argument("--temperature", type=float, default=0.2)
-    parser.add_argument("--max-turns", type=int, default=6)
+    parser.add_argument("--max-turns", type=int, default=9)
     parser.add_argument(
         "--experiment-mode",
         choices=("native", "observed", "managed", "unspecified"),
@@ -375,10 +380,11 @@ async def _run_tasks(
 ) -> dict[str, Any]:
     from autogen_agentchat.agents import BaseChatAgent
     from autogen_agentchat.base import Response
-    from autogen_agentchat.conditions import TextMentionTermination
     from autogen_agentchat.messages import BaseChatMessage, TextMessage
     from autogen_agentchat.teams import RoundRobinGroupChat
     from autogen_core import CancellationToken
+
+    from agent_runtime.adapters.autogen_termination import ReviewerFinalTextTermination
 
     llm = OpenAICompatibleClient.from_env(temperature=temperature)
     cost_logger = CostLogger(output_dir)
@@ -437,7 +443,11 @@ async def _run_tasks(
 
     agents = [DeveloperAgent(config) for config in agent_configs]
     kwargs: dict[str, Any] = {
-        "termination_condition": TextMentionTermination(DONE_TOKEN)
+        "termination_condition": ReviewerFinalTextTermination(
+            marker=DONE_TOKEN,
+            source="reviewer",
+            semantic_guard=True,
+        )
     }
     if max_turns > 0:
         kwargs["max_turns"] = max_turns
@@ -462,6 +472,7 @@ async def _run_tasks(
             request=task.question,
             source=final_source,
             content=raw_final_answer,
+            grounding_contexts=[item.question for item in tasks[:task_index]],
         )
         semantic_retry_count = 0
         messages = _messages_to_dict(result)
@@ -705,6 +716,7 @@ def _assess_task_delivery(
     request: str,
     source: str,
     content: str,
+    grounding_contexts: Sequence[str] = (),
 ) -> FinalDeliveryAssessment:
     return assess_final_delivery(
         request=request,
@@ -714,6 +726,7 @@ def _assess_task_delivery(
         marker=DONE_TOKEN,
         require_marker=True,
         minimum_body_chars=80,
+        grounding_contexts=grounding_contexts,
     )
 
 

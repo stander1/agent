@@ -15,6 +15,34 @@ from web_monitor.parser import _autogen_token_summary
 
 
 class AutoGenSessionReportTest(unittest.TestCase):
+    def test_agent_rewrite_cost_components_are_mutually_exclusive(self) -> None:
+        events = [
+            {
+                "event_type": "autogen_agent_input_real_rewrite",
+                "payload": {
+                    "rewrite_applied": True,
+                    "native_input_tokens": 400,
+                    "rewritten_input_tokens": 100,
+                    "prompt_view_tokens": 30,
+                    "retrieved_memory_tokens": 20,
+                    "memory_injected_count": 1,
+                },
+            }
+        ]
+
+        summary = _autogen_token_summary(events)
+
+        self.assertEqual(summary["runtime_tokens"], 100)
+        self.assertEqual(summary["direct_message_tokens"], 50)
+        self.assertEqual(summary["prompt_view_tokens"], 30)
+        self.assertEqual(summary["retrieved_memory_tokens"], 20)
+        self.assertEqual(
+            summary["direct_message_tokens"]
+            + summary["prompt_view_tokens"]
+            + summary["retrieved_memory_tokens"],
+            summary["runtime_tokens"],
+        )
+
     def test_modern_trace_counts_injection_only_after_applied_rewrite(self) -> None:
         events = [
             {
@@ -89,6 +117,55 @@ class AutoGenSessionReportTest(unittest.TestCase):
             self.assertEqual(metrics["llm_total_tokens"], 30)
             self.assertEqual(metrics["agentlite_direct_message_tokens"], 130)
             self.assertEqual(metrics["agentlite_prompt_view_tokens"], 170)
+
+    def test_external_provider_usage_fills_custom_client_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            self._write_session(data_dir, "custom_client")
+            trace_path = (
+                data_dir
+                / "sessions"
+                / "custom_client"
+                / "autogen_driver"
+                / "trace.jsonl"
+            )
+            rows = [
+                json.loads(line)
+                for line in trace_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            trace_path.write_text(
+                "\n".join(
+                    json.dumps(row)
+                    for row in rows
+                    if row.get("event_type") != "autogen_model_client_usage"
+                ),
+                encoding="utf-8",
+            )
+            usage_path = Path(tmp) / "llm_usage_summary.json"
+            usage_path.write_text(
+                json.dumps(
+                    {
+                        "calls": 7,
+                        "llm_prompt_tokens": 120,
+                        "llm_completion_tokens": 30,
+                        "llm_total_tokens": 150,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_autogen_session_report(
+                SessionReportRequest(
+                    data_dir=data_dir,
+                    session_id="custom_client",
+                    provider_usage=usage_path,
+                )
+            )
+
+            self.assertEqual(report["llm_usage_source"], "external_provider_usage_file")
+            self.assertEqual(report["token_summary"]["llm_call_count"], 7)
+            self.assertEqual(report["token_summary"]["llm_total_tokens"], 150)
 
     def test_renders_csv_and_writes_markdown_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
