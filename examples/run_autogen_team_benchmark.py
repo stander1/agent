@@ -19,6 +19,7 @@ if str(EXAMPLES_DIR) not in sys.path:
     sys.path.insert(0, str(EXAMPLES_DIR))
 
 from agent_runtime.eval.token_counter import TokenCounter  # noqa: E402
+from agent_runtime.drivers.autogen import DRIVER_PHASE  # noqa: E402
 from agent_runtime.launcher import (  # noqa: E402
     LaunchRequest,
     ManagedProcessLauncher,
@@ -33,7 +34,7 @@ from run_autogen_team_rewrite_smoke import (  # noqa: E402
     summarize_team_rewrite_events,
 )
 
-EXPECTED_PHASE = "v5.13h"
+EXPECTED_PHASE = DRIVER_PHASE
 USER_SCRIPT = PROJECT_ROOT / "examples" / "autogen_team_benchmark_app.py"
 NATIVE_MARKER = "TEAM_BENCH_NATIVE_MARKER"
 TEAM_REWRITE_MARKER = "AGENTLITE_TEAM_REAL_REWRITE v1"
@@ -281,7 +282,7 @@ def build_checks(
         "managed_returncode_zero": int(managed.get("returncode", 1)) == 0,
         "managed_bootstrap_ok": bool(managed.get("bootstrap_ok")),
         "managed_hooks_active": bool(managed.get("hooks_active")),
-        "driver_phase_v5_13h": managed.get("driver_phase") == EXPECTED_PHASE,
+        "driver_phase_current": managed.get("driver_phase") == EXPECTED_PHASE,
         "managed_real_rewrite_mode": managed.get("broadcast_mode") == "real-rewrite",
         "managed_team_rewrite_enabled": bool(managed.get("team_rewrite_enabled")),
         "user_script_does_not_import_agentlite": (
@@ -300,13 +301,17 @@ def build_checks(
             and NATIVE_MARKER in str(native_first.get("content", ""))
             and TEAM_REWRITE_MARKER not in str(native_first.get("content", ""))
         ),
-        "managed_sees_rewritten_team_task": (
+        "managed_caller_display_restored": (
             isinstance(managed_first, dict)
-            and TEAM_REWRITE_MARKER in str(managed_first.get("content", ""))
-            and NATIVE_MARKER not in str(managed_first.get("content", ""))
-            and bool(managed_first.get("contains_state_pool_marker"))
-            and bool(managed_first.get("contains_broadcast_manifest"))
-            and bool(managed_first.get("contains_receiver_prompt_views"))
+            and TEAM_REWRITE_MARKER not in str(managed_first.get("content", ""))
+            and NATIVE_MARKER in str(managed_first.get("content", ""))
+            and int(
+                managed.get("trace_event_counts", {}).get(
+                    "autogen_team_display_restored", 0
+                )
+                or 0
+            )
+            >= 1
         ),
         "team_rewrite_event_recorded": int(team.get("event_count", 0) or 0) >= 1,
         "team_rewrite_applied": int(team.get("applied_count", 0) or 0) >= 1,
@@ -319,10 +324,11 @@ def build_checks(
             team.get("token_delta_native_broadcast_minus_rewrite", 0) or 0
         )
         > 0,
-        "visible_input_tokens_reduced": int(
-            comparison.get("visible_input_token_delta_native_minus_managed", 0) or 0
+        "caller_visible_input_semantics_preserved": int(
+            comparison.get("visible_input_token_delta_native_minus_managed", -1)
+            or 0
         )
-        > 0,
+        == 0,
         "quality_not_lower": int(
             comparison.get("quality_delta_managed_minus_native", -999) or 0
         )

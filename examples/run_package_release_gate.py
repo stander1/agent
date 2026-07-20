@@ -11,6 +11,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from agent_runtime.drivers.autogen import DRIVER_PHASE
+
+from release_gate_evidence import (
+    assess_team_takeover,
+    collect_team_takeover_evidence,
+)
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TEAM_BENCHMARK_APP = PROJECT_ROOT / "examples" / "autogen_team_benchmark_app.py"
@@ -337,19 +344,21 @@ def run_installed_cli_rewrite_smoke(
     )
     payload = _load_json(app_output)
     first = _first_stream_item(payload)
-    rewrite_ok = (
-        bool(payload.get("agentlite_active"))
-        and bool(first.get("contains_team_rewrite_marker"))
-        and bool(first.get("contains_state_pool_marker"))
-        and bool(first.get("contains_broadcast_manifest"))
-        and bool(first.get("contains_receiver_prompt_views"))
-        and int(first.get("native_marker_count", 0) or 0) == 0
+    evidence = collect_team_takeover_evidence(output_dir / "agentlite")
+    takeover_checks = assess_team_takeover(
+        evidence=evidence,
+        app_payload=payload,
+        first_stream_item=first,
+        expected_phase=DRIVER_PHASE,
     )
+    rewrite_ok = all(takeover_checks.values())
     step.update(
         {
             "passed": bool(step.get("passed")) and rewrite_ok,
             "app_output_path": str(app_output),
             "agentlite_active": bool(payload.get("agentlite_active")),
+            "takeover_checks": takeover_checks,
+            "takeover_evidence": evidence,
             "first_stream_item": {
                 "contains_team_rewrite_marker": bool(
                     first.get("contains_team_rewrite_marker")
