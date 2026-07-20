@@ -23,6 +23,14 @@ COMPARE_GLOBALS = runpy.run_path(
         / "compare_stateful_runs.py"
     )
 )
+JUDGE_GLOBALS = runpy.run_path(
+    str(
+        PROJECT_ROOT
+        / "experiments"
+        / "ordinary-developer-autogen"
+        / "judge_stateful_blind_batch.py"
+    )
+)
 TEAM_TEMPLATE = (
     PROJECT_ROOT
     / "experiments"
@@ -52,6 +60,43 @@ class _FakeResponse:
 
 
 class OrdinaryDeveloperExperimentTests(unittest.TestCase):
+    def test_blind_judge_normalizes_scores_and_requires_every_candidate(
+        self,
+    ) -> None:
+        normalize_result = JUDGE_GLOBALS["normalize_result"]
+        parsed = {
+            "task_id": "A1",
+            "evaluations": [
+                {
+                    "candidate_id": candidate_id,
+                    "task_completion": 4,
+                    "context_retention": 3,
+                    "correctness_consistency": 2,
+                    "clarity_actionability": 1,
+                    "total": 999,
+                    "delivery_complete": True,
+                    "strengths": [],
+                    "risks": [],
+                }
+                for candidate_id in ("c1", "c2", "c3")
+            ],
+        }
+        result = normalize_result(
+            parsed,
+            task_id="A1",
+            candidate_ids=["c1", "c2", "c3"],
+        )
+        self.assertEqual([row["total"] for row in result["evaluations"]], [10, 10, 10])
+        self.assertEqual(result["best_candidate_ids"], ["c1", "c2", "c3"])
+
+        parsed["evaluations"].pop()
+        with self.assertRaisesRegex(ValueError, "every candidate"):
+            normalize_result(
+                parsed,
+                task_id="A1",
+                candidate_ids=["c1", "c2", "c3"],
+            )
+
     def test_comparison_uses_actual_usage_and_keeps_blind_group_mapping_separate(
         self,
     ) -> None:
@@ -152,9 +197,29 @@ class OrdinaryDeveloperExperimentTests(unittest.TestCase):
         )
         self.assertEqual(len(blind_batch["tasks"][0]["candidates"]), 3)
         self.assertNotIn("group", blind_batch["tasks"][0]["candidates"][0])
+        first_tracks = {
+            item["track_id"] for item in blind_batch["tasks"][0]["candidates"]
+        }
+        second_tracks = {
+            item["track_id"] for item in blind_batch["tasks"][1]["candidates"]
+        }
+        self.assertEqual(first_tracks, second_tracks)
+        self.assertTrue(
+            all(
+                item["previous_answer"] == ""
+                for item in blind_batch["tasks"][0]["candidates"]
+            )
+        )
+        self.assertEqual(
+            {item["previous_answer"] for item in blind_batch["tasks"][1]["candidates"]},
+            {"answer 1"},
+        )
         self.assertEqual(
             {item["group"] for item in blind_mapping["mapping"]},
             {"native", "observed", "managed"},
+        )
+        self.assertTrue(
+            all(item["track_id"].startswith("track_") for item in blind_mapping["mapping"])
         )
 
     def test_stateful_sequence_reuses_one_team_and_exports_provider_usage(self) -> None:

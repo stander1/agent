@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
 from pathlib import Path
@@ -190,6 +191,14 @@ def _build_blind_batch(
     randomizer = random.Random(seed)
     candidates_by_task: dict[str, list[dict[str, str]]] = {}
     mapping: list[dict[str, str]] = []
+    track_ids = {
+        group: "track_"
+        + hashlib.sha256(f"{seed}:{group}".encode("utf-8")).hexdigest()[:12]
+        for group in GROUPS
+    }
+    answers_by_group_task: dict[str, dict[str, str]] = {
+        group: {} for group in GROUPS
+    }
     scenario_id = ""
     for group in GROUPS:
         candidate_payload = _read_json(
@@ -206,12 +215,16 @@ def _build_blind_batch(
             candidates_by_task.setdefault(task_id, []).append(
                 {
                     "candidate_id": candidate_id,
+                    "track_id": track_ids[group],
                     "answer": candidate["answer"],
+                    "_group": group,
                 }
             )
+            answers_by_group_task[group][task_id] = candidate["answer"]
             mapping.append(
                 {
                     "candidate_id": candidate_id,
+                    "track_id": track_ids[group],
                     "task_id": task_id,
                     "group": group,
                 }
@@ -220,8 +233,21 @@ def _build_blind_batch(
     tasks: list[dict[str, Any]] = []
     native_sequence = _read_json(run_dirs["native"] / "sequence_result.json")
     questions = {task["task_id"]: task["question"] for task in native_sequence["tasks"]}
+    previous_task_id = ""
     for task_id in questions:
-        candidates = candidates_by_task[task_id]
+        candidates = []
+        for candidate in candidates_by_task[task_id]:
+            group = candidate["_group"]
+            candidates.append(
+                {
+                    "candidate_id": candidate["candidate_id"],
+                    "track_id": candidate["track_id"],
+                    "previous_answer": (
+                        answers_by_group_task[group].get(previous_task_id, "")
+                    ),
+                    "answer": candidate["answer"],
+                }
+            )
         randomizer.shuffle(candidates)
         tasks.append(
             {
@@ -230,10 +256,15 @@ def _build_blind_batch(
                 "candidates": candidates,
             }
         )
+        previous_task_id = task_id
     return (
         {
             "scenario_id": scenario_id,
-            "instructions": "Blindly score each candidate before opening the mapping file.",
+            "instructions": (
+                "Blindly score each candidate before opening the mapping file. "
+                "A stable anonymous track_id and its previous answer are included so "
+                "state continuity can be judged without revealing experiment groups."
+            ),
             "tasks": tasks,
         },
         {

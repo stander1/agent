@@ -129,7 +129,9 @@ python experiments/ordinary-developer-autogen/compare_stateful_runs.py \
 `quality_blind_mapping.json`。汇总器不会仅凭 Token 较低就宣布 AgentLite 获胜；
 正式结论必须同时满足严格最终交付和质量不降低。
 
-质量盲评采用 10 分制，并在打开映射文件前冻结分数：
+质量盲评采用 10 分制，并在打开映射文件前冻结分数。匿名包为每个实验组生成
+跨任务稳定的 `track_id`，并向裁判提供该匿名轨道的上一轮交付物；这样可以在不暴露
+`native / observed / managed` 身份的前提下，真正判断目的地、预算口径和修订是否连续：
 
 - 任务完成度 `0-4`：是否直接交付本轮要求的清单、行程、预算或最终手册；
 - 上下文保持 `0-3`：是否保留此前已经确认的约束和修改；
@@ -140,6 +142,22 @@ python experiments/ordinary-developer-autogen/compare_stateful_runs.py \
 `compare_stateful_runs.py` 只负责核对三组实验条件、汇总真实 Provider Token，并生成匿名候选包；
 它不会自动伪造质量分数。评分者先读取 `quality_blind_batch.json`，记录候选分数和
 `delivery_complete`，冻结后再打开 `quality_blind_mapping.json` 解盲并按组汇总均分。
+
+可复现的 LLM 盲评与解盲命令：
+
+```bash
+python experiments/ordinary-developer-autogen/judge_stateful_blind_batch.py \
+  --batch runs/.../comparison/quality_blind_batch.json \
+  --output runs/.../comparison/quality_blind_scores_frozen.json
+
+python experiments/ordinary-developer-autogen/summarize_stateful_blind_scores.py \
+  --scores runs/.../comparison/quality_blind_scores_frozen.json \
+  --mapping runs/.../comparison/quality_blind_mapping.json \
+  --output runs/.../comparison/quality_unblinded_summary.json
+```
+
+裁判 Token 是离线评测成本，不属于运行时协作成本。正式报告应使用多个匿名排列重复评分，
+并披露评分波动，不能挑选最有利的一次结果。
 
 每一步可见的 Planner、Writer、Reviewer 输出都保存在 `sequence_result.json` 的任务消息列表和
 `tasks/A*/run_result.json` 中。实验程序不会因为内容质量不合格而追加 Agent 轮次或额外 LLM 调用；

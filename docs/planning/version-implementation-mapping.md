@@ -3385,6 +3385,62 @@ AgentLite 的 AutoGen Core 接管已经不局限于单一 content dataclass；
 3. 真实 LLM agent 的质量和成本对比。
 ```
 
+## 42. v5.13m 普通开发者有状态三组公平实验（2026-07-20）
+
+本轮已在同一 MiMo 模型、同一 AutoGen Team、同一 A1-A10 连续任务链上完成：
+
+```text
+native   : 原生 AutoGen
+observed : AgentLite 只观察、不改写
+managed  : AgentLite 真实接管消息、状态与共享记忆
+```
+
+三组均为 10 / 10 严格最终交付。Provider 实际总 Token：
+
+```text
+native   : 517,444
+observed : 549,227
+managed  : 641,657
+```
+
+接管组真实通信审计结果：
+
+```text
+actual_native_transport_tokens   : 193,672
+agentlite_runtime_tokens         : 154,876
+actual_transport_token_savings   : 38,796
+actual_transport_savings_ratio   : 20.03%
+```
+
+因此当前结论必须区分：
+
+```text
+已证明：AgentLite 真实接管链路中的协作载荷下降 20.03%。
+未证明：Provider 实际总 Token 下降；本轮反而增加 24.01%。
+```
+
+接管组 A10 因 Reviewer 发现 2,640 元超过 2,600 元预算硬约束而进入第二个完整协作周期，并伴随 5 次 Provider 重试，是总 Token 与延迟增幅的主要来源。剔除 A10 后，接管组相对原生组仍增加 3.08% Provider Token，说明 AutoGen 历史、Prompt View 和记忆注入之间仍可能存在重复上下文。
+
+质量评测已改为跨任务稳定匿名轨道：裁判同时读取匿名轨道的上一轮与当前交付物，分数冻结后才解盲。三个不同匿名排列的均值为：
+
+```text
+native   : 9.2 / 10
+observed : 10.0 / 10
+managed  : 9.7 / 10
+```
+
+该结果只支持“本轮没有观察到质量下降”，不支持统计意义上的质量提升。观察组不改写消息却获得最高分，说明单次模型生成和 LLM 裁判波动不可忽略。
+
+下一步校准为：
+
+```text
+1. 消除 AutoGen 原生历史、Prompt View、共享记忆中的重复事实；
+2. 建立记忆注入到下游输出引用的采用证据，填充 useful_memory_hit_count；
+3. 在 A/B 两条连续任务上各做至少 3 个独立重复，再计算均值与标准差。
+```
+
+完整报告：`docs/experiments/v5.13m-fair-stateful-a1-a10-20260720.md`。
+
 ## 50. v5.13m 时序视图、事实依据与终止收口
 
 ### 50.1 对应既定方案
