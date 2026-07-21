@@ -60,11 +60,12 @@
 - [docs/experiments/v5.13j-final-delivery-memory-cost-repair.md](docs/experiments/v5.13j-final-delivery-memory-cost-repair.md)
 - [docs/experiments/v5.13k-termination-memory-accounting-root-cause.md](docs/experiments/v5.13k-termination-memory-accounting-root-cause.md)
 - [docs/experiments/v5.13m-chronology-grounding-results.md](docs/experiments/v5.13m-chronology-grounding-results.md)
+- [docs/experiments/v5.13m-openeuler-acceptance-20260720.md](docs/experiments/v5.13m-openeuler-acceptance-20260720.md)
 - [docs/release/v5.12z-final-release-notes.md](docs/release/v5.12z-final-release-notes.md)
 
 ## v5.13m Current Note
 
-`v5.13m` makes managed Agent input chronology-aware: the current raw user task and latest upstream artifact are preserved, prior raw user requests provide authoritative grounding, and repeated rewritten message clones are collapsed into one Prompt View. The final-delivery guard now accepts an explicitly bounded corrected result while rejecting direct claims of user confirmation that are absent from raw user history. Rejected candidates cannot terminate the Team or enter long-term memory. The full suite passes 171 tests. The final MiMo A1-A3 managed smoke completed all tasks in one Planner/Writer/Reviewer cycle each: 9 calls, 51,572 LLM tokens, no Provider retries, and 11.11% measured transport-token savings. This is a managed smoke result, not a replacement for a same-version three-group quality comparison.
+`v5.13m` makes managed Agent input chronology-aware: the current raw user task and latest upstream artifact are preserved, prior raw user requests provide authoritative grounding, and repeated rewritten message clones are collapsed into one Prompt View. The final-delivery guard now accepts an explicitly bounded corrected result while rejecting direct claims of user confirmation that are absent from raw user history. Rejected candidates cannot terminate the Team or enter long-term memory. The full suite passes 174 tests. The final MiMo A1-A3 managed smoke completed all tasks in one Planner/Writer/Reviewer cycle each: 9 calls, 51,572 LLM tokens, no Provider retries, and 11.11% measured transport-token savings. This is a managed smoke result, not a replacement for a same-version three-group quality comparison. The openEuler 24.03 LTS-SP3 acceptance gate also passes; its short A1-A2 rerun correctly fell back to native messages when compression was not cheaper, so that run is compatibility evidence rather than a Token-saving claim.
 
 ## v5.13k Current Note
 

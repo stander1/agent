@@ -3385,6 +3385,35 @@ AgentLite 的 AutoGen Core 接管已经不局限于单一 content dataclass；
 3. 真实 LLM agent 的质量和成本对比。
 ```
 
+## 51. v5.13m openEuler 24.03 LTS-SP3 兼容性验收（2026-07-20）
+
+### 51.1 验收结果
+
+在 openEuler 24.03 LTS-SP3、Python 3.11.6、AutoGen 0.7.5 环境中完成发行门禁：
+
+```text
+release_gate_report.passed: true
+agentlite version: 0.5.13.dev0
+doctor autogen: true
+unittest: 174 tests OK
+compileall: true
+git diff --check: true
+```
+
+确定性 Team 基准保持调用方可见语义不变，同时把内部任务 Token 从 2,071 降到 1,069，把三接收者广播成本从 6,213 降到 918。真实 MiMo A1-A2 冒烟为 2/2 有效交付、21,216 LLM Token、0 次 Provider 重试，本地运行时开销约 0.27%。
+
+### 51.2 结果边界
+
+真实冒烟的第二次运行中，短消息加记忆视图后的候选成本高于原生消息，因此 2 次 Team 候选和 6 次 Agent 候选全部由成本门禁回退，实际传输节省为 0。该结果证明 openEuler 接管与安全回退可工作，不能作为真实业务 Token 已下降的证据。
+
+归档中同时存在两次 session，原始 `agentlite-report.json` 对应第一次运行，而 `sequence_result.json` 和 `llm_usage_summary.json` 已被第二次运行覆盖。正式报告已按较新的 `launch_535a06b3acc14eccba9ce54dd713cdbd` 重新解析，避免混用 26,367 与 21,216 两套 Provider Token 口径。
+
+完整报告：
+
+```text
+docs/experiments/v5.13m-openeuler-acceptance-20260720.md
+```
+
 ## 42. v5.13m 普通开发者有状态三组公平实验（2026-07-20）
 
 本轮已在同一 MiMo 模型、同一 AutoGen Team、同一 A1-A10 连续任务链上完成：
