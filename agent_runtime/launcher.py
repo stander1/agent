@@ -3,12 +3,19 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
+
+from agent_runtime.eval.experiment_archive import (
+    create_agentlite_session_binding,
+    verify_bound_experiment,
+    write_agentlite_session_result,
+)
 
 
 FRAMEWORK_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*$")
@@ -24,6 +31,7 @@ class LaunchRequest:
     runtime_endpoint: str | None = None
     driver_override: str | None = None
     strict_bootstrap: bool = True
+    experiment_dir: Path | None = None
 
 
 @dataclass(slots=True)
@@ -32,6 +40,11 @@ class LaunchResult:
     session_id: str
     status_file: Path
     command: list[str]
+    experiment_dir: Path | None = None
+    experiment_result_file: Path | None = None
+    report_files: tuple[Path, ...] = ()
+    binding_verified: bool = False
+    binding_error: str = ""
 
 
 class ManagedProcessLauncher:
@@ -45,6 +58,21 @@ class ManagedProcessLauncher:
         session_id = f"launch_{uuid.uuid4().hex}"
         session_dir = request.data_dir / "sessions" / session_id
         session_dir.mkdir(parents=True, exist_ok=False)
+        experiment_dir = (
+            request.experiment_dir.expanduser().resolve()
+            if request.experiment_dir is not None
+            else None
+        )
+        if experiment_dir is not None:
+            create_agentlite_session_binding(
+                experiment_dir=experiment_dir,
+                session_id=session_id,
+                data_dir=request.data_dir,
+                session_dir=session_dir,
+                framework=request.framework,
+                cwd=request.cwd,
+                command=request.command,
+            )
         status_file = session_dir / "bootstrap_status.json"
         launch_file = session_dir / "launch.json"
         launch_file.write_text(
@@ -55,6 +83,7 @@ class ManagedProcessLauncher:
                     "cwd": str(request.cwd),
                     "command": request.command,
                     "runtime_endpoint": request.runtime_endpoint,
+                    "experiment_dir": str(experiment_dir or ""),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -73,12 +102,83 @@ class ManagedProcessLauncher:
             env=child_env,
             check=False,
         )
+        experiment_result_file: Path | None = None
+        report_files: tuple[Path, ...] = ()
+        binding_verified = False
+        binding_error = ""
+        bound_run_id = ""
+        binding_checks: dict[str, object] = {}
+        archived_session_dir: Path | None = None
+        if experiment_dir is not None:
+            try:
+                archived_session_dir = (
+                    experiment_dir / "agentlite_data" / "sessions" / session_id
+                )
+                archived_session_dir.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(session_dir, archived_session_dir)
+                bound = verify_bound_experiment(experiment_dir)
+                binding_verified = True
+                bound_run_id = str(bound["run_id"])
+                binding_checks = dict(bound["checks"])
+                report_files = self._write_bound_autogen_reports(
+                    request=request,
+                    experiment_dir=experiment_dir,
+                )
+            except (OSError, ValueError) as exc:
+                binding_error = f"{type(exc).__name__}: {exc}"
+            experiment_result_file = write_agentlite_session_result(
+                experiment_dir=experiment_dir,
+                session_id=session_id,
+                returncode=completed.returncode,
+                bootstrap_status=read_bootstrap_status(status_file),
+                binding_verified=binding_verified,
+                binding_error=binding_error,
+                run_id=bound_run_id,
+                binding_checks=binding_checks,
+                archived_session_dir=archived_session_dir,
+                report_paths=report_files,
+            )
         return LaunchResult(
             returncode=completed.returncode,
             session_id=session_id,
             status_file=status_file,
             command=list(request.command),
+            experiment_dir=experiment_dir,
+            experiment_result_file=experiment_result_file,
+            report_files=report_files,
+            binding_verified=binding_verified,
+            binding_error=binding_error,
         )
+
+    @staticmethod
+    def _write_bound_autogen_reports(
+        *,
+        request: LaunchRequest,
+        experiment_dir: Path,
+    ) -> tuple[Path, ...]:
+        if request.framework != "autogen":
+            return ()
+        from agent_runtime.eval.autogen_session_report import (
+            SessionReportRequest,
+            write_autogen_session_report,
+        )
+
+        outputs: list[Path] = []
+        for report_format, name in (
+            ("json", "agentlite_session_report.json"),
+            ("markdown", "agentlite_session_report.md"),
+        ):
+            output = experiment_dir / name
+            write_autogen_session_report(
+                SessionReportRequest(
+                    experiment_dir=experiment_dir,
+                    output=output,
+                    report_format=report_format,
+                    exclusive_output=True,
+                )
+            )
+            outputs.append(output)
+        return tuple(outputs)
 
     def build_environment(
         self,
@@ -111,12 +211,13 @@ class ManagedProcessLauncher:
                 "AGENTLITE_DATA_DIR": str(request.data_dir),
                 "AGENTLITE_STATUS_FILE": str(status_file),
                 "AGENTLITE_TARGET_CWD": str(request.cwd),
+                "AGENTLITE_EXPERIMENT_DIR": str(request.experiment_dir or ""),
                 "AGENTLITE_BOOTSTRAP_STRICT": (
                     "1" if request.strict_bootstrap else "0"
                 ),
                 "AGENTLITE_BOOTSTRAP_METADATA": json.dumps(
                     {
-                        "launcher_version": "v5.12c",
+                        "launcher_version": "v5.13o",
                         "parent_pid": os.getpid(),
                     },
                     ensure_ascii=False,
@@ -139,6 +240,13 @@ class ManagedProcessLauncher:
             )
         if not request.cwd.is_dir():
             raise ValueError(f"working directory does not exist: {request.cwd}")
+        if request.experiment_dir is not None:
+            experiment_dir = request.experiment_dir.expanduser().resolve()
+            if experiment_dir.exists() and any(experiment_dir.iterdir()):
+                raise ValueError(
+                    "experiment directory already contains evidence: "
+                    f"{experiment_dir}"
+                )
         if _looks_like_python(request.command[0]):
             blocked = UNSUPPORTED_PYTHON_FLAGS.intersection(request.command[1:])
             if blocked:

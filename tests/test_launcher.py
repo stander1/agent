@@ -117,7 +117,7 @@ class ManagedProcessLauncherTest(unittest.TestCase):
 
             self.assertEqual(activation.status, "active")
             self.assertTrue(activation.hooks_active)
-            self.assertEqual(activation.details["phase"], "v5.13n")
+            self.assertEqual(activation.details["phase"], "v5.13o")
             self.assertEqual(activation.details["broadcast_mode"], "shadow-only")
             self.assertEqual(
                 activation.details["hook_mode"], "managed_import_patch"
@@ -191,7 +191,7 @@ class ManagedProcessLauncherTest(unittest.TestCase):
             self.assertTrue(status["framework_available"])
             self.assertEqual(status["driver_status"], "active")
             details = status["driver_details"]
-            self.assertEqual(details["phase"], "v5.13n")
+            self.assertEqual(details["phase"], "v5.13o")
             self.assertEqual(details["broadcast_mode"], "shadow-only")
             self.assertIn("autogen_agentchat", details["available_modules"])
 
@@ -365,6 +365,37 @@ class AgentLiteCliTest(unittest.TestCase):
         self.assertEqual(args.subcommand, "autogen")
         self.assertEqual(args.rewrite, "all")
         self.assertEqual(args.command, ["--", sys.executable, "app.py"])
+
+    def test_autogen_and_report_accept_immutable_experiment_dir(self) -> None:
+        launch_args = build_parser().parse_args(
+            [
+                "autogen",
+                "--experiment-dir",
+                "runs/exp-001/managed",
+                "--",
+                sys.executable,
+                "app.py",
+            ]
+        )
+        report_args = build_parser().parse_args(
+            [
+                "report",
+                "autogen-session",
+                "--experiment-dir",
+                "runs/exp-001/managed",
+                "--format",
+                "json",
+            ]
+        )
+
+        self.assertEqual(
+            launch_args.experiment_dir,
+            Path("runs/exp-001/managed"),
+        )
+        self.assertEqual(
+            report_args.experiment_dir,
+            Path("runs/exp-001/managed"),
+        )
 
     def test_run_subcommand_keeps_explicit_framework_and_rewrite(self) -> None:
         args = build_parser().parse_args(

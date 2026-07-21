@@ -179,6 +179,7 @@ class OrdinaryDeveloperExperimentTests(unittest.TestCase):
                 run_dirs=run_dirs,
                 output_dir=root / "comparison",
                 blind_seed=7,
+                require_immutable=False,
             )
             blind_batch = json.loads(
                 (root / "comparison" / "quality_blind_batch.json").read_text(
@@ -375,12 +376,24 @@ class OrdinaryDeveloperExperimentTests(unittest.TestCase):
         self.assertIn("3000 元", tasks[0].question)
         self.assertIn("决策日志", tasks[-1].question)
 
-    def test_cost_logger_truncates_old_rows_and_summarizes_each_task(self) -> None:
+    def test_cost_logger_refuses_to_overwrite_old_rows(self) -> None:
         logger_type = APP_GLOBALS["CostLogger"]
         with tempfile.TemporaryDirectory() as temp_dir:
             usage_path = Path(temp_dir) / "llm_usage.jsonl"
             usage_path.write_text('{"stale": true}\n', encoding="utf-8")
+            with self.assertRaises(FileExistsError):
+                logger_type(Path(temp_dir))
+
+            self.assertEqual(
+                usage_path.read_text(encoding="utf-8"),
+                '{"stale": true}\n',
+            )
+
+    def test_cost_logger_summarizes_each_task(self) -> None:
+        logger_type = APP_GLOBALS["CostLogger"]
+        with tempfile.TemporaryDirectory() as temp_dir:
             logger = logger_type(Path(temp_dir))
+            usage_path = Path(temp_dir) / "llm_usage.jsonl"
             logger.add(
                 {
                     "task_id": "A1",

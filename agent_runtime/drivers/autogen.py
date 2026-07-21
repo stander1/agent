@@ -63,7 +63,7 @@ MEMORY_SCOPE_ENV = "AGENTLITE_MEMORY_SCOPE"
 FINAL_DELIVERY_MARKER_ENV = "AGENTLITE_AUTOGEN_FINAL_MARKER"
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
 CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
-DRIVER_PHASE = "v5.13n"
+DRIVER_PHASE = "v5.13o"
 TEAM_REAL_REWRITE_DISABLED_REASON = (
     "team_level_real_rewrite_not_enabled_for_guarded_agent_input"
 )

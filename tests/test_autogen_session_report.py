@@ -5,6 +5,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agent_runtime.eval.experiment_archive import (
+    complete_experiment_archive,
+    create_agentlite_session_binding,
+    initialize_experiment_archive,
+)
 from agent_runtime.eval.autogen_session_report import (
     SessionReportRequest,
     build_autogen_session_report,
@@ -195,6 +200,63 @@ class AutoGenSessionReportTest(unittest.TestCase):
             self.assertEqual(report["token_summary"]["llm_call_count"], 7)
             self.assertEqual(report["token_summary"]["llm_total_tokens"], 150)
 
+    def test_bound_experiment_uses_exact_session_instead_of_latest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            expected_id = "launch_expected"
+            self._write_session(data_dir, expected_id)
+            self._write_session(data_dir, "launch_unrelated_newer")
+            experiment_dir = root / "experiment"
+            create_agentlite_session_binding(
+                experiment_dir=experiment_dir,
+                session_id=expected_id,
+                data_dir=data_dir,
+                session_dir=data_dir / "sessions" / expected_id,
+                framework="autogen",
+                cwd=root,
+                command=["python", "app.py"],
+            )
+            identity = initialize_experiment_archive(
+                output_dir=experiment_dir,
+                scenario_id="generic",
+                experiment_mode="managed",
+                environ={
+                    "AGENTLITE_SESSION_ID": expected_id,
+                    "AGENTLITE_DATA_DIR": str(data_dir),
+                },
+            )
+            usage_path = experiment_dir / "llm_usage_summary.json"
+            usage_path.write_text(
+                json.dumps(
+                    {
+                        "calls": 2,
+                        "llm_prompt_tokens": 40,
+                        "llm_completion_tokens": 10,
+                        "llm_total_tokens": 50,
+                        "binding": identity.binding(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            complete_experiment_archive(
+                identity,
+                summary={"llm_total_tokens": 50},
+                artifact_paths=[usage_path],
+            )
+
+            report = build_autogen_session_report(
+                SessionReportRequest(experiment_dir=experiment_dir)
+            )
+
+            self.assertEqual(report["session_id"], expected_id)
+            self.assertEqual(report["experiment_run_id"], identity.run_id)
+            self.assertTrue(report["experiment_binding_verified"])
+            self.assertTrue(
+                all(report["experiment_binding_checks"].values())
+            )
+            self.assertEqual(report["provider_usage_path"], str(usage_path.resolve()))
+
     def test_renders_csv_and_writes_markdown_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "data"
@@ -218,7 +280,7 @@ class AutoGenSessionReportTest(unittest.TestCase):
             )
             self.assertEqual(written["output_path"], str(output.resolve()))
             text = output.read_text(encoding="utf-8")
-            self.assertIn("# AutoGen 网页端 Session Token 报告", text)
+            self.assertIn("# AutoGen Session Token 报告", text)
             self.assertIn("`llm_total_tokens` | 30", text)
             self.assertIn("`actual_native_transport_tokens` | 1200", text)
 

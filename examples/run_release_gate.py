@@ -93,6 +93,20 @@ def main() -> int:
                 python=args.python,
             )
         )
+        steps.append(
+            run_command(
+                name="experiment_archive_binding",
+                command=[
+                    args.python,
+                    str(PROJECT_ROOT / "examples" / "run_experiment_archive_smoke.py"),
+                    "--output-dir",
+                    str(output_dir / "experiment_archive_binding"),
+                    "--python",
+                    args.python,
+                ],
+                output_dir=output_dir,
+            )
+        )
     steps.append(
         run_command(
             name="unittest",

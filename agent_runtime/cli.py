@@ -83,6 +83,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument("--runtime-endpoint")
     run_parser.add_argument(
+        "--experiment-dir",
+        type=Path,
+        help="Bind this launch to a new immutable experiment output directory.",
+    )
+    run_parser.add_argument(
         "--driver",
         help="Override the built-in driver with a Python module path.",
     )
@@ -129,6 +134,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path.home() / ".agentlite",
     )
     autogen_parser.add_argument("--runtime-endpoint")
+    autogen_parser.add_argument(
+        "--experiment-dir",
+        type=Path,
+        help=(
+            "Bind this launch, its exact AgentLite session, and Provider usage "
+            "to a new immutable experiment output directory."
+        ),
+    )
     autogen_parser.add_argument(
         "--driver",
         help="Override the built-in AutoGen driver with a Python module path.",
@@ -234,6 +247,14 @@ def build_parser() -> argparse.ArgumentParser:
             "does not expose usage to the AutoGen hook."
         ),
     )
+    session_report_parser.add_argument(
+        "--experiment-dir",
+        type=Path,
+        help=(
+            "Resolve and verify the exact session and Provider usage from an "
+            "immutable experiment archive."
+        ),
+    )
 
     subparsers.add_parser("version", help="Print AgentLite package version.")
     return parser
@@ -270,6 +291,11 @@ def main(argv: list[str] | None = None) -> int:
         runtime_endpoint=args.runtime_endpoint,
         driver_override=args.driver,
         strict_bootstrap=not args.no_strict_bootstrap,
+        experiment_dir=(
+            args.experiment_dir.expanduser().resolve()
+            if args.experiment_dir is not None
+            else None
+        ),
     )
     _print_launch_header(request)
     launch_env = build_managed_environment_overlay(
@@ -297,6 +323,17 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Bootstrap status: {status.get('driver_status', 'unknown')}")
     print(f"Driver hooks: {hook_state}")
     print(f"Session file: {result.status_file}")
+    if result.experiment_dir is not None:
+        print(f"Experiment directory: {result.experiment_dir}")
+        print(f"Experiment binding verified: {result.binding_verified}")
+        if result.report_files:
+            print("Bound reports: " + ", ".join(str(path) for path in result.report_files))
+        if not result.binding_verified:
+            print(
+                f"Experiment binding failed: {result.binding_error}",
+                file=sys.stderr,
+            )
+            return result.returncode if result.returncode != 0 else 79
     return result.returncode
 
 
@@ -392,6 +429,8 @@ def _report(args: argparse.Namespace) -> int:
                 output=args.output,
                 report_format=args.format,
                 provider_usage=args.provider_usage,
+                experiment_dir=args.experiment_dir,
+                exclusive_output=args.experiment_dir is not None,
             )
         )
     except (OSError, ValueError) as exc:

@@ -5,6 +5,7 @@ import asyncio
 import http.client
 import json
 import os
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -18,6 +19,12 @@ from agent_runtime.reliability.final_delivery_guard import (
     assess_final_delivery,
     has_exact_last_line_marker,
     strip_exact_last_line_marker,
+)
+from agent_runtime.eval.experiment_archive import (
+    ExperimentRunIdentity,
+    complete_experiment_archive,
+    fail_experiment_archive,
+    initialize_experiment_archive,
 )
 
 
@@ -203,17 +210,27 @@ class OpenAICompatibleClient:
 
 
 class CostLogger:
-    def __init__(self, output_dir: Path) -> None:
+    def __init__(
+        self,
+        output_dir: Path,
+        run_identity: ExperimentRunIdentity | None = None,
+    ) -> None:
         self.output_dir = output_dir
+        self.run_identity = run_identity
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.usage_path = self.output_dir / "llm_usage.jsonl"
-        self.usage_path.write_text("", encoding="utf-8")
+        with self.usage_path.open("x", encoding="utf-8"):
+            pass
         self.rows: list[dict[str, Any]] = []
 
     def add(self, row: dict[str, Any]) -> None:
-        self.rows.append(row)
+        stored = dict(row)
+        if self.run_identity is not None:
+            stored["experiment_run_id"] = self.run_identity.run_id
+            stored["agentlite_session_id"] = self.run_identity.agentlite_session_id
+        self.rows.append(stored)
         with self.usage_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+            fh.write(json.dumps(stored, ensure_ascii=False) + "\n")
 
     def summary(self) -> dict[str, Any]:
         summary = _summarize_usage_rows(self.rows)
@@ -225,11 +242,15 @@ class CostLogger:
             task_id: _summarize_usage_rows(bucket["rows"])
             for task_id, bucket in by_task.items()
         }
+        if self.run_identity is not None:
+            summary["binding"] = self.run_identity.binding()
         return summary
 
     def write_summary(self) -> Path:
         path = self.output_dir / "llm_usage_summary.json"
-        path.write_text(json.dumps(self.summary(), ensure_ascii=False, indent=2), encoding="utf-8")
+        with path.open("x", encoding="utf-8") as handle:
+            json.dump(self.summary(), handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
         return path
 
 
@@ -258,32 +279,66 @@ def main() -> int:
     agent_configs = _load_agent_config(args.agent_config)
     if args.question_sequence_file:
         scenario_id, tasks = _load_question_sequence(args.question_sequence_file)
-        payload = asyncio.run(
-            run_task_sequence(
-                scenario_id=scenario_id,
-                tasks=tasks,
-                agent_configs=agent_configs,
-                output_dir=output_dir,
-                temperature=args.temperature,
-                max_turns=args.max_turns,
-                experiment_mode=args.experiment_mode,
-            )
-        )
+        question = ""
     else:
         question = (
             args.question_file.read_text(encoding="utf-8").strip()
             if args.question_file
             else args.question
         )
-        payload = asyncio.run(
-            run_team(
-                question=question,
-                agent_configs=agent_configs,
-                output_dir=output_dir,
-                temperature=args.temperature,
-                max_turns=args.max_turns,
+        scenario_id = "single"
+        tasks = []
+    source_paths = [
+        path
+        for path in (args.question_sequence_file, args.question_file, args.agent_config)
+        if path is not None
+    ]
+    run_identity = initialize_experiment_archive(
+        output_dir=output_dir,
+        scenario_id=scenario_id,
+        experiment_mode=args.experiment_mode,
+        source_paths=source_paths,
+        provider_model=os.getenv("OPENAI_MODEL", DEFAULT_MODEL),
+        provider_base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        command=sys.argv,
+    )
+    try:
+        if args.question_sequence_file:
+            payload = asyncio.run(
+                run_task_sequence(
+                    scenario_id=scenario_id,
+                    tasks=tasks,
+                    agent_configs=agent_configs,
+                    output_dir=output_dir,
+                    temperature=args.temperature,
+                    max_turns=args.max_turns,
+                    experiment_mode=args.experiment_mode,
+                    run_identity=run_identity,
+                )
             )
+        else:
+            payload = asyncio.run(
+                run_team(
+                    question=question,
+                    agent_configs=agent_configs,
+                    output_dir=output_dir,
+                    temperature=args.temperature,
+                    max_turns=args.max_turns,
+                    run_identity=run_identity,
+                )
+            )
+        complete_experiment_archive(
+            run_identity,
+            summary=payload["summary"],
+            artifact_paths=(path for path in output_dir.rglob("*") if path.is_file()),
         )
+    except BaseException as exc:
+        fail_experiment_archive(
+            run_identity,
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+        )
+        raise
     print(json.dumps(payload["summary"], ensure_ascii=False, indent=2))
     return 0
 
@@ -295,6 +350,7 @@ async def run_team(
     output_dir: Path,
     temperature: float,
     max_turns: int,
+    run_identity: ExperimentRunIdentity | None = None,
 ) -> dict[str, Any]:
     payload = await _run_tasks(
         scenario_id="single",
@@ -304,6 +360,7 @@ async def run_team(
         temperature=temperature,
         max_turns=max_turns,
         experiment_mode="unspecified",
+        run_identity=run_identity,
     )
     task_payload = payload["raw"]["tasks"][0]
     final_answer_path = output_dir / "final_answer.md"
@@ -354,6 +411,7 @@ async def run_task_sequence(
     temperature: float,
     max_turns: int,
     experiment_mode: str,
+    run_identity: ExperimentRunIdentity | None = None,
 ) -> dict[str, Any]:
     if len(tasks) < 2:
         raise ValueError("a stateful sequence requires at least two tasks")
@@ -365,6 +423,7 @@ async def run_task_sequence(
         temperature=temperature,
         max_turns=max_turns,
         experiment_mode=experiment_mode,
+        run_identity=run_identity,
     )
 
 
@@ -377,6 +436,7 @@ async def _run_tasks(
     temperature: float,
     max_turns: int,
     experiment_mode: str,
+    run_identity: ExperimentRunIdentity | None = None,
 ) -> dict[str, Any]:
     from autogen_agentchat.agents import BaseChatAgent
     from autogen_agentchat.base import Response
@@ -387,7 +447,7 @@ async def _run_tasks(
     from agent_runtime.adapters.autogen_termination import ReviewerFinalTextTermination
 
     llm = OpenAICompatibleClient.from_env(temperature=temperature)
-    cost_logger = CostLogger(output_dir)
+    cost_logger = CostLogger(output_dir, run_identity=run_identity)
     current_task_id = "unassigned"
 
     class DeveloperAgent(BaseChatAgent):
@@ -554,6 +614,8 @@ async def _run_tasks(
         "llm_total_tokens": cost_logger.summary()["llm_total_tokens"],
         "llm_usage_summary_path": str(usage_summary_path),
     }
+    if run_identity is not None:
+        summary["experiment_binding"] = run_identity.binding()
     sequence_payload = {
         "summary": summary,
         "agent_configs": agent_configs,

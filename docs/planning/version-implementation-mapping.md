@@ -3445,6 +3445,24 @@ memory_candidate_deduplicated_tokens
 docs/experiments/v5.13n-context-dedup-rewrite-metrics.md
 ```
 
+## 53. v5.13o 不可变实验归档与精确用量绑定（2026-07-21）
+
+### 53.1 实现
+
+代码端实验新增 `experiment_run.json` 与 `experiment_result.json`，所有核心结果文件使用独占创建；重复使用目录会直接失败，旧 Token 日志不再被清空。AgentLite 的 `--experiment-dir` 会把本次 `session_id` 写入启动绑定，目标程序的 Provider 汇总同时写入 `run_id` 与 `session_id`。
+
+启动结束后，AgentLite 会把精确 Session 复制到实验目录的 `agentlite_data/sessions/<session_id>`，校验 Provider 哈希和四处身份字段，并自动生成 JSON/Markdown Session 报告。比较器默认拒绝未绑定、身份错配、哈希不符或三组复用同一 `run_id` 的正式数据。
+
+### 53.2 验证
+
+新增真实 CLI smoke 覆盖首次启动、精确绑定、自包含 Session、自动报告、Provider 总量、Session 目录摘要、二次启动拒绝和原清单哈希不变。该 smoke 不调用外部 LLM，并已加入 release gate。最终 184 项测试通过，扩展后的发行门禁 9 / 9 通过。
+
+完整报告：
+
+```text
+docs/experiments/v5.13o-immutable-experiment-binding.md
+```
+
 ## 42. v5.13m 普通开发者有状态三组公平实验（2026-07-20）
 
 本轮已在同一 MiMo 模型、同一 AutoGen Team、同一 A1-A10 连续任务链上完成：

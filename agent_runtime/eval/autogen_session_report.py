@@ -7,6 +7,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Any, Literal
 
+from agent_runtime.eval.experiment_archive import verify_bound_experiment
 from web_monitor.parser import build_session_snapshot, list_sessions
 
 
@@ -15,24 +16,41 @@ ReportFormat = Literal["json", "csv", "markdown"]
 
 @dataclass(frozen=True)
 class SessionReportRequest:
-    data_dir: Path
+    data_dir: Path | None = None
     session_id: str | None = None
     output: Path | None = None
     report_format: ReportFormat = "markdown"
     provider_usage: Path | None = None
+    experiment_dir: Path | None = None
+    exclusive_output: bool = False
 
 
 def build_autogen_session_report(request: SessionReportRequest) -> dict[str, Any]:
-    data_dir = request.data_dir.expanduser().resolve()
+    bound: dict[str, Any] | None = None
+    provider_usage_path = request.provider_usage
+    requested_session_id = request.session_id
+    if request.experiment_dir is not None:
+        if request.provider_usage is not None:
+            raise ValueError(
+                "--experiment-dir already binds Provider usage; do not also provide --provider-usage"
+            )
+        bound = verify_bound_experiment(request.experiment_dir)
+        data_dir = bound["data_dir"]
+        requested_session_id = bound["session_id"]
+        provider_usage_path = bound["provider_usage_path"]
+    elif request.data_dir is not None:
+        data_dir = request.data_dir.expanduser().resolve()
+    else:
+        raise ValueError("data_dir or experiment_dir is required")
     session_dir, resolved_session_id = resolve_session_dir(
         data_dir=data_dir,
-        session_id=request.session_id,
+        session_id=requested_session_id,
     )
     snapshot = build_session_snapshot(session_dir, session_id=resolved_session_id)
     token_summary = dict(snapshot.get("token_summary", {}))
     provider_usage = (
-        _load_provider_usage(request.provider_usage)
-        if request.provider_usage is not None
+        _load_provider_usage(provider_usage_path)
+        if provider_usage_path is not None
         else None
     )
     llm_usage_source = (
@@ -66,9 +84,14 @@ def build_autogen_session_report(request: SessionReportRequest) -> dict[str, Any
         "hooks_active": bool(summary.get("hooks_active")),
         "event_counts": summary.get("event_counts") or {},
         "llm_usage_source": llm_usage_source,
+        "experiment_dir": str(bound["experiment_dir"]) if bound else "",
+        "experiment_run_id": str(bound["run_id"]) if bound else "",
+        "experiment_binding_verified": bool(bound),
+        "experiment_binding_checks": dict(bound["checks"]) if bound else {},
+        "experiment_session_source": str(bound["session_source"]) if bound else "",
         "provider_usage_path": (
-            str(request.provider_usage.expanduser().resolve())
-            if request.provider_usage is not None
+            str(provider_usage_path.expanduser().resolve())
+            if provider_usage_path is not None
             else ""
         ),
         "token_summary": {
@@ -134,7 +157,9 @@ def write_autogen_session_report(request: SessionReportRequest) -> dict[str, Any
     if request.output:
         output = request.output.expanduser().resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(text + "\n", encoding="utf-8")
+        mode = "x" if request.exclusive_output else "w"
+        with output.open(mode, encoding="utf-8") as handle:
+            handle.write(text + "\n")
         report["output_path"] = str(output)
     else:
         print(text)
@@ -325,13 +350,17 @@ def _render_csv(report: dict[str, Any]) -> str:
 
 def _render_markdown(report: dict[str, Any]) -> str:
     lines = [
-        f"# AutoGen 网页端 Session Token 报告",
+        "# AutoGen Session Token 报告",
         "",
         f"- session_id: `{report['session_id']}`",
         f"- status: `{report['status']}`",
         f"- framework: `{report['framework']}`",
         f"- hooks_active: `{report['hooks_active']}`",
         f"- llm_usage_source: `{report['llm_usage_source']}`",
+        f"- experiment_run_id: `{report['experiment_run_id']}`",
+        f"- experiment_binding_verified: `{report['experiment_binding_verified']}`",
+        f"- experiment_session_source: `{report['experiment_session_source']}`",
+        f"- experiment_dir: `{report['experiment_dir']}`",
         f"- provider_usage_path: `{report['provider_usage_path']}`",
         f"- session_dir: `{report['session_dir']}`",
         f"- trace_path: `{report['trace_path']}`",

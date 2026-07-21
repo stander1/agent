@@ -46,6 +46,15 @@ $env:OPENAI_RETRY_BACKOFF_SECONDS="2"
 消息，不会在任务之间调用 `reset()`。原生、观察和接管三组使用完全相同的程序、
 问题、Agent 配置和终止条件，只有启动方式不同。
 
+每次正式实验先生成全新的编号：
+
+```bash
+export EXP_ID="$(date +%Y%m%d-%H%M%S)"
+export RUN_ROOT="runs/ordinary-developer/v5.13o-${EXP_ID}"
+export TRACE_ROOT=".agentlite-exp/v5.13o-${EXP_ID}"
+mkdir -p "$RUN_ROOT" "$TRACE_ROOT"
+```
+
 ### 原生有状态组
 
 ```bash
@@ -53,55 +62,57 @@ python experiments/ordinary-developer-autogen/code_app.py \
   --question-sequence-file experiments/ordinary-developer-autogen/question_A_sequence.json \
   --agent-config experiments/ordinary-developer-autogen/agent_config.json \
   --experiment-mode native \
-  --output-dir runs/ordinary-developer/code-stateful-native-A
+  --output-dir "$RUN_ROOT/native"
 ```
 
 ### AgentLite 观察组
 
 ```bash
 agentlite autogen \
-  --data-dir .agentlite-exp/code-stateful-observed-A \
+  --data-dir "$TRACE_ROOT/observed" \
+  --experiment-dir "$RUN_ROOT/observed" \
   --rewrite off \
   --broadcast-mode shadow-only \
   -- python experiments/ordinary-developer-autogen/code_app.py \
     --question-sequence-file experiments/ordinary-developer-autogen/question_A_sequence.json \
     --agent-config experiments/ordinary-developer-autogen/agent_config.json \
     --experiment-mode observed \
-    --output-dir runs/ordinary-developer/code-stateful-observed-A
+    --output-dir "$RUN_ROOT/observed"
 ```
 
 ### AgentLite 正式接管组
 
 ```bash
-export AGENTLITE_MEMORY_SCOPE="code-stateful-A-本次实验唯一编号"
+export AGENTLITE_MEMORY_SCOPE="code-stateful-A-${EXP_ID}"
 agentlite autogen \
-  --data-dir .agentlite-exp/code-stateful-agentlite-A \
+  --data-dir "$TRACE_ROOT/managed" \
+  --experiment-dir "$RUN_ROOT/managed" \
   -- python experiments/ordinary-developer-autogen/code_app.py \
     --question-sequence-file experiments/ordinary-developer-autogen/question_A_sequence.json \
     --agent-config experiments/ordinary-developer-autogen/agent_config.json \
     --experiment-mode managed \
-    --output-dir runs/ordinary-developer/code-stateful-agentlite-A
+    --output-dir "$RUN_ROOT/managed"
 ```
 
-每次正式重复实验必须更换 `AGENTLITE_MEMORY_SCOPE`，并使用新的 `--data-dir` 和
-`--output-dir`，避免旧任务记忆污染 A1。
+每次正式重复实验必须更换 `AGENTLITE_MEMORY_SCOPE`，并使用新的 `--data-dir`、
+`--experiment-dir` 和 `--output-dir`。其中 `--experiment-dir` 必须与目标程序的
+`--output-dir` 相同。新版本会拒绝任何已包含实验文件的目录，避免旧任务记忆污染 A1，
+也避免历史 Token 和答案被静默覆盖。
 
-### 导出 AgentLite 报告
+### AgentLite 报告
+
+使用 `--experiment-dir` 后，观察组和接管组结束时会自动生成
+`agentlite_session_report.json` 与 `agentlite_session_report.md`，不再需要通过
+`--session-id latest` 手工猜测本次 Session。需要重新查看时可以直接从绑定归档输出到终端：
 
 ```bash
 agentlite report autogen-session \
-  --data-dir .agentlite-exp/code-stateful-observed-A \
-  --session-id latest \
-  --provider-usage runs/ordinary-developer/code-stateful-observed-A/llm_usage_summary.json \
-  --format markdown \
-  --output runs/ordinary-developer/code-stateful-observed-A/agentlite_session_report.md
+  --experiment-dir "$RUN_ROOT/observed" \
+  --format markdown
 
 agentlite report autogen-session \
-  --data-dir .agentlite-exp/code-stateful-agentlite-A \
-  --session-id latest \
-  --provider-usage runs/ordinary-developer/code-stateful-agentlite-A/llm_usage_summary.json \
-  --format markdown \
-  --output runs/ordinary-developer/code-stateful-agentlite-A/agentlite_session_report.md
+  --experiment-dir "$RUN_ROOT/managed" \
+  --format markdown
 ```
 
 每组都会生成：
@@ -110,6 +121,11 @@ agentlite report autogen-session \
 |---|---|
 | `llm_usage.jsonl` | 每次模型调用的 provider usage、耗时、任务和 Agent |
 | `llm_usage_summary.json` | 全局、逐任务和逐 Agent 的实际 LLM Token 汇总 |
+| `experiment_run.json` | 不可变 `run_id`、Session、模型和输入文件哈希 |
+| `experiment_result.json` | 完成状态、Provider 用量哈希和核心产物哈希 |
+| `agentlite_session_binding.json` | 观察/接管组的精确 AgentLite Session 绑定 |
+| `agentlite_data/sessions/...` | 观察/接管组本次 Session 的自包含快照 |
+| `agentlite_session_result.json` | 绑定校验结果、Session 摘要和自动报告哈希 |
 | `sequence_result.json` | A1-A10 问题、完整消息、终止原因和最终交付状态 |
 | `tasks/A*/final_answer.md` | 去除终止标记后的用户可见最终答案 |
 | `quality_blind_candidates.json` | 不带实验组名称的质量盲评候选 |
@@ -119,10 +135,10 @@ agentlite report autogen-session \
 
 ```bash
 python experiments/ordinary-developer-autogen/compare_stateful_runs.py \
-  --native-dir runs/ordinary-developer/code-stateful-native-A \
-  --observed-dir runs/ordinary-developer/code-stateful-observed-A \
-  --managed-dir runs/ordinary-developer/code-stateful-agentlite-A \
-  --output-dir runs/ordinary-developer/code-stateful-comparison-A
+  --native-dir "$RUN_ROOT/native" \
+  --observed-dir "$RUN_ROOT/observed" \
+  --managed-dir "$RUN_ROOT/managed" \
+  --output-dir "$RUN_ROOT/comparison"
 ```
 
 在完成质量盲评前，只能查看 `quality_blind_batch.json`，不要打开

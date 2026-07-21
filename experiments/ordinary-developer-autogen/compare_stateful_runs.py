@@ -7,6 +7,10 @@ import random
 from pathlib import Path
 from typing import Any
 
+from agent_runtime.eval.experiment_archive import (
+    verify_bound_experiment,
+    verify_experiment_archive,
+)
 
 GROUPS = ("native", "observed", "managed")
 
@@ -20,6 +24,11 @@ def main() -> int:
     parser.add_argument("--managed-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--blind-seed", type=int, default=20260716)
+    parser.add_argument(
+        "--allow-legacy-unbound",
+        action="store_true",
+        help="Allow comparison of older outputs without immutable run/session bindings.",
+    )
     args = parser.parse_args()
 
     run_dirs = {
@@ -32,6 +41,7 @@ def main() -> int:
         run_dirs=run_dirs,
         output_dir=output_dir,
         blind_seed=args.blind_seed,
+        require_immutable=not args.allow_legacy_unbound,
     )
     print(json.dumps(result["summary"], ensure_ascii=False, indent=2))
     return 0
@@ -42,6 +52,7 @@ def compare_runs(
     run_dirs: dict[str, Path],
     output_dir: Path,
     blind_seed: int,
+    require_immutable: bool = True,
 ) -> dict[str, Any]:
     missing_groups = [group for group in GROUPS if group not in run_dirs]
     if missing_groups:
@@ -51,6 +62,11 @@ def compare_runs(
         for group in GROUPS
     }
     _validate_runs(runs)
+    archive_evidence = (
+        _validate_archive_evidence(run_dirs=run_dirs, runs=runs)
+        if require_immutable
+        else {group: {"status": "legacy_unverified"} for group in GROUPS}
+    )
 
     group_summaries = {
         group: _group_summary(runs[group]) for group in GROUPS
@@ -64,6 +80,8 @@ def compare_runs(
         "managed_vs_native": _token_delta(managed_total, native_total),
         "observed_vs_native": _token_delta(observed_total, native_total),
         "quality_evaluation_status": "pending_blind_review",
+        "archive_binding_required": require_immutable,
+        "archive_evidence": archive_evidence,
     }
     task_comparison = _task_comparison(runs)
     blind_batch, blind_mapping = _build_blind_batch(
@@ -77,17 +95,26 @@ def compare_runs(
     }
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "stateful_comparison.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    if any(output_dir.iterdir()):
+        raise FileExistsError(
+            f"Comparison output directory is not empty: {output_dir}. "
+            "Use a new directory to preserve previous comparison evidence."
+        )
+    _write_text_exclusive(
+        output_dir / "stateful_comparison.json",
+        json.dumps(payload, ensure_ascii=False, indent=2),
     )
-    (output_dir / "stateful_comparison.md").write_text(
-        _render_markdown(payload), encoding="utf-8"
+    _write_text_exclusive(
+        output_dir / "stateful_comparison.md",
+        _render_markdown(payload),
     )
-    (output_dir / "quality_blind_batch.json").write_text(
-        json.dumps(blind_batch, ensure_ascii=False, indent=2), encoding="utf-8"
+    _write_text_exclusive(
+        output_dir / "quality_blind_batch.json",
+        json.dumps(blind_batch, ensure_ascii=False, indent=2),
     )
-    (output_dir / "quality_blind_mapping.json").write_text(
-        json.dumps(blind_mapping, ensure_ascii=False, indent=2), encoding="utf-8"
+    _write_text_exclusive(
+        output_dir / "quality_blind_mapping.json",
+        json.dumps(blind_mapping, ensure_ascii=False, indent=2),
     )
     return payload
 
@@ -127,6 +154,58 @@ def _validate_runs(runs: dict[str, dict[str, Any]]) -> None:
         ]
         if group_tasks != native_tasks:
             raise ValueError(f"{group} task sequence differs from native")
+
+
+def _validate_archive_evidence(
+    *,
+    run_dirs: dict[str, Path],
+    runs: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    evidence: dict[str, dict[str, Any]] = {}
+    run_ids: set[str] = set()
+    for group in GROUPS:
+        verified = (
+            verify_experiment_archive(run_dirs[group])
+            if group == "native"
+            else verify_bound_experiment(run_dirs[group])
+        )
+        manifest = _read_json(run_dirs[group] / "experiment_run.json")
+        summary_binding = runs[group].get("summary", {}).get("experiment_binding")
+        if not isinstance(summary_binding, dict):
+            raise ValueError(f"{group} sequence result has no experiment binding")
+        run_id = str(verified["run_id"])
+        if run_id in run_ids:
+            raise ValueError(f"duplicate experiment run_id across groups: {run_id}")
+        run_ids.add(run_id)
+        if str(manifest.get("experiment_mode") or "") != group:
+            raise ValueError(f"{group} archive manifest reports a different mode")
+        if str(manifest.get("scenario_id") or "") != str(
+            runs[group]["summary"].get("scenario_id") or ""
+        ):
+            raise ValueError(f"{group} archive scenario differs from sequence result")
+        if str(summary_binding.get("run_id") or "") != run_id:
+            raise ValueError(f"{group} sequence result belongs to another run_id")
+        if str(summary_binding.get("agentlite_session_id") or "") != str(
+            verified["session_id"]
+        ):
+            raise ValueError(f"{group} sequence result belongs to another session")
+        if group == "native" and verified["session_id"]:
+            raise ValueError("native archive unexpectedly belongs to an AgentLite session")
+        evidence[group] = {
+            "status": "verified",
+            "run_id": run_id,
+            "session_id": str(verified["session_id"]),
+            "checks": dict(verified["checks"]),
+            "session_source": str(verified.get("session_source") or "none"),
+        }
+    return evidence
+
+
+def _write_text_exclusive(path: Path, text: str) -> None:
+    with path.open("x", encoding="utf-8") as handle:
+        handle.write(text)
+        if not text.endswith("\n"):
+            handle.write("\n")
 
 
 def _group_summary(run: dict[str, Any]) -> dict[str, Any]:

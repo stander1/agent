@@ -2,7 +2,7 @@
 
 本仓库用于迭代实现一个面向多 Agent 协作的跨框架运行时工具层，目标是在多 Agent 任务中通过结构化通信、非文本状态传递和共享记忆复用降低协作开销。
 
-当前开发版本：`v5.13n context deduplication + rewrite outcome metrics`
+当前开发版本：`v5.13o immutable experiment archive + exact usage binding`
 
 最新发行包门禁版本：`v5.13h package release gate`
 
@@ -62,7 +62,12 @@
 - [docs/experiments/v5.13m-chronology-grounding-results.md](docs/experiments/v5.13m-chronology-grounding-results.md)
 - [docs/experiments/v5.13m-openeuler-acceptance-20260720.md](docs/experiments/v5.13m-openeuler-acceptance-20260720.md)
 - [docs/experiments/v5.13n-context-dedup-rewrite-metrics.md](docs/experiments/v5.13n-context-dedup-rewrite-metrics.md)
+- [docs/experiments/v5.13o-immutable-experiment-binding.md](docs/experiments/v5.13o-immutable-experiment-binding.md)
 - [docs/release/v5.12z-final-release-notes.md](docs/release/v5.12z-final-release-notes.md)
+
+## v5.13o Current Note
+
+`v5.13o` makes code-side experiment outputs immutable and binds one Provider usage file to one exact AgentLite launch. `agentlite autogen --experiment-dir RUN_DIR -- ... --output-dir RUN_DIR` now creates an exclusive launch binding, rejects directory reuse, verifies `run_id` and `session_id`, copies the exact AgentLite session into the experiment archive, and automatically exports JSON and Markdown session reports. Stateful comparison rejects unbound or mismatched runs by default; `--allow-legacy-unbound` is only for older evidence. The archive smoke uses no external LLM and verifies successful binding, self-contained session evidence, automatic reports, Provider totals, and overwrite rejection. The full suite passes 184 tests and the expanded release gate passes all nine steps.
 
 ## v5.13n Current Note
 
