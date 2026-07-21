@@ -64,6 +64,11 @@ class AutoGenSessionReportTest(unittest.TestCase):
                     "native_full_broadcast_tokens": 100,
                     "wire_plus_prompt_view_tokens": 20,
                     "memory_injected_count": 0,
+                    "fallback_reasons": ["token_not_reduced"],
+                    "fallback_buckets": ["cost_gate_failed"],
+                    "memory_candidate_deduplicated_count": 1,
+                    "memory_candidate_deduplicated_fanout_count": 3,
+                    "memory_candidate_deduplicated_tokens": 60,
                 },
             },
             {
@@ -73,6 +78,17 @@ class AutoGenSessionReportTest(unittest.TestCase):
                     "native_input_tokens": 100,
                     "rewritten_input_tokens": 40,
                     "memory_injected_count": 1,
+                    "memory_candidate_deduplicated_count": 2,
+                    "memory_candidate_deduplicated_tokens": 40,
+                },
+            },
+            {
+                "event_type": "autogen_core_content_real_rewrite",
+                "payload": {
+                    "rewrite_applied": False,
+                    "rewrite_fallback_count": 1,
+                    "fallback_reasons": ["unsupported_core_message_content_field"],
+                    "fallback_buckets": ["core_message_contract_invalid"],
                 },
             },
         ]
@@ -85,6 +101,15 @@ class AutoGenSessionReportTest(unittest.TestCase):
         self.assertEqual(summary["unassessed_memory_hit_count"], 1)
         self.assertEqual(summary["native_baseline_tokens"], 200)
         self.assertEqual(summary["runtime_tokens"], 140)
+        self.assertEqual(summary["rewrite_audit_event_count"], 3)
+        self.assertEqual(summary["rewrite_costed_event_count"], 2)
+        self.assertEqual(summary["rewrite_applied_event_count"], 1)
+        self.assertEqual(summary["rewrite_fallback_event_count"], 2)
+        self.assertEqual(summary["rewrite_cost_gate_fallback_count"], 1)
+        self.assertEqual(summary["rewrite_contract_fallback_count"], 1)
+        self.assertEqual(summary["actual_rewrite_event_count"], 1)
+        self.assertEqual(summary["memory_candidate_deduplicated_count"], 5)
+        self.assertEqual(summary["memory_candidate_deduplicated_tokens"], 100)
 
     def test_builds_token_report_from_latest_session_trace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -117,6 +142,9 @@ class AutoGenSessionReportTest(unittest.TestCase):
             self.assertEqual(metrics["llm_total_tokens"], 30)
             self.assertEqual(metrics["agentlite_direct_message_tokens"], 130)
             self.assertEqual(metrics["agentlite_prompt_view_tokens"], 170)
+            self.assertEqual(metrics["rewrite_audit_event_count"], 1)
+            self.assertEqual(metrics["rewrite_applied_event_count"], 1)
+            self.assertEqual(metrics["rewrite_fallback_event_count"], 0)
 
     def test_external_provider_usage_fills_custom_client_gap(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

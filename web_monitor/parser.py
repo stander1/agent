@@ -401,14 +401,22 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "runtime_tokens": 0,
         "token_savings": 0,
         "token_savings_ratio": 0.0,
+        "rewrite_audit_event_count": 0,
+        "rewrite_costed_event_count": 0,
+        "rewrite_applied_event_count": 0,
+        "rewrite_fallback_event_count": 0,
+        "rewrite_cost_gate_fallback_count": 0,
+        "rewrite_contract_fallback_count": 0,
         "actual_rewrite_event_count": 0,
+        "memory_candidate_deduplicated_count": 0,
+        "memory_candidate_deduplicated_tokens": 0,
         "shadow_native_tokens": 0,
         "shadow_candidate_tokens": 0,
         "shadow_potential_savings": 0,
         "shadow_potential_savings_ratio": 0.0,
         "shadow_event_count": 0,
         "event_count": 0,
-        "source": "autogen_trace_actual_rewrite_audit",
+        "source": "autogen_trace_rewrite_outcomes_v2",
     }
     actual_event_types = {
         "autogen_agent_input_real_rewrite",
@@ -422,6 +430,11 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "autogen_broadcast_replacement_shadow",
     }
     seen_cost_events = 0
+    rewrite_audit_events = 0
+    rewrite_applied_events = 0
+    rewrite_fallback_events = 0
+    rewrite_cost_gate_fallbacks = 0
+    rewrite_contract_fallbacks = 0
     for event in trace_events:
         event_type = str(event.get("event_type", ""))
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
@@ -480,15 +493,43 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
             continue
         if event_type not in actual_event_types:
             continue
+        rewrite_audit_events += 1
+        applied = bool(payload.get("rewrite_applied")) or _int(
+            payload.get("rewrite_applied_count")
+        ) > 0
+        if applied:
+            rewrite_applied_events += 1
+        else:
+            rewrite_fallback_events += 1
+            fallback_buckets = {
+                str(item)
+                for item in (payload.get("fallback_buckets") or [])
+                if str(item)
+            }
+            fallback_reasons = {
+                str(item)
+                for item in (payload.get("fallback_reasons") or [])
+                if str(item)
+            }
+            if "cost_gate_failed" in fallback_buckets or any(
+                "token_not_reduced" in reason for reason in fallback_reasons
+            ):
+                rewrite_cost_gate_fallbacks += 1
+            if any("contract" in bucket for bucket in fallback_buckets):
+                rewrite_contract_fallbacks += 1
+        breakdown["memory_candidate_deduplicated_count"] += _int(
+            payload.get("memory_candidate_deduplicated_fanout_count")
+            or payload.get("memory_candidate_deduplicated_count")
+        )
+        breakdown["memory_candidate_deduplicated_tokens"] += _int(
+            payload.get("memory_candidate_deduplicated_tokens")
+        )
         native, runtime, direct, prompt_view, retrieved_memory = _autogen_event_cost(
             payload
         )
         if native <= 0 and runtime <= 0:
             continue
         seen_cost_events += 1
-        applied = bool(payload.get("rewrite_applied")) or _int(
-            payload.get("rewrite_applied_count")
-        ) > 0
         if not applied:
             runtime = native
             direct = native
@@ -521,7 +562,13 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
     breakdown["shadow_potential_savings_ratio"] = (
         round(shadow_savings / shadow_native, 6) if shadow_native > 0 else 0.0
     )
-    breakdown["actual_rewrite_event_count"] = seen_cost_events
+    breakdown["rewrite_audit_event_count"] = rewrite_audit_events
+    breakdown["rewrite_costed_event_count"] = seen_cost_events
+    breakdown["rewrite_applied_event_count"] = rewrite_applied_events
+    breakdown["rewrite_fallback_event_count"] = rewrite_fallback_events
+    breakdown["rewrite_cost_gate_fallback_count"] = rewrite_cost_gate_fallbacks
+    breakdown["rewrite_contract_fallback_count"] = rewrite_contract_fallbacks
+    breakdown["actual_rewrite_event_count"] = rewrite_applied_events
     breakdown["event_count"] = seen_cost_events
     return breakdown
 

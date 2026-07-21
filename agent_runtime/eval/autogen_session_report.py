@@ -89,6 +89,8 @@ def build_autogen_session_report(request: SessionReportRequest) -> dict[str, Any
             "llm_* 优先来自 AutoGen 模型客户端 usage hook；钩子无数据且提供 --provider-usage 时，改用外部 Provider 用量文件。",
             "记忆命中、注入与有效采用是三个不同阶段；未取得下游引用证据的命中保持 unassessed。",
             "unique_retrieved_memory_tokens 统计检索候选，fanout_retrieved_memory_tokens 只统计实际注入；成本门禁拒绝候选时，后者可以更小。",
+            "rewrite_audit_event_count 是全部改写决策；rewrite_applied_event_count 是真正修改消息的次数；rewrite_fallback_event_count 是保留原生消息的次数。",
+            "memory_candidate_deduplicated_* 统计规则在候选阶段移除的上下文重复记忆，不等同于已注入或有效记忆。",
         ],
     }
 
@@ -165,6 +167,22 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
     fanout_retrieved = _int(token_summary.get("fanout_retrieved_memory_tokens"))
     shadow_native = _int(token_summary.get("shadow_native_tokens"))
     shadow_candidate = _int(token_summary.get("shadow_candidate_tokens"))
+    rewrite_audit = _int(token_summary.get("rewrite_audit_event_count"))
+    rewrite_costed = _int(token_summary.get("rewrite_costed_event_count"))
+    rewrite_applied = _int(token_summary.get("rewrite_applied_event_count"))
+    rewrite_fallback = _int(token_summary.get("rewrite_fallback_event_count"))
+    rewrite_cost_gate_fallback = _int(
+        token_summary.get("rewrite_cost_gate_fallback_count")
+    )
+    rewrite_contract_fallback = _int(
+        token_summary.get("rewrite_contract_fallback_count")
+    )
+    memory_deduplicated = _int(
+        token_summary.get("memory_candidate_deduplicated_count")
+    )
+    memory_deduplicated_tokens = _int(
+        token_summary.get("memory_candidate_deduplicated_tokens")
+    )
     shadow_savings = shadow_native - shadow_candidate if shadow_native else 0
     shadow_ratio = shadow_savings / shadow_native if shadow_native > 0 else 0.0
     savings = native - runtime if native else _int(token_summary.get("token_savings"))
@@ -174,6 +192,12 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
         _row("llm_prompt_tokens", llm_prompt, "LLM 输入 token；网页端可由 provider usage 补充"),
         _row("llm_completion_tokens", llm_completion, "LLM 输出 token；网页端可由 provider usage 补充"),
         _row("llm_total_tokens", llm_total, "LLM 实际调用总 token"),
+        _row("rewrite_audit_event_count", rewrite_audit, "进入真实改写审计的全部决策次数"),
+        _row("rewrite_costed_event_count", rewrite_costed, "具有可比较原生/运行时 Token 的改写决策次数"),
+        _row("rewrite_applied_event_count", rewrite_applied, "真正修改了 AutoGen 消息的次数"),
+        _row("rewrite_fallback_event_count", rewrite_fallback, "未修改消息并保留原生内容的次数"),
+        _row("rewrite_cost_gate_fallback_count", rewrite_cost_gate_fallback, "因候选不比原生更省而回退的次数"),
+        _row("rewrite_contract_fallback_count", rewrite_contract_fallback, "因消息结构不受支持而回退的次数"),
         _row("actual_native_transport_tokens", native, "真实改写审计覆盖范围内的原生传输成本"),
         _row("agentlite_direct_message_tokens", direct, "AgentLite 在线传输的短消息成本"),
         _row("agentlite_prompt_view_tokens", prompt_view, "下游 Agent 读取 Prompt View 的成本"),
@@ -209,6 +233,16 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
             "agentlite_fanout_retrieved_memory_tokens",
             fanout_retrieved,
             "实际改写后进入下游 Prompt View 的记忆读取 Token；可能因成本门禁少于检索候选",
+        ),
+        _row(
+            "agentlite_memory_candidate_deduplicated_count",
+            memory_deduplicated,
+            "候选构建阶段因事实已被当前上下文覆盖而移除的记忆份数",
+        ),
+        _row(
+            "agentlite_memory_candidate_deduplicated_tokens",
+            memory_deduplicated_tokens,
+            "被内容去重规则从候选 Prompt View 中移除的记忆 Token",
         ),
         _row("agentlite_control_llm_tokens", control, "控制模块 LLM 成本"),
         _row("agentlite_retry_tokens", retry, "重试带来的额外成本"),

@@ -63,7 +63,7 @@ MEMORY_SCOPE_ENV = "AGENTLITE_MEMORY_SCOPE"
 FINAL_DELIVERY_MARKER_ENV = "AGENTLITE_AUTOGEN_FINAL_MARKER"
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
 CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
-DRIVER_PHASE = "v5.13m"
+DRIVER_PHASE = "v5.13n"
 TEAM_REAL_REWRITE_DISABLED_REASON = (
     "team_level_real_rewrite_not_enabled_for_guarded_agent_input"
 )
@@ -147,6 +147,15 @@ class HookCallContext:
     display_restore_enabled: bool = False
     display_original_text: str = ""
     display_original_source: str = "user"
+
+
+@dataclass(slots=True)
+class _MemoryContextSelection:
+    refs: list[Any]
+    prompt_views: list[str]
+    candidate_count: int = 0
+    deduplicated_count: int = 0
+    deduplicated_views: list[str] = field(default_factory=list)
 
 
 class AutoGenHookManager:
@@ -2323,8 +2332,13 @@ class AutoGenHookManager:
             )
             if isinstance(view, str) and view:
                 prompt_views.append(view)
-        memory_refs = list(context.memory_context.refs)
-        memory_prompt_views = list(context.memory_context.prompt_views)
+        memory_selection = _select_nonredundant_memory_context(
+            state_prompt_views=prompt_views,
+            memory_refs=list(context.memory_context.refs),
+            memory_prompt_views=list(context.memory_context.prompt_views),
+        )
+        memory_refs = memory_selection.refs
+        memory_prompt_views = memory_selection.prompt_views
         prompt_view_text = _join_state_and_memory_views(
             prompt_views,
             memory_prompt_views,
@@ -2390,6 +2404,12 @@ class AutoGenHookManager:
                     self.token_counter,
                     "\n".join(memory_prompt_views),
                 ),
+                memory_candidate_count=memory_selection.candidate_count,
+                memory_deduplicated_count=memory_selection.deduplicated_count,
+                memory_deduplicated_tokens=_count_tokens(
+                    self.token_counter,
+                    "\n".join(memory_selection.deduplicated_views),
+                ),
             )
             return None
 
@@ -2417,6 +2437,12 @@ class AutoGenHookManager:
             retrieved_memory_tokens=_count_tokens(
                 self.token_counter,
                 "\n".join(memory_prompt_views),
+            ),
+            memory_candidate_count=memory_selection.candidate_count,
+            memory_deduplicated_count=memory_selection.deduplicated_count,
+            memory_deduplicated_tokens=_count_tokens(
+                self.token_counter,
+                "\n".join(memory_selection.deduplicated_views),
             ),
         )
         return new_args, new_kwargs
@@ -2909,6 +2935,9 @@ class AutoGenHookManager:
         wire_envelope: dict[str, Any] | None = None,
         prompt_view_text: str = "",
         retrieved_memory_tokens: int = 0,
+        memory_candidate_count: int = 0,
+        memory_deduplicated_count: int = 0,
+        memory_deduplicated_tokens: int = 0,
         rewrite_safety: dict[str, Any] | None = None,
         typed_rewrite_candidate: dict[str, Any] | None = None,
     ) -> None:
@@ -2947,6 +2976,11 @@ class AutoGenHookManager:
                 "memory_injected_count": (
                     _unique_memory_ref_count(memory_refs or []) if applied else 0
                 ),
+                "memory_candidate_count": memory_candidate_count,
+                "memory_retained_count": len(memory_refs or []),
+                "memory_candidate_deduplicated_count": memory_deduplicated_count,
+                "memory_candidate_deduplicated_tokens": memory_deduplicated_tokens,
+                "memory_deduplication_mode": "fact_overlap_rules_v1",
                 "shadow_wire_envelope": wire_envelope or {},
                 "prompt_view_available": bool(prompt_view_text.strip()),
                 "prompt_view_tokens": max(
@@ -2984,6 +3018,37 @@ class AutoGenHookManager:
         native_full_broadcast_tokens = native_tokens * len(receiver_entries)
         retrieved_memory_tokens = sum(
             int(entry.get("retrieved_memory_tokens", 0) or 0)
+            for entry in receiver_entries
+        )
+        memory_candidate_count = max(
+            (
+                int(entry.get("memory_candidate_count", 0) or 0)
+                for entry in receiver_entries
+            ),
+            default=0,
+        )
+        memory_retained_count = max(
+            (
+                int(entry.get("memory_retained_count", 0) or 0)
+                for entry in receiver_entries
+            ),
+            default=0,
+        )
+        memory_deduplicated_count = max(
+            (
+                int(
+                    entry.get("memory_candidate_deduplicated_count", 0) or 0
+                )
+                for entry in receiver_entries
+            ),
+            default=0,
+        )
+        memory_deduplicated_fanout_count = sum(
+            int(entry.get("memory_candidate_deduplicated_count", 0) or 0)
+            for entry in receiver_entries
+        )
+        memory_deduplicated_tokens = sum(
+            int(entry.get("memory_candidate_deduplicated_tokens", 0) or 0)
             for entry in receiver_entries
         )
         wire_plus_prompt_view_tokens = sum(
@@ -3031,6 +3096,16 @@ class AutoGenHookManager:
                     if applied
                     else 0
                 ),
+                "memory_candidate_count": memory_candidate_count,
+                "memory_retained_count": memory_retained_count,
+                "memory_candidate_deduplicated_count": memory_deduplicated_count,
+                "memory_candidate_deduplicated_fanout_count": (
+                    memory_deduplicated_fanout_count
+                ),
+                "memory_candidate_deduplicated_tokens": (
+                    memory_deduplicated_tokens
+                ),
+                "memory_deduplication_mode": "fact_overlap_rules_v1",
                 "retrieved_memory_tokens": retrieved_memory_tokens,
                 "receiver_count": len(receiver_entries),
                 "receiver_plans": _team_rewrite_receiver_audit(receiver_entries),
@@ -3290,9 +3365,28 @@ class AutoGenHookManager:
         state_ref_payload: list[dict[str, Any]],
         include_memory: bool = True,
     ) -> dict[str, Any]:
-        memory_refs = (
-            list(context.memory_context.refs) if include_memory else []
+        state_prompt_views = []
+        for state_ref in state_refs:
+            view = self._safe_kernel_call(
+                "autogen_broadcast_prompt_view",
+                lambda ref=state_ref: self.kernel.state_pool.render_prompt_view(
+                    ref,
+                    receiver_plan.declared_receiver,
+                ),
+            )
+            if isinstance(view, str) and view:
+                state_prompt_views.append(view)
+        memory_selection = _select_nonredundant_memory_context(
+            state_prompt_views=state_prompt_views,
+            memory_refs=(
+                list(context.memory_context.refs) if include_memory else []
+            ),
+            memory_prompt_views=(
+                list(context.memory_context.prompt_views) if include_memory else []
+            ),
         )
+        memory_refs = memory_selection.refs
+        memory_prompt_views = memory_selection.prompt_views
         envelope_json = self._safe_kernel_call(
             "autogen_build_broadcast_shadow_handoff",
             lambda: self.kernel.build_handoff(
@@ -3313,20 +3407,6 @@ class AutoGenHookManager:
         wire_envelope_json = json.dumps(
             wire_envelope, ensure_ascii=False, separators=(",", ":")
         )
-        state_prompt_views = []
-        for state_ref in state_refs:
-            view = self._safe_kernel_call(
-                "autogen_broadcast_prompt_view",
-                lambda ref=state_ref: self.kernel.state_pool.render_prompt_view(
-                    ref,
-                    receiver_plan.declared_receiver,
-                ),
-            )
-            if isinstance(view, str) and view:
-                state_prompt_views.append(view)
-        memory_prompt_views = (
-            list(context.memory_context.prompt_views) if include_memory else []
-        )
         prompt_view_text = _join_state_and_memory_views(
             state_prompt_views,
             memory_prompt_views,
@@ -3341,6 +3421,16 @@ class AutoGenHookManager:
             "memory_refs": [
                 _memory_ref_payload(ref) for ref in memory_refs
             ],
+            "memory_candidate_count": memory_selection.candidate_count,
+            "memory_retained_count": len(memory_refs),
+            "memory_candidate_deduplicated_count": (
+                memory_selection.deduplicated_count
+            ),
+            "memory_candidate_deduplicated_tokens": _count_tokens(
+                self.token_counter,
+                "\n".join(memory_selection.deduplicated_views),
+            ),
+            "memory_deduplication_mode": "fact_overlap_rules_v1",
             "shadow_wire_envelope": wire_envelope,
             "schema_valid": schema_valid,
             "shadow_wire_tokens": _count_tokens(
@@ -4717,6 +4807,104 @@ def _join_state_and_memory_views(
     return "\n".join(sections)
 
 
+def _select_nonredundant_memory_context(
+    *,
+    state_prompt_views: list[str],
+    memory_refs: list[Any],
+    memory_prompt_views: list[str],
+) -> _MemoryContextSelection:
+    selected_refs: list[Any] = []
+    selected_views: list[str] = []
+    deduplicated_views: list[str] = []
+    comparison_text = "\n".join(
+        view for view in state_prompt_views if str(view).strip()
+    )
+    for index, prompt_view in enumerate(memory_prompt_views):
+        view = str(prompt_view or "").strip()
+        if not view:
+            continue
+        if _memory_view_facts_covered(view, comparison_text):
+            deduplicated_views.append(view)
+            continue
+        selected_views.append(view)
+        if index < len(memory_refs):
+            selected_refs.append(memory_refs[index])
+        comparison_text = f"{comparison_text}\n{view}".strip()
+    return _MemoryContextSelection(
+        refs=selected_refs,
+        prompt_views=selected_views,
+        candidate_count=len([view for view in memory_prompt_views if str(view).strip()]),
+        deduplicated_count=len(deduplicated_views),
+        deduplicated_views=deduplicated_views,
+    )
+
+
+def _memory_view_facts_covered(memory_prompt_view: str, context_text: str) -> bool:
+    if not context_text.strip():
+        return False
+    body = _memory_view_body(memory_prompt_view)
+    body_normalized = _normalize_fact_text(body)
+    context_normalized = _normalize_fact_text(context_text)
+    if len(body_normalized) >= 12 and body_normalized in context_normalized:
+        return True
+
+    memory_units = _fact_units(body)
+    context_units = _fact_units(context_text)
+    if not memory_units or not context_units:
+        return False
+    covered_weight = 0
+    total_weight = sum(len(unit) for unit in memory_units)
+    for unit in memory_units:
+        if any(_fact_unit_covered(unit, candidate) for candidate in context_units):
+            covered_weight += len(unit)
+    return total_weight >= 24 and (covered_weight / total_weight) >= 0.85
+
+
+def _memory_view_body(prompt_view: str) -> str:
+    body = re.sub(r"^\[memory_view:[^\]]+\]\s*", "", prompt_view.strip())
+    body = re.sub(r"^slot=[^;]*;\s*", "", body)
+    body = re.sub(r"^claim=[^;]*;\s*", "", body)
+    body = re.sub(r";\s*tags=\[[^\]]*\]\s*$", "", body)
+    return body.strip()
+
+
+def _fact_units(text: str) -> list[str]:
+    without_markdown = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", text)
+    parts = re.split(r"(?:\r?\n)+|(?<=[。！？!?；;])", without_markdown)
+    units = [_normalize_fact_text(part) for part in parts]
+    return [unit for unit in units if len(unit) >= 8]
+
+
+def _normalize_fact_text(text: str) -> str:
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", text.casefold())
+
+
+def _fact_unit_covered(memory_unit: str, context_unit: str) -> bool:
+    if memory_unit in context_unit:
+        return True
+    if len(memory_unit) < 16 or len(context_unit) < 16:
+        return False
+    if _number_signature(memory_unit) != _number_signature(context_unit):
+        return False
+    memory_grams = _character_ngrams(memory_unit, size=3)
+    context_grams = _character_ngrams(context_unit, size=3)
+    if not memory_grams or not context_grams:
+        return False
+    forward = len(memory_grams & context_grams) / len(memory_grams)
+    reverse = len(memory_grams & context_grams) / len(context_grams)
+    return forward >= 0.92 and reverse >= 0.78
+
+
+def _number_signature(text: str) -> tuple[str, ...]:
+    return tuple(re.findall(r"\d+(?:\.\d+)?", text))
+
+
+def _character_ngrams(text: str, *, size: int) -> set[str]:
+    if len(text) < size:
+        return {text} if text else set()
+    return {text[index : index + size] for index in range(len(text) - size + 1)}
+
+
 def _build_chronology_prompt_view(
     messages: list[Any],
     *,
@@ -4994,6 +5182,18 @@ def _team_rewrite_receiver_audit(
                 "state_ref_count": len(entry.get("state_refs", []) or []),
                 "memory_ref_count": len(entry.get("memory_refs", []) or []),
                 "memory_refs": entry.get("memory_refs", []) or [],
+                "memory_candidate_count": int(
+                    entry.get("memory_candidate_count", 0) or 0
+                ),
+                "memory_retained_count": int(
+                    entry.get("memory_retained_count", 0) or 0
+                ),
+                "memory_candidate_deduplicated_count": int(
+                    entry.get("memory_candidate_deduplicated_count", 0) or 0
+                ),
+                "memory_candidate_deduplicated_tokens": int(
+                    entry.get("memory_candidate_deduplicated_tokens", 0) or 0
+                ),
                 "prompt_view_preview": entry.get("prompt_view_preview", ""),
             }
         )

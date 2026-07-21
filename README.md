@@ -2,7 +2,7 @@
 
 本仓库用于迭代实现一个面向多 Agent 协作的跨框架运行时工具层，目标是在多 Agent 任务中通过结构化通信、非文本状态传递和共享记忆复用降低协作开销。
 
-当前开发版本：`v5.13m chronology-aware rewrite + grounded final delivery`
+当前开发版本：`v5.13n context deduplication + rewrite outcome metrics`
 
 最新发行包门禁版本：`v5.13h package release gate`
 
@@ -61,7 +61,12 @@
 - [docs/experiments/v5.13k-termination-memory-accounting-root-cause.md](docs/experiments/v5.13k-termination-memory-accounting-root-cause.md)
 - [docs/experiments/v5.13m-chronology-grounding-results.md](docs/experiments/v5.13m-chronology-grounding-results.md)
 - [docs/experiments/v5.13m-openeuler-acceptance-20260720.md](docs/experiments/v5.13m-openeuler-acceptance-20260720.md)
+- [docs/experiments/v5.13n-context-dedup-rewrite-metrics.md](docs/experiments/v5.13n-context-dedup-rewrite-metrics.md)
 - [docs/release/v5.12z-final-release-notes.md](docs/release/v5.12z-final-release-notes.md)
+
+## v5.13n Current Note
+
+`v5.13n` removes a shared MemoryView from the candidate Prompt View when its factual content is already covered by the current task, user history, or latest upstream artifact. The same memory reference is removed from the SHP envelope, while memories with new facts or changed numeric values remain available. The rule is local and deterministic; it does not call an LLM. Session reports now distinguish all rewrite audit decisions, costed decisions, successful mutations, fallbacks, cost-gate fallbacks, and message-contract fallbacks. Replaying the latest openEuler smoke trace now correctly reports 34 audit decisions, 8 costed decisions, 0 successful rewrites, 8 cost-gate fallbacks, and 26 contract fallbacks. The full suite passes 177 tests and the release gate passes all eight steps.
 
 ## v5.13m Current Note
 

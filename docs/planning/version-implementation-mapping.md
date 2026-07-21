@@ -3414,6 +3414,37 @@ git diff --check: true
 docs/experiments/v5.13m-openeuler-acceptance-20260720.md
 ```
 
+## 52. v5.13n 上下文去重与改写结果口径（2026-07-21）
+
+### 52.1 通用实现
+
+Agent 输入与 Team 广播候选在追加共享记忆前，先比较 MemoryView 的事实正文是否已被当前任务、用户历史或最新上游成果覆盖。完全覆盖的记忆同时从 Prompt View 和 SHP `memory_refs` 移除；包含新事实或不同数字的记忆继续保留。规则使用本地文本归一化、事实片段和字符三元组覆盖，不调用 LLM，也不包含 Question A 领域逻辑。
+
+### 52.2 指标校准
+
+Session 报告新增：
+
+```text
+rewrite_audit_event_count
+rewrite_costed_event_count
+rewrite_applied_event_count
+rewrite_fallback_event_count
+rewrite_cost_gate_fallback_count
+rewrite_contract_fallback_count
+memory_candidate_deduplicated_count
+memory_candidate_deduplicated_tokens
+```
+
+`actual_rewrite_event_count` 从 v5.13n 起只表示真正成功修改消息的次数。使用新报告器回放 openEuler 第二次会话得到：34 次审计、8 次有成本决策、0 次成功改写、34 次回退，其中 8 次成本门禁回退、26 次结构回退。
+
+最终发行门禁 8 / 8 通过，177 项测试通过。确定性 Team 基准保持调用方可见 Token 为 2,071，同时把内部任务 Token 降至 1,042、三接收者广播成本降至 894，质量检查保持 12 / 12。
+
+完整报告：
+
+```text
+docs/experiments/v5.13n-context-dedup-rewrite-metrics.md
+```
+
 ## 42. v5.13m 普通开发者有状态三组公平实验（2026-07-20）
 
 本轮已在同一 MiMo 模型、同一 AutoGen Team、同一 A1-A10 连续任务链上完成：

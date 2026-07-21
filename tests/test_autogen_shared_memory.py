@@ -8,10 +8,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_runtime.bootstrap.startup import BootstrapContext
+from agent_runtime.core.kernel import MemoryContext
 from agent_runtime.drivers.autogen import (
     AutoGenHookManager,
     SHARED_MEMORY_MARKER,
+    _memory_view_facts_covered,
 )
+from agent_runtime.memory.memory_store import MemoryRef
 
 
 @dataclass
@@ -39,6 +42,16 @@ class FakeAgent:
 
 
 class AutoGenSharedMemoryTest(unittest.TestCase):
+    def test_memory_fact_dedup_keeps_conflicting_numeric_revision(self) -> None:
+        context = "当前方案总预算为2600元，住宿费用为900元。"
+        memory_view = (
+            "[memory_view:view_budget] slot=slot.system.deliverable_requirement; "
+            "claim=claim_budget; 当前方案总预算为2800元，住宿费用为900元； "
+            "tags=[budget]"
+        )
+
+        self.assertFalse(_memory_view_facts_covered(memory_view, context))
+
     def test_real_rewrite_prioritizes_current_task_and_latest_upstream_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -119,6 +132,153 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                 self.assertGreater(
                     rewrite["payload"]["native_input_tokens"],
                     rewrite["payload"]["rewritten_input_tokens"],
+                )
+
+    def test_real_rewrite_removes_memory_already_covered_by_latest_upstream(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = {
+                "AGENTLITE_AUTOGEN_BROADCAST_MODE": "real-rewrite",
+                "AGENTLITE_AUTOGEN_TEAM_REWRITE": "1",
+                "AGENTLITE_AUTOGEN_SHARED_MEMORY": "1",
+                "AGENTLITE_MEMORY_SCOPE": "memory-dedup-test",
+            }
+            with patch.dict("os.environ", env, clear=False):
+                manager = AutoGenHookManager(self._context(root, "launch_dedup"))
+                current_task = "基于最新完整草案检查预算并给出最终答复。"
+                latest_writer = (
+                    "最新完整草案：总预算为2800元。第一天安排自然步道和本地餐饮；"
+                    "第二天安排轻徒步并避开拥挤景点；第三天返程。"
+                )
+                messages = [
+                    {
+                        "type": "TextMessage",
+                        "content": "已经过时的旧草案" + ("旧内容" * 1800),
+                        "source": "reviewer",
+                    },
+                    {
+                        "type": "TextMessage",
+                        "content": current_task,
+                        "source": "user",
+                    },
+                    {
+                        "type": "TextMessage",
+                        "content": latest_writer,
+                        "source": "writer",
+                    },
+                ]
+                context = manager.record_call_start(
+                    instance=FakeAgent(),
+                    method_name="on_messages_stream",
+                    target_kind="agentchat_agent",
+                    args=(messages,),
+                    kwargs={},
+                )
+                context.memory_context = MemoryContext(
+                    refs=[
+                        MemoryRef(
+                            memory_id="mem_duplicate",
+                            version_id=1,
+                            status="active",
+                            task_topic="generic.final_deliverable",
+                            memory_view_id="view_duplicate",
+                            slot_id="slot.system.deliverable_requirement",
+                        )
+                    ],
+                    prompt_views=[
+                        "[memory_view:view_duplicate] "
+                        "slot=slot.system.deliverable_requirement; "
+                        f"claim=claim_duplicate; {latest_writer}; tags=[final]"
+                    ],
+                )
+
+                rewritten_args, _ = manager.rewrite_call_arguments_if_safe(
+                    context,
+                    (messages,),
+                    {},
+                )
+
+                rewritten = rewritten_args[0][0]["content"]
+                self.assertIn(latest_writer, rewritten)
+                self.assertNotIn(SHARED_MEMORY_MARKER, rewritten)
+                self.assertNotIn("mem_duplicate", rewritten)
+                events = self._events(manager.output_dir / "trace.jsonl")
+                rewrite = next(
+                    item
+                    for item in reversed(events)
+                    if item.get("event_type") == "autogen_agent_input_real_rewrite"
+                    and item.get("payload", {}).get("call_id") == context.call_id
+                )
+                payload = rewrite["payload"]
+                self.assertTrue(payload["rewrite_applied"])
+                self.assertEqual(payload["memory_candidate_count"], 1)
+                self.assertEqual(payload["memory_retained_count"], 0)
+                self.assertEqual(payload["memory_candidate_deduplicated_count"], 1)
+                self.assertGreater(payload["memory_candidate_deduplicated_tokens"], 0)
+
+    def test_team_rewrite_removes_memory_already_covered_by_current_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = {
+                "AGENTLITE_AUTOGEN_BROADCAST_MODE": "real-rewrite",
+                "AGENTLITE_AUTOGEN_TEAM_REWRITE": "1",
+                "AGENTLITE_AUTOGEN_SHARED_MEMORY": "1",
+                "AGENTLITE_MEMORY_SCOPE": "team-memory-dedup-test",
+            }
+            with patch.dict("os.environ", env, clear=False):
+                manager = AutoGenHookManager(self._context(root, "launch_team_dedup"))
+                covered_fact = "当前需求已确认总预算为3000元并偏好自然风景。"
+                task = covered_fact + ("请依据完整约束继续形成可执行方案。" * 180)
+                context = manager.record_call_start(
+                    instance=FakeTeam(),
+                    method_name="run_stream",
+                    target_kind="agentchat_team",
+                    args=(),
+                    kwargs={"task": task},
+                )
+                context.memory_context = MemoryContext(
+                    refs=[
+                        MemoryRef(
+                            memory_id="mem_team_duplicate",
+                            version_id=1,
+                            status="active",
+                            task_topic="generic.requirement",
+                            memory_view_id="view_team_duplicate",
+                            slot_id="slot.project.requirement",
+                        )
+                    ],
+                    prompt_views=[
+                        "[memory_view:view_team_duplicate] "
+                        "slot=slot.project.requirement; claim=claim_team_duplicate; "
+                        f"{covered_fact}; tags=[requirement]"
+                    ],
+                )
+
+                _, rewritten_kwargs = manager.rewrite_call_arguments_if_safe(
+                    context,
+                    (),
+                    {"task": task},
+                )
+
+                rewritten = rewritten_kwargs["task"]
+                self.assertIn("AGENTLITE_TEAM_REAL_REWRITE v1", rewritten)
+                self.assertNotIn(SHARED_MEMORY_MARKER, rewritten)
+                self.assertNotIn("mem_team_duplicate", rewritten)
+                events = self._events(manager.output_dir / "trace.jsonl")
+                rewrite = next(
+                    item
+                    for item in reversed(events)
+                    if item.get("event_type") == "autogen_team_input_real_rewrite"
+                    and item.get("payload", {}).get("call_id") == context.call_id
+                )
+                payload = rewrite["payload"]
+                self.assertTrue(payload["rewrite_applied"])
+                self.assertEqual(payload["memory_candidate_count"], 1)
+                self.assertEqual(payload["memory_retained_count"], 0)
+                self.assertEqual(payload["memory_candidate_deduplicated_count"], 1)
+                self.assertEqual(
+                    payload["memory_candidate_deduplicated_fanout_count"],
+                    3,
                 )
 
     def test_review_only_team_output_is_rejected_from_long_term_memory(self) -> None:
