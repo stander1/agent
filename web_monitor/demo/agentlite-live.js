@@ -485,14 +485,18 @@
   }
 
   async function refreshLiveData({ keepSelection }) {
-    const [sessionsResult, runsResult] = await Promise.allSettled([
+    const [sessionsResult, frameworkRunsResult, runsResult] = await Promise.allSettled([
       apiJson("/api/sessions"),
+      apiJson("/api/framework-runs"),
       apiJson("/api/runs")
     ]);
     const sessions = sessionsResult.status === "fulfilled" ? sessionsResult.value.sessions || [] : [];
+    const frameworkRuns = frameworkRunsResult.status === "fulfilled" ? frameworkRunsResult.value.runs || [] : [];
     const runs = runsResult.status === "fulfilled" ? runsResult.value.runs || [] : [];
+    const sessionsWithRuns = new Set(frameworkRuns.map((run) => String(run.session_id || "")));
     tasks = [
-      ...sessions.map(taskFromSession),
+      ...frameworkRuns.map(taskFromFrameworkRun),
+      ...sessions.filter((session) => !sessionsWithRuns.has(String(session.session_id || ""))).map(taskFromSession),
       ...runs.map(taskFromRun)
     ].sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0));
 
@@ -524,6 +528,9 @@
   async function snapshotForTask(task) {
     if (!task || task.sourceKind === "none") {
       return null;
+    }
+    if (task.sourceKind === "framework-run") {
+      return apiJson(`/api/sessions/${encodeURIComponent(task.sourceSessionId)}/runs/${encodeURIComponent(task.sourceId)}/snapshot`);
     }
     const prefix = task.sourceKind === "session" ? "sessions" : "runs";
     return apiJson(`/api/${prefix}/${encodeURIComponent(task.sourceId)}/snapshot`);
@@ -614,6 +621,32 @@
       alerts: 0,
       sourceKind: "run",
       sourceId: run.run_id,
+      updatedAt
+    };
+    return applyTokenSummaryToTask(task, run.token_summary);
+  }
+
+  function taskFromFrameworkRun(run) {
+    const updatedAt = Number(run.updated_at || 0);
+    const label = run.task_preview || (run.studio_run_id ? `AutoGen Studio Run ${run.studio_run_id}` : run.framework_run_id);
+    const status = normalizeStatus(run.status);
+    const task = {
+      id: `framework-run:${run.session_id}:${run.framework_run_id}`,
+      question: label,
+      group: run.studio_session_name || "AutoGen managed run",
+      mode: "runtime_lite",
+      status,
+      progress: status === "success" ? 100 : status === "failed" ? 20 : 70,
+      agents: 0,
+      duration: 0,
+      tokens: 0,
+      memoryHits: 0,
+      startedAt: formatTimestamp(updatedAt),
+      alerts: status === "failed" ? 1 : 0,
+      sourceKind: "framework-run",
+      sourceId: run.framework_run_id,
+      sourceSessionId: run.session_id,
+      studioRunId: run.studio_run_id || "",
       updatedAt
     };
     return applyTokenSummaryToTask(task, run.token_summary);
@@ -1433,8 +1466,9 @@
 
   function dataSourceFoot() {
     const sessions = tasks.filter((task) => task.sourceKind === "session").length;
+    const frameworkRuns = tasks.filter((task) => task.sourceKind === "framework-run").length;
     const runs = tasks.filter((task) => task.sourceKind === "run").length;
-    return `${sessions} 会话 / ${runs} 实验`;
+    return `${frameworkRuns} 任务 / ${sessions} 会话 / ${runs} 实验`;
   }
 
   function updateBadges() {

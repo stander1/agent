@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -194,23 +195,82 @@ def list_sessions(data_dir: Path) -> list[dict[str, Any]]:
     return sessions
 
 
+def list_framework_runs(data_dir: Path) -> list[dict[str, Any]]:
+    runs: list[dict[str, Any]] = []
+    for session in list_sessions(data_dir):
+        session_id = str(session.get("session_id") or "")
+        session_path = Path(str(session.get("path") or ""))
+        trace_path = session_path / "autogen_driver" / "trace.jsonl"
+        events = _read_jsonl(trace_path)
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for event in events:
+            framework_run_id = _event_framework_run_id(event)
+            if framework_run_id:
+                grouped.setdefault(framework_run_id, []).append(event)
+        for framework_run_id, run_events in grouped.items():
+            details = _framework_run_details(run_events)
+            updated_at = _iso_timestamp(
+                details.get("finished_at") or details.get("started_at")
+            )
+            if updated_at <= 0 and trace_path.exists():
+                updated_at = trace_path.stat().st_mtime
+            runs.append(
+                {
+                    "run_id": framework_run_id,
+                    "framework_run_id": framework_run_id,
+                    "session_id": session_id,
+                    "source": details.get("framework_run_source") or "",
+                    "studio_run_id": details.get("studio_run_id") or "",
+                    "studio_session_id": details.get("studio_session_id") or "",
+                    "studio_team_id": details.get("studio_team_id") or "",
+                    "studio_session_name": details.get("studio_session_name") or "",
+                    "task_preview": details.get("task_preview") or "",
+                    "status": details.get("status") or "running",
+                    "event_count": len(run_events),
+                    "token_summary": _autogen_token_summary(run_events),
+                    "updated_at": updated_at,
+                }
+            )
+    runs.sort(
+        key=lambda item: (item["updated_at"], item["framework_run_id"]),
+        reverse=True,
+    )
+    return runs
+
+
 def build_session_snapshot(
     session_dir: Path,
     *,
     session_id: str | None = None,
+    framework_run_id: str | None = None,
 ) -> dict[str, Any]:
     status = _read_json(session_dir / "bootstrap_status.json", default={})
     launch = _read_json(session_dir / "launch.json", default={})
     trace_path = session_dir / "autogen_driver" / "trace.jsonl"
     trace_events = _read_jsonl(trace_path)
+    if framework_run_id:
+        trace_events = [
+            event
+            for event in trace_events
+            if _event_framework_run_id(event) == framework_run_id
+        ]
+        if not trace_events:
+            raise FileNotFoundError(
+                f"Framework run {framework_run_id!r} was not found in {trace_path}"
+            )
     session_id = session_id or str(
         status.get("session_id") or launch.get("session_id") or session_dir.name
     )
     mode_view = _empty_mode_snapshot()
+    run_details = _framework_run_details(trace_events)
+    visible_run_id = framework_run_id or session_id
     mode_view["task"] = {
-        "task_id": session_id,
+        "task_id": visible_run_id,
         "round_id": 1,
-        "title": f"AgentLite AutoGen session {session_id}",
+        "title": (
+            run_details.get("task_preview")
+            or f"AgentLite AutoGen session {session_id}"
+        ),
     }
     state_pool: list[dict[str, Any]] = []
     event_counts: dict[str, int] = {}
@@ -241,16 +301,30 @@ def build_session_snapshot(
     mode_view["memory_graph"] = _state_only_graph(state_pool)
     _finalize_agents(mode_view)
     return {
-        "run_id": session_id,
+        "run_id": visible_run_id,
+        "framework_run_id": framework_run_id or "",
+        "framework_run_source": run_details.get("framework_run_source") or "",
+        "studio_run_id": run_details.get("studio_run_id") or "",
+        "studio_session_id": run_details.get("studio_session_id") or "",
+        "studio_team_id": run_details.get("studio_team_id") or "",
+        "studio_session_name": run_details.get("studio_session_name") or "",
         "session_id": session_id,
-        "status": _session_status(status, trace_events),
+        "status": (
+            run_details.get("status")
+            if framework_run_id
+            else _session_status(status, trace_events)
+        ),
         "output_dir": str(session_dir),
         "modes": {
             "baseline_text": _empty_mode_snapshot(),
             "runtime_lite": mode_view,
         },
         "summary": {
-            "kind": "agentlite_autogen_session",
+            "kind": (
+                "agentlite_autogen_framework_run"
+                if framework_run_id
+                else "agentlite_autogen_session"
+            ),
             "framework": status.get("framework") or launch.get("framework") or "",
             "driver": status.get("driver") or "",
             "driver_status": status.get("driver_status") or "",
@@ -284,6 +358,52 @@ def build_session_snapshot(
         "bootstrap_status": status,
         "launch": launch,
     }
+
+
+def _event_framework_run_id(event: dict[str, Any]) -> str:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    return str(payload.get("framework_run_id") or "").strip()
+
+
+def _framework_run_details(events: list[dict[str, Any]]) -> dict[str, Any]:
+    details: dict[str, Any] = {}
+    for event in events:
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        for key in (
+            "framework_run_id",
+            "framework_run_source",
+            "studio_run_id",
+            "studio_session_id",
+            "studio_team_id",
+            "studio_session_name",
+            "studio_database_path",
+        ):
+            if payload.get(key) and not details.get(key):
+                details[key] = payload[key]
+        event_type = str(event.get("event_type") or "")
+        if event_type == "autogen_framework_run_started":
+            details["status"] = "running"
+            details["started_at"] = payload.get("started_at") or event.get("ts")
+            details["task_preview"] = payload.get("task_preview") or ""
+            details["team_participants"] = payload.get("team_participants") or []
+        elif event_type == "autogen_framework_run_finished":
+            details["status"] = payload.get("status") or "completed"
+            details["finished_at"] = payload.get("finished_at") or event.get("ts")
+            details["error_type"] = payload.get("error_type") or ""
+            details["error"] = payload.get("error") or ""
+    if not details.get("status"):
+        details["status"] = "running"
+    return details
+
+
+def _iso_timestamp(value: Any) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
 
 
 def _summary_token_summary(summary: dict[str, Any]) -> dict[str, Any]:

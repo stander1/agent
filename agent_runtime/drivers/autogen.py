@@ -15,10 +15,19 @@ import time
 from copy import copy as shallow_copy
 from dataclasses import dataclass, field, is_dataclass
 from dataclasses import replace as dataclass_replace
+from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, Iterable
 
+from agent_runtime.adapters.autogen_studio import (
+    FrameworkRunBinding,
+    activate_run_binding,
+    configured_studio_appdir,
+    current_run_binding,
+    enrich_studio_binding,
+    reset_run_binding,
+)
 from agent_runtime.core.kernel import AgentDescriptor, CollaborationKernel, MemoryContext
 from agent_runtime.core.models import AgentOutput, TaskSpec
 from agent_runtime.drivers.autogen_codec import AutoGenMessageCodec
@@ -63,7 +72,7 @@ MEMORY_SCOPE_ENV = "AGENTLITE_MEMORY_SCOPE"
 FINAL_DELIVERY_MARKER_ENV = "AGENTLITE_AUTOGEN_FINAL_MARKER"
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
 CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
-DRIVER_PHASE = "v5.13o"
+DRIVER_PHASE = "v5.13p"
 TEAM_REAL_REWRITE_DISABLED_REASON = (
     "team_level_real_rewrite_not_enabled_for_guarded_agent_input"
 )
@@ -139,6 +148,7 @@ class HookCallContext:
     agent: AgentDescriptor
     method_name: str
     target_kind: str
+    run_binding: FrameworkRunBinding | None = None
     team_participants: tuple[str, ...] = ()
     transport_metadata: dict[str, Any] = field(default_factory=dict)
     memory_context: MemoryContext = field(
@@ -166,6 +176,7 @@ class AutoGenHookManager:
         self.session_dir = context.status_file.parent
         self.output_dir = self.session_dir / "autogen_driver"
         self.trace = TraceLogger(self.output_dir)
+        self.trace.set_context_provider(self._trace_run_context)
         self.metrics = MetricsCollector()
         self.token_counter = TokenCounter(allow_estimate=True)
         self.codec = AutoGenMessageCodec()
@@ -194,6 +205,7 @@ class AutoGenHookManager:
             or "FINAL_ANSWER_READY"
         )
         self.memory_scope_id = _resolve_memory_scope_id(context)
+        self.studio_appdir = configured_studio_appdir()
         memory_store = (
             MemoryStoreLite(
                 context.data_dir
@@ -226,6 +238,8 @@ class AutoGenHookManager:
                 "shared_memory_enabled": self.shared_memory_enabled,
                 "memory_scope_id": self.memory_scope_id,
                 "final_delivery_marker": self.final_delivery_marker,
+                "studio_appdir": str(self.studio_appdir or ""),
+                "framework_run_binding": "contextvar",
             },
         )
         self._sequence = 0
@@ -238,6 +252,8 @@ class AutoGenHookManager:
         self._core_response_rewrite_depth = 0
         self._patched_methods: set[str] = set()
         self._patched_modules: set[str] = set()
+        self._run_binding_cache: dict[str, FrameworkRunBinding] = {}
+        self._active_run_calls: dict[str, dict[str, Any]] = {}
         self._import_finder = AutoGenImportFinder(self)
 
     @property
@@ -247,6 +263,119 @@ class AutoGenHookManager:
     @property
     def patched_modules(self) -> list[str]:
         return sorted(self._patched_modules)
+
+    def _trace_run_context(self) -> dict[str, Any]:
+        binding = current_run_binding()
+        return binding.trace_fields() if binding is not None else {}
+
+    def _resolve_call_run_binding(
+        self,
+        *,
+        target_kind: str,
+        call_id: str,
+    ) -> FrameworkRunBinding | None:
+        binding = current_run_binding()
+        if binding is None and target_kind == "agentchat_team":
+            binding = FrameworkRunBinding(
+                framework_run_id=f"autogen:{call_id}",
+                source="agentlite_team_call",
+            )
+        if binding is None:
+            return None
+        with self._lock:
+            cached = self._run_binding_cache.get(binding.framework_run_id)
+        if cached is not None:
+            return cached
+        enriched = enrich_studio_binding(binding, appdir=self.studio_appdir)
+        with self._lock:
+            self._run_binding_cache[enriched.framework_run_id] = enriched
+        return enriched
+
+    def _record_framework_run_start(self, context: HookCallContext) -> None:
+        binding = context.run_binding
+        if context.target_kind != "agentchat_team" or binding is None:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            active = self._active_run_calls.get(binding.framework_run_id)
+            if active is not None:
+                active["depth"] = int(active.get("depth", 0)) + 1
+                return
+            manifest = {
+                "schema_version": "agentlite.framework_run.v1",
+                "agentlite_session_id": self.context.session_id,
+                **binding.trace_fields(),
+                "status": "running",
+                "started_at": now,
+                "finished_at": "",
+                "root_call_id": context.call_id,
+                "team_method": context.method_name,
+                "team_agent_id": context.agent.agent_id,
+                "team_participants": list(context.team_participants),
+                "task_preview": _preview(context.task.prompt),
+                "error_type": "",
+                "error": "",
+            }
+            self._active_run_calls[binding.framework_run_id] = {
+                "depth": 1,
+                "manifest": manifest,
+                "failed": False,
+            }
+        self.trace.write("autogen_framework_run_started", dict(manifest))
+        self._write_framework_run_manifest(binding.framework_run_id, manifest)
+
+    def _record_framework_run_end(
+        self,
+        context: HookCallContext | None,
+        *,
+        error: BaseException | None = None,
+    ) -> None:
+        if context is None or context.target_kind != "agentchat_team":
+            return
+        binding = context.run_binding
+        if binding is None:
+            return
+        finished: dict[str, Any] | None = None
+        with self._lock:
+            active = self._active_run_calls.get(binding.framework_run_id)
+            if active is None:
+                return
+            if error is not None:
+                active["failed"] = True
+                active["error_type"] = type(error).__name__
+                active["error"] = str(error)
+            active["depth"] = max(0, int(active.get("depth", 1)) - 1)
+            if active["depth"] > 0:
+                return
+            manifest = dict(active["manifest"])
+            failed = bool(active.get("failed"))
+            manifest.update(
+                {
+                    "status": "failed" if failed else "completed",
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                    "error_type": str(active.get("error_type") or ""),
+                    "error": str(active.get("error") or ""),
+                }
+            )
+            finished = manifest
+            self._active_run_calls.pop(binding.framework_run_id, None)
+        self.trace.write("autogen_framework_run_finished", dict(finished))
+        self._write_framework_run_manifest(binding.framework_run_id, finished)
+
+    def _write_framework_run_manifest(
+        self,
+        framework_run_id: str,
+        manifest: dict[str, Any],
+    ) -> None:
+        run_dir = self.output_dir / "runs" / _filesystem_identifier(framework_run_id)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        target = run_dir / "run.json"
+        temporary = target.with_suffix(".json.tmp")
+        temporary.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temporary.replace(target)
 
     def _prepare_shared_memory_context(
         self,
@@ -463,6 +592,7 @@ class AutoGenHookManager:
                 "supported_module_roots": list(SUPPORTED_MODULE_ROOTS),
                 "patch_targets": PATCH_TARGETS,
                 "broadcast_mode": self.broadcast_mode,
+                "phase": DRIVER_PHASE,
             },
         )
 
@@ -500,6 +630,10 @@ class AutoGenHookManager:
         kwargs: dict[str, Any],
     ) -> HookCallContext:
         call_id = self._next_call_id()
+        run_binding = self._resolve_call_run_binding(
+            target_kind=target_kind,
+            call_id=call_id,
+        )
         agent = self.describe_agent(instance, target_kind=target_kind)
         team_participants = self.describe_team_participants(
             instance,
@@ -570,6 +704,7 @@ class AutoGenHookManager:
             agent=agent,
             method_name=method_name,
             target_kind=target_kind,
+            run_binding=run_binding,
             team_participants=team_participants,
             transport_metadata=(
                 _core_transport_metadata(
@@ -588,6 +723,7 @@ class AutoGenHookManager:
             ),
             memory_context=memory_context,
         )
+        self._record_framework_run_start(hook_context)
         self._safe_kernel_call(
             "before_agent_receive",
             lambda: self.kernel.before_agent_receive(
@@ -622,6 +758,7 @@ class AutoGenHookManager:
                 "decoded_messages": [
                     message.to_dict() for message in decoded_messages
                 ],
+                **(run_binding.trace_fields() if run_binding is not None else {}),
             },
         )
         self._record_team_broadcast_input_state(
@@ -770,6 +907,7 @@ class AutoGenHookManager:
             state_ref_payload=state_ref_payload,
             native_scope="team_output",
         )
+        self._record_framework_run_end(context)
 
     def _record_shadow_handoff(
         self,
@@ -3461,8 +3599,14 @@ class AutoGenHookManager:
                 "call_id": context.call_id if context else "",
                 "error_type": type(error).__name__,
                 "error": str(error),
+                **(
+                    context.run_binding.trace_fields()
+                    if context is not None and context.run_binding is not None
+                    else {}
+                ),
             },
         )
+        self._record_framework_run_end(context, error=error)
 
     def record_model_client_usage(
         self,
@@ -3638,6 +3782,7 @@ class AutoGenHookManager:
             @functools.wraps(original)
             async def asyncgen_wrapper(instance: object, *args: Any, **kwargs: Any):
                 context: HookCallContext | None = None
+                run_binding_token = None
                 last_item: Any = None
                 try:
                     context = self.record_call_start(
@@ -3647,6 +3792,7 @@ class AutoGenHookManager:
                         args=args,
                         kwargs=kwargs,
                     )
+                    run_binding_token = activate_run_binding(context.run_binding)
                     args, kwargs = self.rewrite_call_arguments_if_safe(
                         context,
                         args,
@@ -3660,6 +3806,9 @@ class AutoGenHookManager:
                 except Exception as exc:
                     self.record_call_error(context, exc)
                     raise
+                finally:
+                    if run_binding_token is not None:
+                        reset_run_binding(run_binding_token)
 
             setattr(asyncgen_wrapper, "__agentlite_wrapped__", True)
             return asyncgen_wrapper
@@ -3671,6 +3820,7 @@ class AutoGenHookManager:
                 instance: object, *args: Any, **kwargs: Any
             ) -> Any:
                 context: HookCallContext | None = None
+                run_binding_token = None
                 send_message_entered = False
                 response_rewrite_enabled = False
                 try:
@@ -3681,6 +3831,7 @@ class AutoGenHookManager:
                         args=args,
                         kwargs=kwargs,
                     )
+                    run_binding_token = activate_run_binding(context.run_binding)
                     args, kwargs = self.rewrite_call_arguments_if_safe(
                         context,
                         args,
@@ -3714,6 +3865,9 @@ class AutoGenHookManager:
                         )
                     self.record_call_error(context, exc)
                     raise
+                finally:
+                    if run_binding_token is not None:
+                        reset_run_binding(run_binding_token)
 
             setattr(coroutine_wrapper, "__agentlite_wrapped__", True)
             return coroutine_wrapper
@@ -3723,6 +3877,7 @@ class AutoGenHookManager:
             @functools.wraps(original)
             def generator_wrapper(instance: object, *args: Any, **kwargs: Any):
                 context: HookCallContext | None = None
+                run_binding_token = None
                 last_item: Any = None
                 try:
                     context = self.record_call_start(
@@ -3732,6 +3887,7 @@ class AutoGenHookManager:
                         args=args,
                         kwargs=kwargs,
                     )
+                    run_binding_token = activate_run_binding(context.run_binding)
                     args, kwargs = self.rewrite_call_arguments_if_safe(
                         context,
                         args,
@@ -3745,6 +3901,9 @@ class AutoGenHookManager:
                 except Exception as exc:
                     self.record_call_error(context, exc)
                     raise
+                finally:
+                    if run_binding_token is not None:
+                        reset_run_binding(run_binding_token)
 
             setattr(generator_wrapper, "__agentlite_wrapped__", True)
             return generator_wrapper
@@ -3752,6 +3911,7 @@ class AutoGenHookManager:
         @functools.wraps(original)
         def sync_wrapper(instance: object, *args: Any, **kwargs: Any) -> Any:
             context: HookCallContext | None = None
+            run_binding_token = None
             try:
                 context = self.record_call_start(
                     instance=instance,
@@ -3760,6 +3920,7 @@ class AutoGenHookManager:
                     args=args,
                     kwargs=kwargs,
                 )
+                run_binding_token = activate_run_binding(context.run_binding)
                 args, kwargs = self.rewrite_call_arguments_if_safe(
                     context,
                     args,
@@ -3771,6 +3932,9 @@ class AutoGenHookManager:
             except Exception as exc:
                 self.record_call_error(context, exc)
                 raise
+            finally:
+                if run_binding_token is not None:
+                    reset_run_binding(run_binding_token)
 
         setattr(sync_wrapper, "__agentlite_wrapped__", True)
         return sync_wrapper
@@ -4056,6 +4220,11 @@ def activate(context: BootstrapContext) -> DriverActivation:
             "memory_store_dir": str(
                 manager.kernel.memory_store.storage_dir or ""
             ),
+            "studio_appdir": str(manager.studio_appdir or ""),
+            "studio_run_context_module": (
+                "autogenstudio.web.managers.run_context.RunContext"
+            ),
+            "framework_run_binding": "contextvar",
             "patched_modules": manager.patched_modules,
             "patched_methods": manager.patched_methods,
             "trace_path": str(manager.trace.path),
@@ -5423,6 +5592,15 @@ def _has_semantic_payload(decoded_messages: list[Any], text: str) -> bool:
 def _safe_identifier(value: str) -> str:
     cleaned = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in value)
     return cleaned.strip("_") or "autogen_agent"
+
+
+def _filesystem_identifier(value: str, *, max_chars: int = 16) -> str:
+    cleaned = _safe_identifier(value)
+    if len(cleaned) <= max_chars:
+        return cleaned
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+    prefix_chars = max(1, max_chars - len(digest) - 1)
+    return f"{cleaned[:prefix_chars]}_{digest}"
 
 
 def _string_sequence(value: Any) -> list[str]:

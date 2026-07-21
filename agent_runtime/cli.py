@@ -255,6 +255,35 @@ def build_parser() -> argparse.ArgumentParser:
             "immutable experiment archive."
         ),
     )
+    run_report_parser = report_subparsers.add_parser(
+        "autogen-run",
+        help="Export token metrics for one AutoGen Team or Studio Run.",
+    )
+    run_report_parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path.home() / ".agentlite",
+        help="AgentLite data directory containing managed launch sessions.",
+    )
+    run_report_parser.add_argument(
+        "--session-id",
+        default="latest",
+        help="AgentLite process session containing the Run. Defaults to latest.",
+    )
+    run_report_parser.add_argument(
+        "--run-id",
+        default="latest",
+        help=(
+            "framework_run_id to export, for example autogenstudio:22. "
+            "Defaults to the latest Run in the selected process session."
+        ),
+    )
+    run_report_parser.add_argument(
+        "--format",
+        choices=("markdown", "json", "csv"),
+        default="markdown",
+    )
+    run_report_parser.add_argument("--output", type=Path)
 
     subparsers.add_parser("version", help="Print AgentLite package version.")
     return parser
@@ -414,6 +443,28 @@ def _monitor(*, host: str, port: int, runs_dir: Path, data_dir: Path) -> int:
 
 
 def _report(args: argparse.Namespace) -> int:
+    if args.report_kind == "autogen-run":
+        from agent_runtime.eval.autogen_session_report import (
+            RunReportRequest,
+            write_autogen_run_report,
+        )
+
+        try:
+            report = write_autogen_run_report(
+                RunReportRequest(
+                    data_dir=args.data_dir,
+                    session_id=args.session_id,
+                    run_id=args.run_id,
+                    output=args.output,
+                    report_format=args.format,
+                )
+            )
+        except (OSError, ValueError) as exc:
+            print(f"AgentLite report failed: {exc}", file=sys.stderr)
+            return 2
+        if args.output:
+            print(f"Report written: {report['output_path']}")
+        return 0
     if args.report_kind != "autogen-session":
         return 2
     from agent_runtime.eval.autogen_session_report import (

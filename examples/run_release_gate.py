@@ -107,6 +107,20 @@ def main() -> int:
                 output_dir=output_dir,
             )
         )
+        steps.append(
+            run_command(
+                name="autogen_studio_run_binding",
+                command=[
+                    args.python,
+                    str(PROJECT_ROOT / "examples" / "run_autogen_studio_run_binding_smoke.py"),
+                    "--output-dir",
+                    str(output_dir / "autogen_studio_run_binding"),
+                    "--python",
+                    args.python,
+                ],
+                output_dir=output_dir,
+            )
+        )
     steps.append(
         run_command(
             name="unittest",

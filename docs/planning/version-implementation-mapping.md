@@ -3385,6 +3385,39 @@ AgentLite 的 AutoGen Core 接管已经不局限于单一 content dataclass；
 3. 真实 LLM agent 的质量和成本对比。
 ```
 
+## 42. v5.13p：AutoGen Studio 网页 Run 级绑定
+
+### 42.1 解决的问题
+
+`agentlite autogen -- autogenstudio ui ...` 启动的是一个长期运行的后端进程。旧实现只生成一个 AgentLite `launch_*` Session，因此网页中连续执行的多个 Run 会被汇总成一个任务，模型 Token、改写、状态和记忆事件无法逐次归属。
+
+### 42.2 实现路径
+
+1. 读取 AutoGen Studio 0.4.2.2 已有的 `RunContext.current_run_id()`，不修改 Studio 源码；
+2. 使用 `ContextVar` 将 `framework_run_id` 传播到 Team 内的 Agent、Core、模型客户端和内核 Trace；
+3. 将 Studio 原生 Run 编码为 `autogenstudio:<run_id>`；普通代码端 Team Run 使用 `autogen:<AgentLite call_id>`；
+4. 识别直接启动命令中的 `--appdir`，只读查询 Studio 的 `run -> session -> team` 关系；
+5. 每个 Run 写入独立 `autogen_driver/runs/<bounded_id>/run.json`，长逻辑 ID 通过稳定哈希映射到最长 16 字符的物理目录；
+6. 新增 `agentlite report autogen-run`，只汇总一个 Run；
+7. 监控接口新增 `/api/framework-runs` 和 Run 级 snapshot，任务列表优先显示独立 Run。
+
+### 42.3 不改变的边界
+
+本版本不改 Agent 角色、Team JSON、终止条件或领域交付规则，也不向 Studio 数据库写入数据。`agent_runtime` 中仍不存在 Question A 专用逻辑。若 Studio 版本未提供兼容的 `RunContext`，AgentLite 保持原有进程级观测，不伪造 Studio 原生 ID。
+
+### 42.4 验证标准
+
+同一 Python 进程连续执行两个模拟 Studio Run：
+
+```text
+autogenstudio:101
+autogenstudio:102
+```
+
+必须分别产生开始事件、结束事件和 Run 清单；嵌套 AutoGen 事件不得缺少 `framework_run_id`；按 Run 导出的 Token 和事件计数不得包含另一 Run。
+
+本机完整发行门禁 10 / 10 通过，189 项单元测试通过。门禁同时覆盖真实 AutoGen Team 接管、CLI 重写、不可变实验归档、Studio 双 Run 绑定、编译与差异检查。
+
 ## 51. v5.13m openEuler 24.03 LTS-SP3 兼容性验收（2026-07-20）
 
 ### 51.1 验收结果

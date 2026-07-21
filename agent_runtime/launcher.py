@@ -11,6 +11,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from agent_runtime.adapters.autogen_studio import (
+    STUDIO_APPDIR_ENV,
+    detect_studio_appdir,
+)
 from agent_runtime.eval.experiment_archive import (
     create_agentlite_session_binding,
     verify_bound_experiment,
@@ -75,6 +79,7 @@ class ManagedProcessLauncher:
             )
         status_file = session_dir / "bootstrap_status.json"
         launch_file = session_dir / "launch.json"
+        studio_appdir = detect_studio_appdir(request.command, cwd=request.cwd)
         launch_file.write_text(
             json.dumps(
                 {
@@ -84,6 +89,7 @@ class ManagedProcessLauncher:
                     "command": request.command,
                     "runtime_endpoint": request.runtime_endpoint,
                     "experiment_dir": str(experiment_dir or ""),
+                    "autogen_studio_appdir": str(studio_appdir or ""),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -195,6 +201,7 @@ class ManagedProcessLauncher:
             "AGENTLITE_DRIVER",
             "AGENTLITE_PROBE_DRIVER_ACTIVE",
             "AGENTLITE_RUNTIME_ENDPOINT",
+            STUDIO_APPDIR_ENV,
         ):
             env.pop(stale_key, None)
         package_root = Path(__file__).resolve().parent.parent
@@ -217,13 +224,16 @@ class ManagedProcessLauncher:
                 ),
                 "AGENTLITE_BOOTSTRAP_METADATA": json.dumps(
                     {
-                        "launcher_version": "v5.13o",
+                        "launcher_version": "v5.13p",
                         "parent_pid": os.getpid(),
                     },
                     ensure_ascii=False,
                 ),
             }
         )
+        studio_appdir = detect_studio_appdir(request.command, cwd=request.cwd)
+        if studio_appdir is not None:
+            env[STUDIO_APPDIR_ENV] = str(studio_appdir)
         if request.runtime_endpoint:
             env["AGENTLITE_RUNTIME_ENDPOINT"] = request.runtime_endpoint
         if request.driver_override:

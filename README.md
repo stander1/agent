@@ -2,7 +2,7 @@
 
 本仓库用于迭代实现一个面向多 Agent 协作的跨框架运行时工具层，目标是在多 Agent 任务中通过结构化通信、非文本状态传递和共享记忆复用降低协作开销。
 
-当前开发版本：`v5.13o immutable experiment archive + exact usage binding`
+当前开发版本：`v5.13p AutoGen Studio Run-level binding`
 
 最新发行包门禁版本：`v5.13h package release gate`
 
@@ -63,7 +63,27 @@
 - [docs/experiments/v5.13m-openeuler-acceptance-20260720.md](docs/experiments/v5.13m-openeuler-acceptance-20260720.md)
 - [docs/experiments/v5.13n-context-dedup-rewrite-metrics.md](docs/experiments/v5.13n-context-dedup-rewrite-metrics.md)
 - [docs/experiments/v5.13o-immutable-experiment-binding.md](docs/experiments/v5.13o-immutable-experiment-binding.md)
+- [docs/experiments/v5.13p-autogen-studio-run-binding.md](docs/experiments/v5.13p-autogen-studio-run-binding.md)
 - [docs/release/v5.12z-final-release-notes.md](docs/release/v5.12z-final-release-notes.md)
+
+## v5.13p Current Note
+
+`v5.13p` separates a long-running AutoGen Studio backend process from each UI Run. It reads AutoGen Studio 0.4.2.2's native `RunContext` without modifying Studio, propagates one `framework_run_id` through nested Team, Agent, Core, state, memory, rewrite, and model-client trace events, and writes one lifecycle manifest per Run. When Studio is started with a direct `--appdir`, AgentLite reads the existing SQLite database in query-only mode to associate the native Run with its Studio session and Team. The monitor lists these Runs as separate tasks instead of presenting the whole backend process as one task.
+
+Export one Run independently:
+
+```bash
+agentlite report autogen-run \
+  --data-dir .agentlite-exp/studio-agentlite-A \
+  --session-id latest \
+  --run-id autogenstudio:22 \
+  --format markdown \
+  --output exports/studio-run-22.md
+```
+
+`--run-id latest` selects the latest Run in the selected AgentLite process session. A Run report never fills missing model usage with a process-level Provider total because that would mix other UI tasks into the selected Run.
+
+The v5.13p release gate passes all 10 steps and the full unit suite passes 189 tests. Long code-side Run identifiers are mapped to bounded manifest directory names so the same gate also succeeds from a deeply nested Windows workspace; the complete identifier remains in the trace and manifest payload.
 
 ## v5.13o Current Note
 

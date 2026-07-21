@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 from agent_runtime.eval.experiment_archive import verify_bound_experiment
-from web_monitor.parser import build_session_snapshot, list_sessions
+from web_monitor.parser import (
+    build_session_snapshot,
+    list_framework_runs,
+    list_sessions,
+)
 
 
 ReportFormat = Literal["json", "csv", "markdown"]
@@ -22,6 +26,16 @@ class SessionReportRequest:
     report_format: ReportFormat = "markdown"
     provider_usage: Path | None = None
     experiment_dir: Path | None = None
+    exclusive_output: bool = False
+
+
+@dataclass(frozen=True)
+class RunReportRequest:
+    data_dir: Path
+    session_id: str | None = None
+    run_id: str | None = None
+    output: Path | None = None
+    report_format: ReportFormat = "markdown"
     exclusive_output: bool = False
 
 
@@ -118,6 +132,136 @@ def build_autogen_session_report(request: SessionReportRequest) -> dict[str, Any
     }
 
 
+def build_autogen_run_report(request: RunReportRequest) -> dict[str, Any]:
+    data_dir = request.data_dir.expanduser().resolve()
+    session_dir, resolved_session_id = resolve_session_dir(
+        data_dir=data_dir,
+        session_id=request.session_id,
+    )
+    run_id = _resolve_framework_run_id(
+        data_dir=data_dir,
+        session_id=resolved_session_id,
+        run_id=request.run_id,
+    )
+    snapshot = build_session_snapshot(
+        session_dir,
+        session_id=resolved_session_id,
+        framework_run_id=run_id,
+    )
+    token_summary = dict(snapshot.get("token_summary", {}))
+    native = _int(token_summary.get("native_baseline_tokens"))
+    runtime = _int(token_summary.get("end_to_end_collaboration_tokens"))
+    savings = native - runtime if native else 0
+    ratio = savings / native if native > 0 else 0.0
+    token_summary.update(
+        {
+            "actual_native_transport_tokens": native,
+            "actual_agentlite_transport_tokens": runtime,
+            "actual_transport_token_savings": savings,
+            "actual_transport_token_savings_ratio": round(ratio, 6),
+            "native_collaboration_tokens": native,
+            "agentlite_runtime_tokens": runtime,
+            "agentlite_token_savings": savings,
+            "agentlite_token_savings_ratio": round(ratio, 6),
+        }
+    )
+    summary = snapshot.get("summary", {})
+    return {
+        "session_id": resolved_session_id,
+        "framework_run_id": run_id,
+        "framework_run_source": snapshot.get("framework_run_source") or "",
+        "studio_run_id": snapshot.get("studio_run_id") or "",
+        "studio_session_id": snapshot.get("studio_session_id") or "",
+        "studio_team_id": snapshot.get("studio_team_id") or "",
+        "studio_session_name": snapshot.get("studio_session_name") or "",
+        "session_dir": str(session_dir),
+        "trace_path": str(summary.get("trace_path") or ""),
+        "status": snapshot.get("status") or "unknown",
+        "framework": summary.get("framework") or "autogen",
+        "driver_status": summary.get("driver_status") or "",
+        "hooks_active": bool(summary.get("hooks_active")),
+        "event_counts": summary.get("event_counts") or {},
+        "llm_usage_source": (
+            "autogen_model_client_hook"
+            if _int(token_summary.get("llm_total_tokens")) > 0
+            else "unavailable"
+        ),
+        "token_summary": token_summary,
+        "metric_rows": _metric_rows(token_summary),
+        "notes": [
+            "本报告只汇总 framework_run_id 对应的 Trace 事件，不包含同一 Studio 进程中的其他网页 Run。",
+            "Studio 原生 run_id 来自其 RunContext；session_id 与 team_id 来自只读数据库关联，未修改 Studio 数据。",
+            "若模型客户端没有返回 usage，本 Run 的 LLM Token 保持 unavailable，不用进程级总量填充。",
+        ],
+    }
+
+
+def render_autogen_run_report(
+    report: dict[str, Any],
+    report_format: ReportFormat,
+) -> str:
+    if report_format == "json":
+        return json.dumps(report, ensure_ascii=False, indent=2)
+    if report_format == "csv":
+        buffer = StringIO()
+        writer = csv.DictWriter(
+            buffer,
+            fieldnames=["session_id", "framework_run_id", "metric", "value", "meaning"],
+        )
+        writer.writeheader()
+        for row in report["metric_rows"]:
+            writer.writerow(
+                {
+                    "session_id": report["session_id"],
+                    "framework_run_id": report["framework_run_id"],
+                    **row,
+                }
+            )
+        return buffer.getvalue().rstrip("\r\n")
+    if report_format != "markdown":
+        raise ValueError(f"Unsupported report format: {report_format}")
+    lines = [
+        "# AutoGen Run Token 报告",
+        "",
+        f"- AgentLite session_id: `{report['session_id']}`",
+        f"- framework_run_id: `{report['framework_run_id']}`",
+        f"- binding_source: `{report['framework_run_source']}`",
+        f"- Studio run_id: `{report['studio_run_id']}`",
+        f"- Studio session_id: `{report['studio_session_id']}`",
+        f"- Studio team_id: `{report['studio_team_id']}`",
+        f"- status: `{report['status']}`",
+        f"- llm_usage_source: `{report['llm_usage_source']}`",
+        "",
+        "## Token 指标",
+        "",
+        "| 指标 | 数值 | 含义 |",
+        "|---|---:|---|",
+    ]
+    for row in report["metric_rows"]:
+        lines.append(f"| `{row['metric']}` | {row['value']} | {row['meaning']} |")
+    lines.extend(["", "## Trace 事件计数", "", "| 事件 | 次数 |", "|---|---:|"])
+    for event_name, count in sorted((report.get("event_counts") or {}).items()):
+        lines.append(f"| `{event_name}` | {count} |")
+    lines.extend(["", "## 备注", ""])
+    lines.extend(f"- {note}" for note in report.get("notes", []))
+    return "\n".join(lines)
+
+
+def write_autogen_run_report(request: RunReportRequest) -> dict[str, Any]:
+    report = build_autogen_run_report(request)
+    text = render_autogen_run_report(report, request.report_format)
+    if request.output:
+        output = request.output.expanduser().resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        mode = "x" if request.exclusive_output else "w"
+        with output.open(mode, encoding="utf-8") as handle:
+            handle.write(text + "\n")
+        report["output_path"] = str(output)
+    else:
+        print(text)
+    return report
+
+
 def resolve_session_dir(*, data_dir: Path, session_id: str | None) -> tuple[Path, str]:
     sessions = list_sessions(data_dir)
     if not sessions:
@@ -139,6 +283,31 @@ def resolve_session_dir(*, data_dir: Path, session_id: str | None) -> tuple[Path
         if path_value:
             session_dir = Path(str(path_value))
     return session_dir.resolve(), resolved_id
+
+
+def _resolve_framework_run_id(
+    *,
+    data_dir: Path,
+    session_id: str,
+    run_id: str | None,
+) -> str:
+    requested = str(run_id or "latest").strip()
+    runs = [
+        item
+        for item in list_framework_runs(data_dir)
+        if str(item.get("session_id") or "") == session_id
+    ]
+    if not runs:
+        raise FileNotFoundError(
+            f"No framework Runs found for AgentLite session {session_id!r}"
+        )
+    if requested in {"", "latest"}:
+        return str(runs[0]["framework_run_id"])
+    if any(str(item.get("framework_run_id") or "") == requested for item in runs):
+        return requested
+    raise FileNotFoundError(
+        f"Framework run {requested!r} not found in AgentLite session {session_id!r}"
+    )
 
 
 def render_autogen_session_report(report: dict[str, Any], report_format: ReportFormat) -> str:

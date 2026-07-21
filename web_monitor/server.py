@@ -21,6 +21,7 @@ from agent_runtime.eval.benchmark_runner import run_v0_benchmark
 from web_monitor.parser import (
     build_run_snapshot,
     build_session_snapshot,
+    list_framework_runs,
     list_runs,
     list_sessions,
 )
@@ -134,6 +135,9 @@ class MonitorHandler(SimpleHTTPRequestHandler):
         if path == "/api/sessions":
             self._json({"sessions": list_sessions(AGENTLITE_DATA_DIR)})
             return
+        if path == "/api/framework-runs":
+            self._json({"runs": list_framework_runs(AGENTLITE_DATA_DIR)})
+            return
         if path.startswith("/api/runs/") and path.endswith("/snapshot"):
             run_id = unquote(path[len("/api/runs/") : -len("/snapshot")].strip("/"))
             run_dir = _safe_run_dir(run_id)
@@ -141,6 +145,33 @@ class MonitorHandler(SimpleHTTPRequestHandler):
                 self._json({"error": "run not found"}, HTTPStatus.NOT_FOUND)
                 return
             self._json(build_run_snapshot(run_dir, run_id=run_id))
+            return
+        if (
+            path.startswith("/api/sessions/")
+            and "/runs/" in path
+            and path.endswith("/snapshot")
+        ):
+            identity = path[len("/api/sessions/") : -len("/snapshot")].strip("/")
+            encoded_session_id, separator, encoded_run_id = identity.partition("/runs/")
+            if not separator:
+                self._json({"error": "run not found"}, HTTPStatus.NOT_FOUND)
+                return
+            session_id = unquote(encoded_session_id)
+            framework_run_id = unquote(encoded_run_id)
+            session_dir = _safe_session_dir(session_id)
+            if session_dir is None:
+                self._json({"error": "session not found"}, HTTPStatus.NOT_FOUND)
+                return
+            try:
+                snapshot = build_session_snapshot(
+                    session_dir,
+                    session_id=session_id,
+                    framework_run_id=framework_run_id,
+                )
+            except FileNotFoundError:
+                self._json({"error": "run not found"}, HTTPStatus.NOT_FOUND)
+                return
+            self._json(snapshot)
             return
         if path.startswith("/api/sessions/") and path.endswith("/snapshot"):
             session_id = unquote(
