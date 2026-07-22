@@ -80,6 +80,8 @@ class AutoGenSessionReportTest(unittest.TestCase):
                 "event_type": "autogen_agent_input_real_rewrite",
                 "payload": {
                     "rewrite_applied": True,
+                    "continuity_context_required": True,
+                    "continuity_cost_override": True,
                     "native_input_tokens": 100,
                     "rewritten_input_tokens": 40,
                     "memory_injected_count": 1,
@@ -113,6 +115,9 @@ class AutoGenSessionReportTest(unittest.TestCase):
         self.assertEqual(summary["rewrite_cost_gate_fallback_count"], 1)
         self.assertEqual(summary["rewrite_contract_fallback_count"], 1)
         self.assertEqual(summary["actual_rewrite_event_count"], 1)
+        self.assertEqual(summary["continuity_required_event_count"], 1)
+        self.assertEqual(summary["continuity_cost_override_count"], 1)
+        self.assertEqual(summary["continuity_memory_injection_count"], 1)
         self.assertEqual(summary["memory_candidate_deduplicated_count"], 5)
         self.assertEqual(summary["memory_candidate_deduplicated_tokens"], 100)
 

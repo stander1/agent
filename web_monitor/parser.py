@@ -528,6 +528,9 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "rewrite_cost_gate_fallback_count": 0,
         "rewrite_contract_fallback_count": 0,
         "actual_rewrite_event_count": 0,
+        "continuity_required_event_count": 0,
+        "continuity_cost_override_count": 0,
+        "continuity_memory_injection_count": 0,
         "memory_candidate_deduplicated_count": 0,
         "memory_candidate_deduplicated_tokens": 0,
         "shadow_native_tokens": 0,
@@ -536,7 +539,7 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "shadow_potential_savings_ratio": 0.0,
         "shadow_event_count": 0,
         "event_count": 0,
-        "source": "autogen_trace_rewrite_outcomes_v2",
+        "source": "autogen_trace_rewrite_outcomes_v3",
     }
     actual_event_types = {
         "autogen_agent_input_real_rewrite",
@@ -555,6 +558,9 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
     rewrite_fallback_events = 0
     rewrite_cost_gate_fallbacks = 0
     rewrite_contract_fallbacks = 0
+    continuity_required_events = 0
+    continuity_cost_overrides = 0
+    continuity_memory_injections = 0
     for event in trace_events:
         event_type = str(event.get("event_type", ""))
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
@@ -614,11 +620,19 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         if event_type not in actual_event_types:
             continue
         rewrite_audit_events += 1
+        continuity_required = bool(payload.get("continuity_context_required"))
+        continuity_override = bool(payload.get("continuity_cost_override"))
+        if continuity_required:
+            continuity_required_events += 1
+        if continuity_override:
+            continuity_cost_overrides += 1
         applied = bool(payload.get("rewrite_applied")) or _int(
             payload.get("rewrite_applied_count")
         ) > 0
         if applied:
             rewrite_applied_events += 1
+            if continuity_required and _int(payload.get("memory_injected_count")) > 0:
+                continuity_memory_injections += 1
         else:
             rewrite_fallback_events += 1
             fallback_buckets = {
@@ -689,6 +703,9 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
     breakdown["rewrite_cost_gate_fallback_count"] = rewrite_cost_gate_fallbacks
     breakdown["rewrite_contract_fallback_count"] = rewrite_contract_fallbacks
     breakdown["actual_rewrite_event_count"] = rewrite_applied_events
+    breakdown["continuity_required_event_count"] = continuity_required_events
+    breakdown["continuity_cost_override_count"] = continuity_cost_overrides
+    breakdown["continuity_memory_injection_count"] = continuity_memory_injections
     breakdown["event_count"] = seen_cost_events
     return breakdown
 

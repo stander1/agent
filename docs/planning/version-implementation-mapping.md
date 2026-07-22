@@ -3385,6 +3385,26 @@ AgentLite 的 AutoGen Core 接管已经不局限于单一 content dataclass；
 3. 真实 LLM agent 的质量和成本对比。
 ```
 
+## 54. v5.13q：连续任务必要记忆优先于纯 Token 门禁
+
+### 54.1 根因
+
+真实 Studio A3 已命中 A2 的 739 Token MemoryView，但当前任务只有 37 Token，候选改写被 `team_task_token_not_reduced` 和 `token_not_reduced` 拒绝。记忆存在且检索正常，实际注入为 0，导致 Agent 声称缺少上一轮结果。
+
+### 54.2 实现
+
+1. 以中英文通用连续性表达和具名步骤引用识别依赖既有上下文的任务；
+2. 只有存在已准入、同协作组的检索命中时，才允许连续性覆盖纯 Token 门禁；
+3. Schema、StateRef、Prompt View、接收者和消息类型门禁仍然强制执行；
+4. 新增 `continuity_required_event_count`、`continuity_cost_override_count` 和 `continuity_memory_injection_count`；
+5. 覆盖成本门禁后的实际 Token 仍进入端到端成本，允许报告负节省，不把正确性成本伪装为优化收益。
+
+### 54.3 边界
+
+该机制不包含 Question A 或旅游规则，也不允许 pending/rejected 记忆绕过候选池准入。无检索命中、无明确连续性信号或存在结构错误时，原成本与可靠性门禁保持不变。
+
+本地验证已通过 192 项全量测试与完整 release gate；真实 Studio A1-A10 需使用全新数据目录重跑确认。
+
 ## 42. v5.13p：AutoGen Studio 网页 Run 级绑定
 
 ### 42.1 解决的问题

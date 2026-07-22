@@ -371,6 +371,15 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
     rewrite_contract_fallback = _int(
         token_summary.get("rewrite_contract_fallback_count")
     )
+    continuity_required = _int(
+        token_summary.get("continuity_required_event_count")
+    )
+    continuity_cost_override = _int(
+        token_summary.get("continuity_cost_override_count")
+    )
+    continuity_memory_injection = _int(
+        token_summary.get("continuity_memory_injection_count")
+    )
     memory_deduplicated = _int(
         token_summary.get("memory_candidate_deduplicated_count")
     )
@@ -392,6 +401,21 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
         _row("rewrite_fallback_event_count", rewrite_fallback, "未修改消息并保留原生内容的次数"),
         _row("rewrite_cost_gate_fallback_count", rewrite_cost_gate_fallback, "因候选不比原生更省而回退的次数"),
         _row("rewrite_contract_fallback_count", rewrite_contract_fallback, "因消息结构不受支持而回退的次数"),
+        _row(
+            "continuity_required_event_count",
+            continuity_required,
+            "检测到当前任务依赖既有上下文的改写决策次数",
+        ),
+        _row(
+            "continuity_cost_override_count",
+            continuity_cost_override,
+            "为保证任务连续性而覆盖纯 Token 门禁的次数",
+        ),
+        _row(
+            "continuity_memory_injection_count",
+            continuity_memory_injection,
+            "连续任务中实际注入已准入记忆的改写次数",
+        ),
         _row("actual_native_transport_tokens", native, "真实改写审计覆盖范围内的原生传输成本"),
         _row("agentlite_direct_message_tokens", direct, "AgentLite 在线传输的短消息成本"),
         _row("agentlite_prompt_view_tokens", prompt_view, "下游 Agent 读取 Prompt View 的成本"),

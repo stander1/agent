@@ -117,7 +117,7 @@ class ManagedProcessLauncherTest(unittest.TestCase):
 
             self.assertEqual(activation.status, "active")
             self.assertTrue(activation.hooks_active)
-            self.assertEqual(activation.details["phase"], "v5.13p")
+            self.assertEqual(activation.details["phase"], "v5.13q")
             self.assertEqual(activation.details["broadcast_mode"], "shadow-only")
             self.assertEqual(
                 activation.details["hook_mode"], "managed_import_patch"
@@ -191,7 +191,7 @@ class ManagedProcessLauncherTest(unittest.TestCase):
             self.assertTrue(status["framework_available"])
             self.assertEqual(status["driver_status"], "active")
             details = status["driver_details"]
-            self.assertEqual(details["phase"], "v5.13p")
+            self.assertEqual(details["phase"], "v5.13q")
             self.assertEqual(details["broadcast_mode"], "shadow-only")
             self.assertIn("autogen_agentchat", details["available_modules"])
 

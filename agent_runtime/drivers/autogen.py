@@ -72,7 +72,61 @@ MEMORY_SCOPE_ENV = "AGENTLITE_MEMORY_SCOPE"
 FINAL_DELIVERY_MARKER_ENV = "AGENTLITE_AUTOGEN_FINAL_MARKER"
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
 CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
-DRIVER_PHASE = "v5.13p"
+DRIVER_PHASE = "v5.13q"
+CONTINUITY_COST_GATE_REASONS = frozenset(
+    {"token_not_reduced", "team_task_token_not_reduced"}
+)
+CONTINUITY_CUE_PATTERNS = (
+    (
+        "zh_prior_reference",
+        re.compile(
+            r"(?:基于|根据|依据|参考|结合|沿用|承接)\s*"
+            r"(?:刚才|之前|前面|上述|以上|先前|此前|上一(?:轮|步|个|阶段)|"
+            r"前一(?:轮|步|个|阶段)|已有|已确认)"
+        ),
+    ),
+    (
+        "zh_named_step_reference",
+        re.compile(
+            r"(?:基于|根据|依据|参考|结合|沿用)\s*"
+            r"(?:任务|步骤|阶段|版本|方案)?\s*"
+            r"[A-Za-z][A-Za-z0-9_.-]*\d+\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "zh_continuation_action",
+        re.compile(
+            r"(?:继续|接着|进一步|重新|再次)\s*"
+            r"(?:完善|调整|修改|优化|修订|扩展|生成|评估|分析|处理|规划)"
+        ),
+    ),
+    (
+        "zh_preserve_existing",
+        re.compile(
+            r"(?:保留|沿用|维持|不要(?:推翻|删除|改变)|不(?:推翻|删除|改变))"
+            r".{0,32}(?:之前|前面|原有|已有|既有|已确认|方案|计划|结果|约束|内容)"
+        ),
+    ),
+    (
+        "en_prior_reference",
+        re.compile(
+            r"\b(?:based on|according to|using|from|continue(?: with)?|revise|"
+            r"refine|update|modify|preserve|keep)\b.{0,64}"
+            r"\b(?:previous|prior|earlier|above|last|existing|confirmed|draft|"
+            r"plan|result|options?|constraints?)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "en_named_step_reference",
+        re.compile(
+            r"\b(?:based on|according to|using|from)\s+"
+            r"(?:task|step|stage|version)?\s*[A-Za-z][A-Za-z0-9_.-]*\d+\b",
+            re.IGNORECASE,
+        ),
+    ),
+)
 TEAM_REAL_REWRITE_DISABLED_REASON = (
     "team_level_real_rewrite_not_enabled_for_guarded_agent_input"
 )
@@ -154,6 +208,8 @@ class HookCallContext:
     memory_context: MemoryContext = field(
         default_factory=lambda: MemoryContext([], [])
     )
+    continuity_context_required: bool = False
+    continuity_context_reasons: tuple[str, ...] = ()
     display_restore_enabled: bool = False
     display_original_text: str = ""
     display_original_source: str = "user"
@@ -643,6 +699,9 @@ class AutoGenHookManager:
         prompt = self.codec.render_text(decoded_messages) or _extract_text(
             {"args": args, "kwargs": kwargs}
         )
+        continuity_context_reasons = _continuity_requirement_reasons(
+            _continuity_source_text(decoded_messages, fallback=prompt)
+        )
         collaboration_group_id = _resolve_collaboration_group_id(
             memory_scope_id=self.memory_scope_id,
             target_kind=target_kind,
@@ -722,6 +781,8 @@ class AutoGenHookManager:
                 else {}
             ),
             memory_context=memory_context,
+            continuity_context_required=bool(continuity_context_reasons),
+            continuity_context_reasons=continuity_context_reasons,
         )
         self._record_framework_run_start(hook_context)
         self._safe_kernel_call(
@@ -751,6 +812,8 @@ class AutoGenHookManager:
                     _memory_ref_payload(ref) for ref in memory_context.refs
                 ],
                 "memory_hit_count": len(memory_context.refs),
+                "continuity_context_required": bool(continuity_context_reasons),
+                "continuity_context_reasons": list(continuity_context_reasons),
                 "retrieved_memory_tokens": _count_tokens(
                     self.token_counter,
                     "\n".join(memory_context.prompt_views),
@@ -2176,6 +2239,19 @@ class AutoGenHookManager:
         rewritten_tokens = _count_tokens(self.token_counter, rewritten_content)
         if native_tokens <= rewritten_tokens:
             fallback_reasons.append("team_task_token_not_reduced")
+        continuity_cost_override = _continuity_cost_override_allowed(
+            context=context,
+            memory_retained=any(
+                entry.get("memory_refs") for entry in receiver_entries
+            ),
+            fallback_reasons=fallback_reasons,
+        )
+        if continuity_cost_override:
+            fallback_reasons = [
+                reason
+                for reason in fallback_reasons
+                if reason not in CONTINUITY_COST_GATE_REASONS
+            ]
         if fallback_reasons:
             self._record_team_rewrite_audit(
                 context=context,
@@ -2186,6 +2262,7 @@ class AutoGenHookManager:
                 state_refs=state_ref_payload,
                 receiver_entries=receiver_entries,
                 broadcast_plan=broadcast_plan.to_dict(),
+                continuity_cost_override=continuity_cost_override,
             )
             return None
 
@@ -2225,6 +2302,7 @@ class AutoGenHookManager:
             state_refs=state_ref_payload,
             receiver_entries=receiver_entries,
             broadcast_plan=broadcast_plan.to_dict(),
+            continuity_cost_override=continuity_cost_override,
         )
         return new_args, new_kwargs
 
@@ -2527,6 +2605,17 @@ class AutoGenHookManager:
         rewritten_tokens = _count_tokens(self.token_counter, rewritten_content)
         if original_tokens <= rewritten_tokens:
             fallback_reasons.append("token_not_reduced")
+        continuity_cost_override = _continuity_cost_override_allowed(
+            context=context,
+            memory_retained=bool(memory_refs),
+            fallback_reasons=fallback_reasons,
+        )
+        if continuity_cost_override:
+            fallback_reasons = [
+                reason
+                for reason in fallback_reasons
+                if reason not in CONTINUITY_COST_GATE_REASONS
+            ]
         if fallback_reasons:
             self._record_agent_rewrite_audit(
                 context=context,
@@ -2548,6 +2637,7 @@ class AutoGenHookManager:
                     self.token_counter,
                     "\n".join(memory_selection.deduplicated_views),
                 ),
+                continuity_cost_override=continuity_cost_override,
             )
             return None
 
@@ -2582,6 +2672,7 @@ class AutoGenHookManager:
                 self.token_counter,
                 "\n".join(memory_selection.deduplicated_views),
             ),
+            continuity_cost_override=continuity_cost_override,
         )
         return new_args, new_kwargs
 
@@ -3078,6 +3169,7 @@ class AutoGenHookManager:
         memory_deduplicated_tokens: int = 0,
         rewrite_safety: dict[str, Any] | None = None,
         typed_rewrite_candidate: dict[str, Any] | None = None,
+        continuity_cost_override: bool = False,
     ) -> None:
         native_tokens = _count_tokens(self.token_counter, native_text)
         rewritten_tokens = _count_tokens(self.token_counter, rewritten_content)
@@ -3109,6 +3201,13 @@ class AutoGenHookManager:
                 "fallback_reasons": sorted(set(fallback_reasons)),
                 "fallback_buckets": fallback_buckets,
                 "fallback_bucket_counts": _count_values(fallback_buckets),
+                "continuity_context_required": (
+                    context.continuity_context_required
+                ),
+                "continuity_context_reasons": list(
+                    context.continuity_context_reasons
+                ),
+                "continuity_cost_override": continuity_cost_override,
                 "state_refs": state_refs or [],
                 "memory_refs": memory_refs or [],
                 "memory_injected_count": (
@@ -3149,6 +3248,7 @@ class AutoGenHookManager:
         state_refs: list[dict[str, Any]] | None = None,
         receiver_entries: list[dict[str, Any]] | None = None,
         broadcast_plan: dict[str, Any] | None = None,
+        continuity_cost_override: bool = False,
     ) -> None:
         native_tokens = _count_tokens(self.token_counter, native_text)
         rewritten_tokens = _count_tokens(self.token_counter, rewritten_content)
@@ -3217,6 +3317,13 @@ class AutoGenHookManager:
                 "fallback_reasons": sorted(set(fallback_reasons)),
                 "fallback_buckets": fallback_buckets,
                 "fallback_bucket_counts": _count_values(fallback_buckets),
+                "continuity_context_required": (
+                    context.continuity_context_required
+                ),
+                "continuity_context_reasons": list(
+                    context.continuity_context_reasons
+                ),
+                "continuity_cost_override": continuity_cost_override,
                 "state_refs": state_refs or [],
                 "memory_refs": [
                     ref
@@ -4859,6 +4966,58 @@ def _resolve_shared_memory_enabled(*, broadcast_mode: str, raw_value: str | None
     if raw_value is None or not raw_value.strip():
         return True
     return _truthy_env(raw_value)
+
+
+def _continuity_requirement_reasons(text: str) -> tuple[str, ...]:
+    normalized = " ".join(str(text or "").split())
+    if not normalized:
+        return ()
+    return tuple(
+        label
+        for label, pattern in CONTINUITY_CUE_PATTERNS
+        if pattern.search(normalized)
+    )
+
+
+def _continuity_source_text(
+    decoded_messages: Iterable[Any],
+    *,
+    fallback: str,
+) -> str:
+    messages = list(decoded_messages)
+    user_texts = [
+        str(getattr(message, "content_text", "") or "").strip()
+        for message in messages
+        if str(getattr(message, "source", "") or "").strip().lower() == "user"
+        and str(getattr(message, "content_text", "") or "").strip()
+    ]
+    if user_texts:
+        return user_texts[-1]
+    unscoped_texts = [
+        str(getattr(message, "content_text", "") or "").strip()
+        for message in messages
+        if not str(getattr(message, "source", "") or "").strip()
+        and str(getattr(message, "content_text", "") or "").strip()
+    ]
+    if unscoped_texts:
+        return unscoped_texts[-1]
+    return fallback
+
+
+def _continuity_cost_override_allowed(
+    *,
+    context: HookCallContext,
+    memory_retained: bool,
+    fallback_reasons: Iterable[str],
+) -> bool:
+    reasons = {str(reason) for reason in fallback_reasons}
+    return bool(
+        context.continuity_context_required
+        and context.continuity_context_reasons
+        and memory_retained
+        and reasons
+        and reasons.issubset(CONTINUITY_COST_GATE_REASONS)
+    )
 
 
 def _resolve_memory_scope_id(context: Any) -> str:

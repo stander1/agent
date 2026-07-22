@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from agent_runtime.bootstrap.startup import BootstrapContext
@@ -12,6 +13,9 @@ from agent_runtime.core.kernel import MemoryContext
 from agent_runtime.drivers.autogen import (
     AutoGenHookManager,
     SHARED_MEMORY_MARKER,
+    _continuity_cost_override_allowed,
+    _continuity_requirement_reasons,
+    _continuity_source_text,
     _memory_view_facts_covered,
 )
 from agent_runtime.memory.memory_store import MemoryRef
@@ -42,6 +46,61 @@ class FakeAgent:
 
 
 class AutoGenSharedMemoryTest(unittest.TestCase):
+    def test_continuity_override_never_bypasses_structural_guard(self) -> None:
+        context = SimpleNamespace(
+            continuity_context_required=True,
+            continuity_context_reasons=("zh_prior_reference",),
+        )
+        self.assertTrue(
+            _continuity_cost_override_allowed(
+                context=context,
+                memory_retained=True,
+                fallback_reasons=["token_not_reduced"],
+            )
+        )
+        self.assertFalse(
+            _continuity_cost_override_allowed(
+                context=context,
+                memory_retained=True,
+                fallback_reasons=["token_not_reduced", "message_clone_failed"],
+            )
+        )
+
+    def test_continuity_cues_are_generic_and_do_not_match_self_contained_task(self) -> None:
+        self.assertIn(
+            "zh_named_step_reference",
+            _continuity_requirement_reasons(
+                "请基于 B7 的候选结果选择一个方案并继续执行。"
+            ),
+        )
+        self.assertIn(
+            "en_prior_reference",
+            _continuity_requirement_reasons(
+                "Refine the previous draft while keeping confirmed constraints."
+            ),
+        )
+        self.assertEqual(
+            _continuity_requirement_reasons(
+                "请根据本文完整给出的三个候选项独立完成比较。"
+            ),
+            (),
+        )
+
+    def test_continuity_detection_uses_user_task_not_agent_narration(self) -> None:
+        messages = [
+            SimpleNamespace(
+                source="user",
+                content_text="请根据本文给出的三个候选项独立完成比较。",
+            ),
+            SimpleNamespace(
+                source="planner",
+                content_text="后续写作者可以沿用之前的结构。",
+            ),
+        ]
+        source_text = _continuity_source_text(messages, fallback="fallback")
+        self.assertEqual(source_text, messages[0].content_text)
+        self.assertEqual(_continuity_requirement_reasons(source_text), ())
+
     def test_memory_fact_dedup_keeps_conflicting_numeric_revision(self) -> None:
         context = "当前方案总预算为2600元，住宿费用为900元。"
         memory_view = (
@@ -556,10 +615,11 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                     (),
                     {"task": "A3 继续完善上一轮旅行方案"},
                 )
-                self.assertEqual(
+                self.assertIn(
+                    "AGENTLITE_TEAM_REAL_REWRITE v1",
                     third_kwargs["task"],
-                    "A3 继续完善上一轮旅行方案",
                 )
+                self.assertIn(SHARED_MEMORY_MARKER, third_kwargs["task"])
                 strict_gate_events = self._events(
                     persisted.output_dir / "trace.jsonl"
                 )
@@ -568,15 +628,18 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                     for item in reversed(strict_gate_events)
                     if item.get("event_type") == "autogen_team_input_real_rewrite"
                 )
-                self.assertFalse(strict_gate["payload"]["rewrite_applied"])
+                self.assertTrue(strict_gate["payload"]["rewrite_applied"])
                 self.assertEqual(
                     strict_gate["payload"]["memory_injected_count"],
-                    0,
+                    1,
                 )
-                self.assertIn(
-                    "token_not_reduced",
-                    strict_gate["payload"]["fallback_reasons"],
+                self.assertTrue(
+                    strict_gate["payload"]["continuity_context_required"]
                 )
+                self.assertTrue(
+                    strict_gate["payload"]["continuity_cost_override"]
+                )
+                self.assertEqual(strict_gate["payload"]["fallback_reasons"], [])
                 internal_string_message = FakeTextMessage(
                     third_kwargs["task"],
                     "user",
@@ -634,6 +697,10 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                     {},
                 )
                 self.assertIsInstance(rewritten_args[0], list)
+                self.assertIn(
+                    SHARED_MEMORY_MARKER,
+                    rewritten_args[0][0]["content"],
+                )
                 direct_events = self._events(persisted.output_dir / "trace.jsonl")
                 direct_rewrite = next(
                     item
@@ -641,15 +708,15 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                     if item.get("event_type") == "autogen_agent_input_real_rewrite"
                     and item.get("payload", {}).get("call_id") == direct.call_id
                 )
-                self.assertFalse(direct_rewrite["payload"]["rewrite_applied"])
+                self.assertTrue(direct_rewrite["payload"]["rewrite_applied"])
                 self.assertEqual(
                     direct_rewrite["payload"]["memory_injected_count"],
-                    0,
+                    1,
                 )
-                self.assertIn(
-                    "token_not_reduced",
-                    direct_rewrite["payload"]["fallback_reasons"],
+                self.assertTrue(
+                    direct_rewrite["payload"]["continuity_cost_override"]
                 )
+                self.assertEqual(direct_rewrite["payload"]["fallback_reasons"], [])
 
                 short_messages = [
                     {
@@ -671,7 +738,10 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                     (short_messages,),
                     {},
                 )
-                self.assertEqual(short_args[0], short_messages)
+                self.assertIn(
+                    SHARED_MEMORY_MARKER,
+                    short_args[0][0]["content"],
+                )
                 short_events = self._events(persisted.output_dir / "trace.jsonl")
                 short_rewrite = next(
                     item
@@ -679,11 +749,10 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                     if item.get("event_type") == "autogen_agent_input_real_rewrite"
                     and item.get("payload", {}).get("call_id") == short.call_id
                 )
-                self.assertFalse(short_rewrite["payload"]["rewrite_applied"])
-                self.assertEqual(short_rewrite["payload"]["memory_injected_count"], 0)
-                self.assertIn(
-                    "token_not_reduced",
-                    short_rewrite["payload"]["fallback_reasons"],
+                self.assertTrue(short_rewrite["payload"]["rewrite_applied"])
+                self.assertEqual(short_rewrite["payload"]["memory_injected_count"], 1)
+                self.assertTrue(
+                    short_rewrite["payload"]["continuity_cost_override"]
                 )
 
     def test_team_output_without_exact_marker_cannot_enter_long_term_memory(self) -> None:

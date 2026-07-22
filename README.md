@@ -2,7 +2,7 @@
 
 本仓库用于迭代实现一个面向多 Agent 协作的跨框架运行时工具层，目标是在多 Agent 任务中通过结构化通信、非文本状态传递和共享记忆复用降低协作开销。
 
-当前开发版本：`v5.13p AutoGen Studio Run-level binding`
+当前开发版本：`v5.13q continuity memory guard`
 
 最新发行包门禁版本：`v5.13h package release gate`
 
@@ -64,7 +64,12 @@
 - [docs/experiments/v5.13n-context-dedup-rewrite-metrics.md](docs/experiments/v5.13n-context-dedup-rewrite-metrics.md)
 - [docs/experiments/v5.13o-immutable-experiment-binding.md](docs/experiments/v5.13o-immutable-experiment-binding.md)
 - [docs/experiments/v5.13p-autogen-studio-run-binding.md](docs/experiments/v5.13p-autogen-studio-run-binding.md)
+- [docs/experiments/v5.13q-continuity-memory-guard.md](docs/experiments/v5.13q-continuity-memory-guard.md)
 - [docs/release/v5.12z-final-release-notes.md](docs/release/v5.12z-final-release-notes.md)
+
+## v5.13q Current Note
+
+`v5.13q` prevents the token cost gate from silently dropping admitted memory that a follow-up task explicitly depends on. Generic Chinese and English continuation cues such as references to a previous result, named step, existing plan, or requested revision mark the MemoryView as required. When relevant memory was actually retrieved, schema and message-contract guards still apply, but a pure `token_not_reduced` result no longer removes that context. Trace and reports expose required-context decisions, cost overrides, and actual continuity-memory injections; any negative token saving remains visible as the cost of preserving task correctness.
 
 ## v5.13p Current Note
 
