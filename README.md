@@ -4,6 +4,9 @@
 
 当前开发版本：`v5.13s dynamic capability profiles`
 
+v5.13s 真实 AutoGen/openEuler 验收步骤：
+[experiments/v5.13s-dynamic-capability-acceptance/README.md](experiments/v5.13s-dynamic-capability-acceptance/README.md)
+
 最新发行包门禁版本：`v5.13h package release gate`
 
 实验结果记录见：
