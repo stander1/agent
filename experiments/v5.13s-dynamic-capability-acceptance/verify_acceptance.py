@@ -41,6 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--quality-summary", type=Path, required=True)
     parser.add_argument("--output-json", type=Path, required=True)
     parser.add_argument("--output-markdown", type=Path, required=True)
+    parser.add_argument("--report-version", default="v5.13s")
     return parser.parse_args()
 
 
@@ -52,6 +53,7 @@ def main() -> int:
         managed_dir=args.managed_dir,
         managed_data_dir=args.managed_data_dir,
         quality_summary=args.quality_summary,
+        report_version=args.report_version,
     )
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     args.output_json.write_text(
@@ -70,6 +72,7 @@ def verify_acceptance(
     managed_dir: Path,
     managed_data_dir: Path,
     quality_summary: Path,
+    report_version: str = "v5.13s",
 ) -> dict[str, Any]:
     run_dirs = {
         "native": native_dir.expanduser().resolve(),
@@ -313,7 +316,8 @@ def verify_acceptance(
     token_change_ratio = token_delta / native_tokens if native_tokens else None
     passed = all(item.passed for item in checks)
     return {
-        "schema_version": "agentlite.v5.13s-acceptance.v1",
+        "schema_version": f"agentlite.{report_version}-acceptance.v1",
+        "report_version": report_version,
         "summary": {
             "passed": passed,
             "check_count": len(checks),
@@ -348,7 +352,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
     token_summary = metrics["token_summary"]
     quality = payload.get("quality", {}).get("by_group", {})
     lines = [
-        "# v5.13s 动态能力画像 AutoGen 验收报告",
+        f"# {payload.get('report_version', 'v5.13s')} 动态能力画像 AutoGen 验收报告",
         "",
         f"- 总体结果：{'通过' if summary['passed'] else '未通过'}",
         f"- 检查项：{summary['passed_check_count']}/{summary['check_count']} 通过",

@@ -10,6 +10,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPERIMENT = ROOT / "experiments" / "v5.13s-dynamic-capability-acceptance"
+EXPERIMENT_V513T = (
+    ROOT / "experiments" / "v5.13t-capability-identity-no-expansion"
+)
 
 
 def load_module(filename: str, module_name: str):
@@ -53,6 +56,16 @@ class DynamicCapabilityAcceptanceTest(unittest.TestCase):
         self.assertIn("AGENTLITE_V513S_EXP_ID", source)
         self.assertIn("AGENTLITE_V513S_RUN_ROOT", source)
         self.assertIn("AGENTLITE_V513S_TRACE_ROOT", source)
+
+    def test_v513t_runner_uses_dedicated_paths_and_report_version(self) -> None:
+        source = (EXPERIMENT_V513T / "run_openeuler.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("AGENTLITE_V513T_EXP_ID", source)
+        self.assertIn("runs/v5.13t-capability-identity", source)
+        self.assertIn("exports/v5.13t-capability-identity-", source)
+        self.assertIn("--report-version v5.13t", source)
+
 
     def test_local_tool_returns_versioned_evidence(self) -> None:
         app = load_module("code_app.py", "v513s_code_app")
@@ -185,8 +198,20 @@ class DynamicCapabilityAcceptanceTest(unittest.TestCase):
                 managed_dir=run_dirs["managed"],
                 managed_data_dir=root / "trace",
                 quality_summary=quality_path,
+                report_version="v5.13t",
             )
             self.assertTrue(payload["summary"]["passed"])
+
+
+            self.assertEqual(payload["report_version"], "v5.13t")
+            self.assertEqual(
+                payload["schema_version"], "agentlite.v5.13t-acceptance.v1"
+            )
+            self.assertTrue(
+                verifier.render_markdown(payload).startswith(
+                    "# v5.13t 动态能力画像 AutoGen 验收报告"
+                )
+            )
 
 
 if __name__ == "__main__":
