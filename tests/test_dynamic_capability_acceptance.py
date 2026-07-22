@@ -45,6 +45,15 @@ class DynamicCapabilityAcceptanceTest(unittest.TestCase):
         self.assertIn("基于 D1", tasks[1]["question"])
         self.assertIn("基于 D1 和 D2", tasks[2]["question"])
 
+    def test_runner_ignores_generic_legacy_experiment_paths(self) -> None:
+        source = (EXPERIMENT / "run_openeuler.sh").read_text(encoding="utf-8")
+        self.assertNotIn('${EXP_ID:-', source)
+        self.assertNotIn('${RUN_ROOT:-', source)
+        self.assertNotIn('${TRACE_ROOT:-', source)
+        self.assertIn("AGENTLITE_V513S_EXP_ID", source)
+        self.assertIn("AGENTLITE_V513S_RUN_ROOT", source)
+        self.assertIn("AGENTLITE_V513S_TRACE_ROOT", source)
+
     def test_local_tool_returns_versioned_evidence(self) -> None:
         app = load_module("code_app.py", "v513s_code_app")
         evidence = json.loads(app.local_evidence_lookup("SQLite WAL 恢复和并发"))

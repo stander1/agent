@@ -81,8 +81,19 @@ bash experiments/v5.13s-dynamic-capability-acceptance/run_openeuler.sh
 如需人工指定实验编号，可在运行前设置：
 
 ```bash
-export EXP_ID="$(date +%Y%m%d-%H%M%S)"
+export AGENTLITE_V513S_EXP_ID="$(date +%Y%m%d-%H%M%S)"
 bash experiments/v5.13s-dynamic-capability-acceptance/run_openeuler.sh
+```
+
+脚本只读取 `AGENTLITE_V513S_*` 专用实验变量，不读取旧实验可能遗留的通用
+`EXP_ID`、`RUN_ROOT` 或 `TRACE_ROOT`，因此不会误用其他实验目录。可选覆盖项为：
+
+```bash
+export AGENTLITE_V513S_MAX_TURNS=8
+export AGENTLITE_V513S_TEMPERATURE=0
+# 通常不需要手工设置以下两个路径：
+# export AGENTLITE_V513S_RUN_ROOT='runs/v5.13s-dynamic-capability/custom-id'
+# export AGENTLITE_V513S_TRACE_ROOT='.agentlite-exp/v5.13s-dynamic-capability/custom-id'
 ```
 
 脚本拒绝覆盖任何同名目录。网络中断后应使用新的 `EXP_ID` 重跑，保留失败归档用于

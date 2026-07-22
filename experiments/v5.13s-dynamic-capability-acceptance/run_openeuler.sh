@@ -19,8 +19,8 @@ VERIFY="$SCRIPT_DIR/verify_acceptance.py"
 : "${OPENAI_TIMEOUT_SECONDS:=300}"
 : "${OPENAI_MAX_RETRIES:=6}"
 : "${OPENAI_RETRY_BACKOFF_SECONDS:=3}"
-: "${EXPERIMENT_TEMPERATURE:=0}"
-: "${EXPERIMENT_MAX_TURNS:=8}"
+V513S_TEMPERATURE="${AGENTLITE_V513S_TEMPERATURE:-0}"
+V513S_MAX_TURNS="${AGENTLITE_V513S_MAX_TURNS:-8}"
 
 if [[ -z "$OPENAI_API_KEY" ]]; then
   echo "错误：请先设置 OPENAI_API_KEY 或 MIMO_API_KEY。" >&2
@@ -34,9 +34,9 @@ export MIMO_API_KEY="${MIMO_API_KEY:-$OPENAI_API_KEY}"
 command -v python >/dev/null
 command -v agentlite >/dev/null
 
-EXP_ID="${EXP_ID:-$(date +%Y%m%d-%H%M%S)}"
-RUN_ROOT="${RUN_ROOT:-runs/v5.13s-dynamic-capability/$EXP_ID}"
-TRACE_ROOT="${TRACE_ROOT:-.agentlite-exp/v5.13s-dynamic-capability/$EXP_ID}"
+EXP_ID="${AGENTLITE_V513S_EXP_ID:-$(date +%Y%m%d-%H%M%S)}"
+RUN_ROOT="${AGENTLITE_V513S_RUN_ROOT:-runs/v5.13s-dynamic-capability/$EXP_ID}"
+TRACE_ROOT="${AGENTLITE_V513S_TRACE_ROOT:-.agentlite-exp/v5.13s-dynamic-capability/$EXP_ID}"
 EXPORT_BASE="exports/v5.13s-dynamic-capability-$EXP_ID"
 
 for path in "$RUN_ROOT" "$TRACE_ROOT" "$EXPORT_BASE.tar.gz"; do
@@ -53,8 +53,8 @@ python "$APP" \
   --task-sequence "$TASKS" \
   --agent-config "$AGENTS" \
   --experiment-mode native \
-  --temperature "$EXPERIMENT_TEMPERATURE" \
-  --max-turns "$EXPERIMENT_MAX_TURNS" \
+  --temperature "$V513S_TEMPERATURE" \
+  --max-turns "$V513S_MAX_TURNS" \
   --output-dir "$RUN_ROOT/native"
 
 echo "[2/7] 运行 AgentLite 仅观测组"
@@ -67,8 +67,8 @@ agentlite autogen \
     --task-sequence "$TASKS" \
     --agent-config "$AGENTS" \
     --experiment-mode observed \
-    --temperature "$EXPERIMENT_TEMPERATURE" \
-    --max-turns "$EXPERIMENT_MAX_TURNS" \
+    --temperature "$V513S_TEMPERATURE" \
+    --max-turns "$V513S_MAX_TURNS" \
     --output-dir "$RUN_ROOT/observed"
 
 echo "[3/7] 运行 AgentLite 正式接管组"
@@ -81,8 +81,8 @@ agentlite autogen \
     --task-sequence "$TASKS" \
     --agent-config "$AGENTS" \
     --experiment-mode managed \
-    --temperature "$EXPERIMENT_TEMPERATURE" \
-    --max-turns "$EXPERIMENT_MAX_TURNS" \
+    --temperature "$V513S_TEMPERATURE" \
+    --max-turns "$V513S_MAX_TURNS" \
     --output-dir "$RUN_ROOT/managed"
 
 echo "[4/7] 校验归档绑定并生成三组对比"
