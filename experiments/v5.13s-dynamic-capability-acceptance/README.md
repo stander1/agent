@@ -70,9 +70,11 @@ curl --location --http1.1 -sS \
 cd /home/competition/multi-agent-runtime
 source .venv-agentlite/bin/activate
 
-chmod +x experiments/v5.13s-dynamic-capability-acceptance/run_openeuler.sh
 bash experiments/v5.13s-dynamic-capability-acceptance/run_openeuler.sh
 ```
+
+脚本通过 `bash` 解释执行，不需要 `chmod +x`，因此不会因文件权限变化把 Git
+工作区标记为已修改。
 
 脚本依次完成三组运行、不可变归档绑定校验、三组匿名质量评分、动态能力画像验收和
 数据打包。为了防止混入旧记忆，每次运行会建立新的目录，并设置唯一的
