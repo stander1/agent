@@ -2,7 +2,7 @@
 
 本仓库用于迭代实现一个面向多 Agent 协作的跨框架运行时工具层，目标是在多 Agent 任务中通过结构化通信、非文本状态传递和共享记忆复用降低协作开销。
 
-当前开发版本：`v5.13q continuity memory guard`
+当前开发版本：`v5.13r minimal sufficient role views`
 
 最新发行包门禁版本：`v5.13h package release gate`
 
@@ -65,7 +65,12 @@
 - [docs/experiments/v5.13o-immutable-experiment-binding.md](docs/experiments/v5.13o-immutable-experiment-binding.md)
 - [docs/experiments/v5.13p-autogen-studio-run-binding.md](docs/experiments/v5.13p-autogen-studio-run-binding.md)
 - [docs/experiments/v5.13q-continuity-memory-guard.md](docs/experiments/v5.13q-continuity-memory-guard.md)
+- [docs/experiments/v5.13r-minimal-sufficient-role-views.md](docs/experiments/v5.13r-minimal-sufficient-role-views.md)
 - [docs/release/v5.12z-final-release-notes.md](docs/release/v5.12z-final-release-notes.md)
+
+## v5.13r Current Note
+
+`v5.13r` completes the continuity guard with minimal sufficient context injection. It creates generic, rules-first task and memory views for planner, writer, reviewer, or unknown roles; keeps original facts traceable to StatePool and admitted MemoryView objects; hydrates only the matching receiver view before each AutoGen agent call; and escalates to bounded source-state spans only when an explicitly requested semantic field is absent. Reports now expose source-view tokens, role-view tokens, field fetches, receiver hydration, end-to-end collaboration cost, and final-delivery validation. No domain-specific Question A rules or control-LLM calls are used.
 
 ## v5.13q Current Note
 

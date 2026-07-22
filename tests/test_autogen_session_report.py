@@ -87,6 +87,22 @@ class AutoGenSessionReportTest(unittest.TestCase):
                     "memory_injected_count": 1,
                     "memory_candidate_deduplicated_count": 2,
                     "memory_candidate_deduplicated_tokens": 40,
+                    "memory_source_view_tokens": 80,
+                    "minimal_role_view_tokens": 30,
+                    "memory_field_fetch_count": 1,
+                    "memory_field_fetch_tokens": 12,
+                    "current_task_source_tokens": 100,
+                    "current_task_role_view_tokens": 40,
+                    "rewrite_safety": {
+                        "team_receiver_role_view_hydration": True
+                    },
+                },
+            },
+            {
+                "event_type": "autogen_memory_candidate",
+                "payload": {
+                    "candidate_kind": "autogen_team_final",
+                    "delivery_assessment": {"valid": True},
                 },
             },
             {
@@ -120,6 +136,21 @@ class AutoGenSessionReportTest(unittest.TestCase):
         self.assertEqual(summary["continuity_memory_injection_count"], 1)
         self.assertEqual(summary["memory_candidate_deduplicated_count"], 5)
         self.assertEqual(summary["memory_candidate_deduplicated_tokens"], 100)
+        self.assertEqual(summary["memory_source_view_tokens"], 80)
+        self.assertEqual(summary["minimal_role_view_tokens"], 30)
+        self.assertEqual(summary["role_view_saved_tokens"], 50)
+        self.assertEqual(summary["role_view_reduction_ratio"], 0.625)
+        self.assertEqual(summary["memory_field_fetch_count"], 1)
+        self.assertEqual(summary["memory_field_fetch_tokens"], 12)
+        self.assertEqual(summary["receiver_role_view_hydration_count"], 1)
+        self.assertEqual(summary["current_task_source_tokens"], 100)
+        self.assertEqual(summary["current_task_role_view_tokens"], 40)
+        self.assertEqual(summary["current_task_role_view_saved_tokens"], 60)
+        self.assertEqual(summary["current_task_role_view_reduction_ratio"], 0.6)
+        self.assertEqual(summary["final_delivery_assessed_count"], 1)
+        self.assertEqual(summary["final_delivery_valid_count"], 1)
+        self.assertEqual(summary["final_delivery_invalid_count"], 0)
+        self.assertEqual(summary["final_delivery_valid_rate"], 1.0)
 
     def test_builds_token_report_from_latest_session_trace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

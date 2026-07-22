@@ -380,6 +380,49 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
     continuity_memory_injection = _int(
         token_summary.get("continuity_memory_injection_count")
     )
+    memory_source_view_tokens = _int(
+        token_summary.get("memory_source_view_tokens")
+    )
+    minimal_role_view_tokens = _int(
+        token_summary.get("minimal_role_view_tokens")
+    )
+    role_view_saved_tokens = _int(token_summary.get("role_view_saved_tokens"))
+    role_view_reduction_ratio = float(
+        token_summary.get("role_view_reduction_ratio", 0.0) or 0.0
+    )
+    memory_field_fetch_count = _int(
+        token_summary.get("memory_field_fetch_count")
+    )
+    memory_field_fetch_tokens = _int(
+        token_summary.get("memory_field_fetch_tokens")
+    )
+    receiver_role_view_hydration_count = _int(
+        token_summary.get("receiver_role_view_hydration_count")
+    )
+    current_task_source_tokens = _int(
+        token_summary.get("current_task_source_tokens")
+    )
+    current_task_role_view_tokens = _int(
+        token_summary.get("current_task_role_view_tokens")
+    )
+    current_task_role_view_saved_tokens = _int(
+        token_summary.get("current_task_role_view_saved_tokens")
+    )
+    current_task_role_view_reduction_ratio = float(
+        token_summary.get("current_task_role_view_reduction_ratio", 0.0) or 0.0
+    )
+    final_delivery_assessed_count = _int(
+        token_summary.get("final_delivery_assessed_count")
+    )
+    final_delivery_valid_count = _int(
+        token_summary.get("final_delivery_valid_count")
+    )
+    final_delivery_invalid_count = _int(
+        token_summary.get("final_delivery_invalid_count")
+    )
+    final_delivery_valid_rate = float(
+        token_summary.get("final_delivery_valid_rate", 0.0) or 0.0
+    )
     memory_deduplicated = _int(
         token_summary.get("memory_candidate_deduplicated_count")
     )
@@ -415,6 +458,81 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
             "continuity_memory_injection_count",
             continuity_memory_injection,
             "连续任务中实际注入已准入记忆的改写次数",
+        ),
+        _row(
+            "memory_source_view_tokens",
+            memory_source_view_tokens,
+            "角色裁剪前的已准入 MemoryView Token",
+        ),
+        _row(
+            "minimal_role_view_tokens",
+            minimal_role_view_tokens,
+            "实际为各接收者生成的最小充分角色视图 Token",
+        ),
+        _row(
+            "role_view_saved_tokens",
+            role_view_saved_tokens,
+            "角色视图相对公共 MemoryView 减少的 Token",
+        ),
+        _row(
+            "role_view_reduction_ratio",
+            role_view_reduction_ratio,
+            "最小角色视图相对原 MemoryView 的缩减比例",
+        ),
+        _row(
+            "memory_field_fetch_count",
+            memory_field_fetch_count,
+            "最小视图缺少用户明确要求字段时的片段补取次数",
+        ),
+        _row(
+            "memory_field_fetch_tokens",
+            memory_field_fetch_tokens,
+            "字段补取读取的来源片段 Token",
+        ),
+        _row(
+            "receiver_role_view_hydration_count",
+            receiver_role_view_hydration_count,
+            "Team 分区视图在具体 Agent 接收前完成隔离注入的次数",
+        ),
+        _row(
+            "current_task_source_tokens",
+            current_task_source_tokens,
+            "按接收者广播原始当前任务所需的 Token",
+        ),
+        _row(
+            "current_task_role_view_tokens",
+            current_task_role_view_tokens,
+            "实际生成的当前任务最小角色视图 Token",
+        ),
+        _row(
+            "current_task_role_view_saved_tokens",
+            current_task_role_view_saved_tokens,
+            "当前任务角色视图相对完整广播减少的 Token",
+        ),
+        _row(
+            "current_task_role_view_reduction_ratio",
+            current_task_role_view_reduction_ratio,
+            "当前任务按角色裁剪后的缩减比例",
+        ),
+        _row(
+            "final_delivery_assessed_count",
+            final_delivery_assessed_count,
+            "经过最终交付规则校验的 Team 输出数",
+        ),
+        _row(
+            "final_delivery_valid_count",
+            final_delivery_valid_count,
+            "通过最终交付规则校验的 Team 输出数",
+        ),
+        _row(
+            "final_delivery_invalid_count",
+            final_delivery_invalid_count,
+            "未通过最终交付规则校验的 Team 输出数",
+        ),
+        _row(
+            "final_delivery_valid_rate",
+            final_delivery_valid_rate,
+            "最终交付规则校验通过率；外部质量评分仍需独立评测",
         ),
         _row("actual_native_transport_tokens", native, "真实改写审计覆盖范围内的原生传输成本"),
         _row("agentlite_direct_message_tokens", direct, "AgentLite 在线传输的短消息成本"),

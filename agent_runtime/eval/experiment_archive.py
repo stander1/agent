@@ -434,11 +434,12 @@ def sha256_file(path: Path) -> str:
 
 def directory_digest(path: Path) -> dict[str, Any]:
     resolved = path.expanduser().resolve()
+    scan_root = Path(extended_length_path(resolved))
     digest = hashlib.sha256()
     file_count = 0
     total_bytes = 0
-    for file_path in sorted(item for item in resolved.rglob("*") if item.is_file()):
-        relative = file_path.relative_to(resolved).as_posix()
+    for file_path in sorted(item for item in scan_root.rglob("*") if item.is_file()):
+        relative = file_path.relative_to(scan_root).as_posix()
         file_hash = sha256_file(file_path)
         size = file_path.stat().st_size
         digest.update(relative.encode("utf-8"))
@@ -453,6 +454,16 @@ def directory_digest(path: Path) -> dict[str, Any]:
         "bytes": total_bytes,
         "sha256": digest.hexdigest(),
     }
+
+
+def extended_length_path(path: Path) -> str:
+    """Return a Windows long-path form without changing the logical path."""
+    resolved = str(path.expanduser().resolve())
+    if os.name != "nt" or resolved.startswith("\\\\?\\"):
+        return resolved
+    if resolved.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + resolved[2:]
+    return "\\\\?\\" + resolved
 
 
 def _portable_archive_path(path: Path, archive_root: Path) -> str:

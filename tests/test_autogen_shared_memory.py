@@ -101,6 +101,23 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
         self.assertEqual(source_text, messages[0].content_text)
         self.assertEqual(_continuity_requirement_reasons(source_text), ())
 
+        team_payload = (
+            "AGENTLITE_TEAM_REAL_REWRITE v1\n"
+            "broadcast_manifest={}\n"
+            "CURRENT_USER_TASK (highest priority):\n"
+            "请根据本文给出的三个候选项独立完成比较。\n"
+            "receiver_prompt_views:\n"
+            "--- receiver: writer\n"
+            "semantic_role: writer\n"
+            "请沿用之前的结构。"
+        )
+        team_source = _continuity_source_text(
+            [SimpleNamespace(source="user", content_text=team_payload)],
+            fallback="fallback",
+        )
+        self.assertEqual(team_source, "请根据本文给出的三个候选项独立完成比较。")
+        self.assertEqual(_continuity_requirement_reasons(team_source), ())
+
     def test_memory_fact_dedup_keeps_conflicting_numeric_revision(self) -> None:
         context = "当前方案总预算为2600元，住宿费用为900元。"
         memory_view = (
@@ -332,6 +349,11 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                 )
                 payload = rewrite["payload"]
                 self.assertTrue(payload["rewrite_applied"])
+                self.assertEqual(payload["fallback_reasons"], [])
+                self.assertGreater(
+                    payload["current_task_role_view_reduction_ratio"],
+                    0,
+                )
                 self.assertEqual(payload["memory_candidate_count"], 1)
                 self.assertEqual(payload["memory_retained_count"], 0)
                 self.assertEqual(payload["memory_candidate_deduplicated_count"], 1)
@@ -548,7 +570,29 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                 rewritten = rewritten_task[0]["content"]
                 self.assertIn(SHARED_MEMORY_MARKER, rewritten)
                 self.assertIn("自然风景", rewritten)
-                self.assertEqual(rewritten.count(SHARED_MEMORY_MARKER), 1)
+                self.assertEqual(rewritten.count(SHARED_MEMORY_MARKER), 3)
+                self.assertIn("--- receiver: planner", rewritten)
+                self.assertIn("--- receiver: writer", rewritten)
+                self.assertIn("--- receiver: reviewer", rewritten)
+
+                writer_context = manager.record_call_start(
+                    instance=FakeAgent(),
+                    method_name="on_messages",
+                    target_kind="agentchat_agent",
+                    args=(rewritten_task,),
+                    kwargs={},
+                )
+                hydrated_args, _ = manager.rewrite_call_arguments_if_safe(
+                    writer_context,
+                    (rewritten_task,),
+                    {},
+                )
+                hydrated = hydrated_args[0][0]["content"]
+                self.assertIn("AGENTLITE_RECEIVER_ROLE_VIEW v1", hydrated)
+                self.assertIn("semantic_role=writer", hydrated)
+                self.assertEqual(hydrated.count(SHARED_MEMORY_MARKER), 1)
+                self.assertNotIn("--- receiver: planner", hydrated)
+                self.assertNotIn("--- receiver: reviewer", hydrated)
 
                 self.assertTrue(second.display_restore_enabled)
                 applied_events = self._events(manager.output_dir / "trace.jsonl")

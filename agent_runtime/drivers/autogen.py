@@ -41,6 +41,11 @@ from agent_runtime.eval.metrics import MetricsCollector
 from agent_runtime.eval.token_counter import TokenCounter
 from agent_runtime.eval.trace_logger import TraceLogger
 from agent_runtime.memory.memory_store import MemoryStoreLite
+from agent_runtime.memory.context_views import (
+    build_minimal_role_view,
+    field_fetch_query,
+    infer_collaboration_role,
+)
 from agent_runtime.reliability.final_delivery_guard import assess_final_delivery
 from agent_runtime.state.state_pool import StatePoolLite, StateRef
 
@@ -72,7 +77,7 @@ MEMORY_SCOPE_ENV = "AGENTLITE_MEMORY_SCOPE"
 FINAL_DELIVERY_MARKER_ENV = "AGENTLITE_AUTOGEN_FINAL_MARKER"
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
 CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
-DRIVER_PHASE = "v5.13q"
+DRIVER_PHASE = "v5.13r"
 CONTINUITY_COST_GATE_REASONS = frozenset(
     {"token_not_reduced", "team_task_token_not_reduced"}
 )
@@ -222,6 +227,17 @@ class _MemoryContextSelection:
     candidate_count: int = 0
     deduplicated_count: int = 0
     deduplicated_views: list[str] = field(default_factory=list)
+    role: str = "general"
+    source_prompt_views: list[str] = field(default_factory=list)
+    requested_fields: tuple[str, ...] = ()
+    covered_fields: tuple[str, ...] = ()
+    missing_fields: tuple[str, ...] = ()
+    role_view_source_chars: int = 0
+    role_view_selected_chars: int = 0
+    role_view_reduction_ratio: float = 0.0
+    field_fetch_count: int = 0
+    field_fetch_tokens: int = 0
+    field_fetch_state_ids: list[str] = field(default_factory=list)
 
 
 class AutoGenHookManager:
@@ -2482,6 +2498,18 @@ class AutoGenHookManager:
             )
             return None
         if _contains_agentlite_rewrite_marker(native_text):
+            if "AGENTLITE_TEAM_REAL_REWRITE v1" in native_text:
+                hydrated = self._hydrate_team_receiver_role_view(
+                    context=context,
+                    messages=messages,
+                    source=source,
+                    args=args,
+                    kwargs=kwargs,
+                    decoded_messages=decoded_messages,
+                    native_text=native_text,
+                )
+                if hydrated is not None:
+                    return hydrated
             self._record_agent_rewrite_audit(
                 context=context,
                 applied=False,
@@ -2548,10 +2576,10 @@ class AutoGenHookManager:
             )
             if isinstance(view, str) and view:
                 prompt_views.append(view)
-        memory_selection = _select_nonredundant_memory_context(
+        memory_selection = self._select_role_memory_context(
+            context=context,
+            receiver_id=context.agent.agent_id,
             state_prompt_views=prompt_views,
-            memory_refs=list(context.memory_context.refs),
-            memory_prompt_views=list(context.memory_context.prompt_views),
         )
         memory_refs = memory_selection.refs
         memory_prompt_views = memory_selection.prompt_views
@@ -2637,6 +2665,7 @@ class AutoGenHookManager:
                     self.token_counter,
                     "\n".join(memory_selection.deduplicated_views),
                 ),
+                role_memory_selection=memory_selection,
                 continuity_cost_override=continuity_cost_override,
             )
             return None
@@ -2672,6 +2701,159 @@ class AutoGenHookManager:
                 self.token_counter,
                 "\n".join(memory_selection.deduplicated_views),
             ),
+            role_memory_selection=memory_selection,
+            continuity_cost_override=continuity_cost_override,
+        )
+        return new_args, new_kwargs
+
+    def _hydrate_team_receiver_role_view(
+        self,
+        *,
+        context: HookCallContext,
+        messages: list[Any] | tuple[Any, ...],
+        source: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        decoded_messages: list[Any],
+        native_text: str,
+    ) -> tuple[tuple[Any, ...], dict[str, Any]] | None:
+        team_payload = next(
+            (
+                str(getattr(message, "content_text", "") or "")
+                for message in decoded_messages
+                if "AGENTLITE_TEAM_REAL_REWRITE v1"
+                in str(getattr(message, "content_text", "") or "")
+            ),
+            "",
+        )
+        receiver_view = _extract_team_receiver_role_view(
+            team_payload,
+            receiver_id=context.agent.agent_id,
+        )
+        if not receiver_view:
+            self._record_agent_rewrite_audit(
+                context=context,
+                applied=False,
+                fallback_reasons=["team_receiver_role_view_missing"],
+                native_text=native_text,
+            )
+            return None
+        upstream = [
+            (
+                str(getattr(message, "source", "") or "unknown"),
+                str(getattr(message, "content_text", "") or "").strip(),
+            )
+            for message in decoded_messages
+            if str(getattr(message, "content_text", "") or "").strip()
+            and "AGENTLITE_TEAM_REAL_REWRITE v1"
+            not in str(getattr(message, "content_text", "") or "")
+            and str(getattr(message, "source", "") or "").casefold() != "user"
+        ]
+        sections = [
+            "AGENTLITE_RECEIVER_ROLE_VIEW v1",
+            f"receiver={context.agent.agent_id}",
+            f"semantic_role={receiver_view['semantic_role']}",
+            "CURRENT_USER_TASK (highest priority):",
+            receiver_view["current_task"],
+            "ROLE_PROMPT_VIEW:",
+            receiver_view["prompt_view"],
+        ]
+        wire_envelope = receiver_view.get("wire_envelope", {})
+        if wire_envelope:
+            sections.insert(
+                3,
+                "shp_wire="
+                + json.dumps(
+                    wire_envelope,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            )
+        if upstream:
+            latest_source, latest_content = upstream[-1]
+            sections.extend(
+                [
+                    f"LATEST_UPSTREAM_MESSAGE [{latest_source}] (use in full):",
+                    latest_content,
+                ]
+            )
+        if len(upstream) > 1:
+            prior_source, prior_content = upstream[-2]
+            sections.extend(
+                [
+                    f"PRIOR_UPSTREAM_DIGEST [{prior_source}]:",
+                    _head_tail_digest(prior_content, limit=360),
+                ]
+            )
+        rewritten_content = "\n".join(section for section in sections if section)
+        replacement_message = _clone_text_message_with_content(
+            messages[-1],
+            rewritten_content,
+        )
+        fallback_reasons: list[str] = []
+        if replacement_message is None:
+            fallback_reasons.append("message_clone_failed")
+        if wire_envelope and not _wire_envelope_schema_valid(wire_envelope):
+            fallback_reasons.append("schema_invalid")
+        native_tokens = _count_tokens(self.token_counter, native_text)
+        rewritten_tokens = _count_tokens(self.token_counter, rewritten_content)
+        if native_tokens <= rewritten_tokens:
+            fallback_reasons.append("token_not_reduced")
+        memory_refs = list(receiver_view.get("memory_refs", []) or [])
+        continuity_cost_override = _continuity_cost_override_allowed(
+            context=context,
+            memory_retained=bool(memory_refs),
+            fallback_reasons=fallback_reasons,
+        )
+        if continuity_cost_override:
+            fallback_reasons = [
+                reason
+                for reason in fallback_reasons
+                if reason not in CONTINUITY_COST_GATE_REASONS
+            ]
+        if fallback_reasons:
+            self._record_agent_rewrite_audit(
+                context=context,
+                applied=False,
+                fallback_reasons=fallback_reasons,
+                native_text=native_text,
+                rewritten_content=rewritten_content,
+                memory_refs=memory_refs,
+                wire_envelope=wire_envelope,
+                prompt_view_text=receiver_view["prompt_view"],
+                retrieved_memory_tokens=_count_tokens(
+                    self.token_counter,
+                    receiver_view.get("memory_prompt_view", ""),
+                ),
+                rewrite_safety={"team_receiver_role_view_hydration": True},
+                continuity_cost_override=continuity_cost_override,
+            )
+            return None
+        replacement = (
+            (replacement_message,)
+            if isinstance(messages, tuple)
+            else [replacement_message]
+        )
+        new_args, new_kwargs = _replace_messages_argument(
+            args,
+            kwargs,
+            source=source,
+            replacement=replacement,
+        )
+        self._record_agent_rewrite_audit(
+            context=context,
+            applied=True,
+            fallback_reasons=[],
+            native_text=native_text,
+            rewritten_content=rewritten_content,
+            memory_refs=memory_refs,
+            wire_envelope=wire_envelope,
+            prompt_view_text=receiver_view["prompt_view"],
+            retrieved_memory_tokens=_count_tokens(
+                self.token_counter,
+                receiver_view.get("memory_prompt_view", ""),
+            ),
+            rewrite_safety={"team_receiver_role_view_hydration": True},
             continuity_cost_override=continuity_cost_override,
         )
         return new_args, new_kwargs
@@ -3170,6 +3352,7 @@ class AutoGenHookManager:
         rewrite_safety: dict[str, Any] | None = None,
         typed_rewrite_candidate: dict[str, Any] | None = None,
         continuity_cost_override: bool = False,
+        role_memory_selection: _MemoryContextSelection | None = None,
     ) -> None:
         native_tokens = _count_tokens(self.token_counter, native_text)
         rewritten_tokens = _count_tokens(self.token_counter, rewritten_content)
@@ -3218,6 +3401,58 @@ class AutoGenHookManager:
                 "memory_candidate_deduplicated_count": memory_deduplicated_count,
                 "memory_candidate_deduplicated_tokens": memory_deduplicated_tokens,
                 "memory_deduplication_mode": "fact_overlap_rules_v1",
+                "memory_view_mode": (
+                    "minimal_sufficient_role_view_v1"
+                    if role_memory_selection is not None
+                    else "native_prompt_view"
+                ),
+                "semantic_role": (
+                    role_memory_selection.role if role_memory_selection else ""
+                ),
+                "requested_memory_fields": (
+                    list(role_memory_selection.requested_fields)
+                    if role_memory_selection
+                    else []
+                ),
+                "covered_memory_fields": (
+                    list(role_memory_selection.covered_fields)
+                    if role_memory_selection
+                    else []
+                ),
+                "missing_memory_fields": (
+                    list(role_memory_selection.missing_fields)
+                    if role_memory_selection
+                    else []
+                ),
+                "memory_source_view_tokens": (
+                    _count_tokens(
+                        self.token_counter,
+                        "\n".join(role_memory_selection.source_prompt_views),
+                    )
+                    if role_memory_selection
+                    else 0
+                ),
+                "minimal_role_view_tokens": retrieved_memory_tokens,
+                "role_view_reduction_ratio": (
+                    role_memory_selection.role_view_reduction_ratio
+                    if role_memory_selection
+                    else 0.0
+                ),
+                "memory_field_fetch_count": (
+                    role_memory_selection.field_fetch_count
+                    if role_memory_selection
+                    else 0
+                ),
+                "memory_field_fetch_tokens": (
+                    role_memory_selection.field_fetch_tokens
+                    if role_memory_selection
+                    else 0
+                ),
+                "memory_field_fetch_state_ids": (
+                    role_memory_selection.field_fetch_state_ids
+                    if role_memory_selection
+                    else []
+                ),
                 "shadow_wire_envelope": wire_envelope or {},
                 "prompt_view_available": bool(prompt_view_text.strip()),
                 "prompt_view_tokens": max(
@@ -3256,6 +3491,30 @@ class AutoGenHookManager:
         native_full_broadcast_tokens = native_tokens * len(receiver_entries)
         retrieved_memory_tokens = sum(
             int(entry.get("retrieved_memory_tokens", 0) or 0)
+            for entry in receiver_entries
+        )
+        memory_source_view_tokens = sum(
+            int(entry.get("memory_source_view_tokens", 0) or 0)
+            for entry in receiver_entries
+        )
+        minimal_role_view_tokens = sum(
+            int(entry.get("minimal_role_view_tokens", 0) or 0)
+            for entry in receiver_entries
+        )
+        memory_field_fetch_count = sum(
+            int(entry.get("memory_field_fetch_count", 0) or 0)
+            for entry in receiver_entries
+        )
+        memory_field_fetch_tokens = sum(
+            int(entry.get("memory_field_fetch_tokens", 0) or 0)
+            for entry in receiver_entries
+        )
+        current_task_source_tokens = sum(
+            int(entry.get("current_task_source_tokens", 0) or 0)
+            for entry in receiver_entries
+        )
+        current_task_role_view_tokens = sum(
+            int(entry.get("current_task_role_view_tokens", 0) or 0)
             for entry in receiver_entries
         )
         memory_candidate_count = max(
@@ -3351,6 +3610,36 @@ class AutoGenHookManager:
                     memory_deduplicated_tokens
                 ),
                 "memory_deduplication_mode": "fact_overlap_rules_v1",
+                "memory_view_mode": "minimal_sufficient_role_view_v1",
+                "memory_source_view_tokens": memory_source_view_tokens,
+                "minimal_role_view_tokens": minimal_role_view_tokens,
+                "role_view_reduction_ratio": (
+                    round(
+                        1 - (minimal_role_view_tokens / memory_source_view_tokens),
+                        6,
+                    )
+                    if memory_source_view_tokens
+                    else 0.0
+                ),
+                "memory_field_fetch_count": memory_field_fetch_count,
+                "memory_field_fetch_tokens": memory_field_fetch_tokens,
+                "current_task_source_tokens": current_task_source_tokens,
+                "current_task_role_view_tokens": current_task_role_view_tokens,
+                "current_task_role_view_saved_tokens": (
+                    current_task_source_tokens - current_task_role_view_tokens
+                ),
+                "current_task_role_view_reduction_ratio": (
+                    round(
+                        1
+                        - (
+                            current_task_role_view_tokens
+                            / current_task_source_tokens
+                        ),
+                        6,
+                    )
+                    if current_task_source_tokens
+                    else 0.0
+                ),
                 "retrieved_memory_tokens": retrieved_memory_tokens,
                 "receiver_count": len(receiver_entries),
                 "receiver_plans": _team_rewrite_receiver_audit(receiver_entries),
@@ -3621,17 +3910,25 @@ class AutoGenHookManager:
             )
             if isinstance(view, str) and view:
                 state_prompt_views.append(view)
-        memory_selection = _select_nonredundant_memory_context(
+        memory_selection = self._select_role_memory_context(
+            context=context,
+            receiver_id=receiver_plan.declared_receiver,
             state_prompt_views=state_prompt_views,
-            memory_refs=(
-                list(context.memory_context.refs) if include_memory else []
-            ),
-            memory_prompt_views=(
-                list(context.memory_context.prompt_views) if include_memory else []
-            ),
+            include_memory=include_memory,
         )
         memory_refs = memory_selection.refs
         memory_prompt_views = memory_selection.prompt_views
+        with self._memory_lock:
+            current_task = self._current_team_task_by_group.get(
+                context.task.group_id,
+                "",
+            )
+        current_task = current_task or context.task.prompt
+        current_task_view = build_minimal_role_view(
+            query=current_task,
+            prompt_views=[current_task],
+            role=memory_selection.role,
+        )
         envelope_json = self._safe_kernel_call(
             "autogen_build_broadcast_shadow_handoff",
             lambda: self.kernel.build_handoff(
@@ -3652,9 +3949,17 @@ class AutoGenHookManager:
         wire_envelope_json = json.dumps(
             wire_envelope, ensure_ascii=False, separators=(",", ":")
         )
-        prompt_view_text = _join_state_and_memory_views(
-            state_prompt_views,
-            memory_prompt_views,
+        prompt_view_text = "\n".join(
+            section
+            for section in (
+                "CURRENT_TASK_VIEW:",
+                current_task_view.text,
+                _join_state_and_memory_views(
+                    state_prompt_views,
+                    memory_prompt_views,
+                ),
+            )
+            if section.strip()
         )
         schema_valid = _wire_envelope_schema_valid(wire_envelope)
         return {
@@ -3676,6 +3981,32 @@ class AutoGenHookManager:
                 "\n".join(memory_selection.deduplicated_views),
             ),
             "memory_deduplication_mode": "fact_overlap_rules_v1",
+            "memory_view_mode": "minimal_sufficient_role_view_v1",
+            "semantic_role": memory_selection.role,
+            "requested_memory_fields": list(memory_selection.requested_fields),
+            "covered_memory_fields": list(memory_selection.covered_fields),
+            "missing_memory_fields": list(memory_selection.missing_fields),
+            "memory_source_view_tokens": _count_tokens(
+                self.token_counter,
+                "\n".join(memory_selection.source_prompt_views),
+            ),
+            "minimal_role_view_tokens": _count_tokens(
+                self.token_counter,
+                "\n".join(memory_prompt_views),
+            ),
+            "role_view_reduction_ratio": memory_selection.role_view_reduction_ratio,
+            "memory_field_fetch_count": memory_selection.field_fetch_count,
+            "memory_field_fetch_tokens": memory_selection.field_fetch_tokens,
+            "memory_field_fetch_state_ids": memory_selection.field_fetch_state_ids,
+            "current_task_source_tokens": _count_tokens(
+                self.token_counter,
+                current_task,
+            ),
+            "current_task_role_view_tokens": _count_tokens(
+                self.token_counter,
+                current_task_view.text,
+            ),
+            "current_task_role_view_reduction_ratio": current_task_view.reduction_ratio,
             "shadow_wire_envelope": wire_envelope,
             "schema_valid": schema_valid,
             "shadow_wire_tokens": _count_tokens(
@@ -3684,7 +4015,7 @@ class AutoGenHookManager:
             ),
             "prompt_view_tokens": _count_tokens(
                 self.token_counter,
-                "\n".join(state_prompt_views),
+                "\n".join([current_task_view.text, *state_prompt_views]),
             ),
             "retrieved_memory_tokens": _count_tokens(
                 self.token_counter,
@@ -3696,6 +4027,116 @@ class AutoGenHookManager:
             "memory_prompt_view_text": "\n".join(memory_prompt_views),
             "prompt_view_preview": _preview(prompt_view_text),
         }
+
+    def _select_role_memory_context(
+        self,
+        *,
+        context: HookCallContext,
+        receiver_id: str,
+        state_prompt_views: list[str],
+        include_memory: bool = True,
+    ) -> _MemoryContextSelection:
+        base = _select_nonredundant_memory_context(
+            state_prompt_views=state_prompt_views,
+            memory_refs=(list(context.memory_context.refs) if include_memory else []),
+            memory_prompt_views=(
+                list(context.memory_context.prompt_views) if include_memory else []
+            ),
+        )
+        role = infer_collaboration_role(receiver_id, context.agent.role)
+        base.role = role
+        base.source_prompt_views = list(base.prompt_views)
+        if not base.prompt_views:
+            return base
+        with self._memory_lock:
+            current_task = self._current_team_task_by_group.get(
+                context.task.group_id,
+                "",
+            )
+        query = current_task or _continuity_source_text([], fallback=context.task.prompt)
+        initial = build_minimal_role_view(
+            query=query,
+            prompt_views=base.prompt_views,
+            role=role,
+        )
+        fetched_views: list[str] = []
+        fetched_state_ids: list[str] = []
+        if initial.missing_fields and context.continuity_context_required:
+            fetch_query = field_fetch_query(query, initial.missing_fields)
+            for memory_ref in base.refs:
+                state_ids = self._safe_kernel_call(
+                    "autogen_memory_source_state_ids",
+                    lambda ref=memory_ref: self.kernel.memory_store.source_state_ids(ref),
+                )
+                for state_id in list(state_ids or []):
+                    state_ref = self._safe_kernel_call(
+                        "autogen_memory_field_state_ref",
+                        lambda sid=state_id: self.kernel.state_pool.resolve_ref(sid),
+                    )
+                    if state_ref is None:
+                        continue
+                    span = self._safe_kernel_call(
+                        "autogen_memory_field_span",
+                        lambda ref=state_ref: self.kernel.state_pool.resolve_raw_span(
+                            ref,
+                            query=fetch_query,
+                            max_chunks=1,
+                        ),
+                    )
+                    content = str(getattr(span, "content", "") or "").strip()
+                    if not content:
+                        continue
+                    fetched_views.append(content)
+                    fetched_state_ids.append(state_id)
+                    self.metrics.record_state_access(
+                        task_id=context.task.task_id,
+                        round_id=1,
+                        mode="runtime_lite",
+                        raw_access_count=0,
+                        summary_access_count=0,
+                        evidence_snippet_access_count=1,
+                        access_escalation_count=1,
+                        read_lease_acquire_count=1,
+                    )
+                    if len(fetched_views) >= 2:
+                        break
+                if len(fetched_views) >= 2:
+                    break
+        final_view = build_minimal_role_view(
+            query=query,
+            prompt_views=[*base.prompt_views, *fetched_views],
+            role=role,
+        )
+        base.prompt_views = [final_view.text] if final_view.text else []
+        base.requested_fields = final_view.requested_fields
+        base.covered_fields = final_view.covered_fields
+        base.missing_fields = final_view.missing_fields
+        base.role_view_source_chars = final_view.source_chars
+        base.role_view_selected_chars = final_view.selected_chars
+        base.role_view_reduction_ratio = final_view.reduction_ratio
+        base.field_fetch_count = len(fetched_views)
+        base.field_fetch_tokens = _count_tokens(
+            self.token_counter,
+            "\n".join(fetched_views),
+        )
+        base.field_fetch_state_ids = fetched_state_ids
+        if fetched_views:
+            self.trace.write(
+                "autogen_memory_field_fetch",
+                {
+                    "call_id": context.call_id,
+                    "task_id": context.task.task_id,
+                    "receiver": receiver_id,
+                    "semantic_role": role,
+                    "requested_fields": list(initial.requested_fields),
+                    "initial_missing_fields": list(initial.missing_fields),
+                    "final_missing_fields": list(final_view.missing_fields),
+                    "field_fetch_count": len(fetched_views),
+                    "field_fetch_tokens": base.field_fetch_tokens,
+                    "state_ids": fetched_state_ids,
+                },
+            )
+        return base
 
     def record_call_error(
         self, context: HookCallContext | None, error: BaseException
@@ -4986,7 +5427,9 @@ def _continuity_source_text(
 ) -> str:
     messages = list(decoded_messages)
     user_texts = [
-        str(getattr(message, "content_text", "") or "").strip()
+        _team_rewrite_current_task(
+            str(getattr(message, "content_text", "") or "").strip()
+        )
         for message in messages
         if str(getattr(message, "source", "") or "").strip().lower() == "user"
         and str(getattr(message, "content_text", "") or "").strip()
@@ -4994,7 +5437,9 @@ def _continuity_source_text(
     if user_texts:
         return user_texts[-1]
     unscoped_texts = [
-        str(getattr(message, "content_text", "") or "").strip()
+        _team_rewrite_current_task(
+            str(getattr(message, "content_text", "") or "").strip()
+        )
         for message in messages
         if not str(getattr(message, "source", "") or "").strip()
         and str(getattr(message, "content_text", "") or "").strip()
@@ -5002,6 +5447,20 @@ def _continuity_source_text(
     if unscoped_texts:
         return unscoped_texts[-1]
     return fallback
+
+
+def _team_rewrite_current_task(text: str) -> str:
+    if "AGENTLITE_TEAM_REAL_REWRITE v1" not in text:
+        return text
+    legacy_match = re.search(
+        r"CURRENT_USER_TASK \(highest priority\):\s*\n(.*?)\nreceiver_prompt_views:\s*\n",
+        text,
+        flags=re.DOTALL,
+    )
+    if legacy_match:
+        return legacy_match.group(1).strip()
+    task_view, _ = _split_current_task_role_view(text)
+    return task_view or text
 
 
 def _continuity_cost_override_allowed(
@@ -5434,19 +5893,14 @@ def _build_team_real_rewrite_content(
 ) -> str:
     memory_refs = []
     seen_memory_ids: set[str] = set()
-    memory_prompt_view_text = ""
     for entry in receiver_entries:
         for ref in entry.get("memory_refs", []) or []:
             memory_id = str(ref.get("memory_id", "")) if isinstance(ref, dict) else ""
             if memory_id and memory_id not in seen_memory_ids:
                 seen_memory_ids.add(memory_id)
                 memory_refs.append(ref)
-        if not memory_prompt_view_text:
-            memory_prompt_view_text = str(
-                entry.get("memory_prompt_view_text", "") or ""
-            )
     manifest = {
-        "protocol": "agentlite.team_rewrite.v1",
+        "protocol": "agentlite.team_rewrite.v2",
         "receivers": [entry.get("receiver", "") for entry in receiver_entries],
         "state_refs": state_refs,
         "memory_refs": memory_refs,
@@ -5454,6 +5908,8 @@ def _build_team_real_rewrite_content(
             {
                 "receiver": entry.get("receiver", ""),
                 "shp_wire": entry.get("shadow_wire_envelope", {}),
+                "memory_refs": entry.get("memory_refs", []) or [],
+                "semantic_role": entry.get("semantic_role", "general"),
             }
             for entry in receiver_entries
         ],
@@ -5468,26 +5924,92 @@ def _build_team_real_rewrite_content(
     for entry in receiver_entries:
         receiver = str(entry.get("receiver", "") or "")
         prompt_view_text = str(
-            entry.get("state_prompt_view_text")
-            or entry.get("prompt_view_text", "")
+            entry.get("prompt_view_text", "")
             or ""
         )
         sections.extend(
             [
                 f"--- receiver: {receiver}",
+                f"semantic_role: {entry.get('semantic_role', 'general')}",
                 prompt_view_text,
             ]
         )
-    if memory_prompt_view_text:
-        sections.extend(
-            [
-                "--- shared_memory",
-                SHARED_MEMORY_MARKER,
-                "以下 MemoryView 是同一协作作用域中已通过规则准入的共享记忆，请在当前任务中复用并服从用户的新修订。",
-                memory_prompt_view_text,
-            ]
-        )
     return "\n".join(sections)
+
+
+def _extract_team_receiver_role_view(
+    content: str,
+    *,
+    receiver_id: str,
+) -> dict[str, Any]:
+    if "AGENTLITE_TEAM_REAL_REWRITE v1" not in content:
+        return {}
+    target = _safe_identifier(receiver_id)
+    sections = re.finditer(
+        r"(?:^|\n)--- receiver:\s*([^\n]+)\n(.*?)(?=\n--- receiver:|\Z)",
+        content,
+        flags=re.DOTALL,
+    )
+    selected_text = ""
+    for match in sections:
+        if _safe_identifier(match.group(1).strip()) == target:
+            selected_text = match.group(2).strip()
+            break
+    if not selected_text:
+        return {}
+    role_match = re.match(r"semantic_role:\s*([^\n]+)\n?", selected_text)
+    semantic_role = role_match.group(1).strip() if role_match else "general"
+    prompt_view = (
+        selected_text[role_match.end() :].strip()
+        if role_match
+        else selected_text
+    )
+    current_task_view, receiver_prompt_view = _split_current_task_role_view(
+        prompt_view
+    )
+    manifest: dict[str, Any] = {}
+    manifest_match = re.search(r"(?m)^broadcast_manifest=(\{.*\})$", content)
+    if manifest_match:
+        manifest = _json_object_or_empty(manifest_match.group(1))
+    receiver_wire = next(
+        (
+            item
+            for item in manifest.get("receiver_wires", [])
+            if isinstance(item, dict)
+            and _safe_identifier(str(item.get("receiver", ""))) == target
+        ),
+        {},
+    )
+    memory_prompt_view = ""
+    marker_index = prompt_view.find(SHARED_MEMORY_MARKER)
+    if marker_index >= 0:
+        memory_prompt_view = prompt_view[marker_index:].strip()
+    return {
+        "current_task": current_task_view,
+        "semantic_role": semantic_role,
+        "prompt_view": receiver_prompt_view,
+        "memory_prompt_view": memory_prompt_view,
+        "wire_envelope": dict(receiver_wire.get("shp_wire", {}) or {}),
+        "memory_refs": list(receiver_wire.get("memory_refs", []) or []),
+    }
+
+
+def _split_current_task_role_view(content: str) -> tuple[str, str]:
+    marker = "CURRENT_TASK_VIEW:"
+    marker_index = content.find(marker)
+    if marker_index < 0:
+        return "", content.strip()
+    remainder = content[marker_index + len(marker) :].lstrip("\r\n ")
+    boundary = re.search(
+        r"\n(?=(?:\[(?:artifact|retrieval|embedding|failure)_state:|"
+        r"\[state_tombstone:|AGENTLITE_SHARED_MEMORY))",
+        remainder,
+    )
+    if boundary is None:
+        return remainder.strip(), ""
+    task_view = remainder[: boundary.start()].strip()
+    prompt_view = remainder[boundary.start() :].strip()
+    return task_view, prompt_view
 
 
 def _team_rewrite_receiver_audit(
@@ -5521,6 +6043,43 @@ def _team_rewrite_receiver_audit(
                 ),
                 "memory_candidate_deduplicated_tokens": int(
                     entry.get("memory_candidate_deduplicated_tokens", 0) or 0
+                ),
+                "memory_view_mode": entry.get("memory_view_mode", ""),
+                "semantic_role": entry.get("semantic_role", "general"),
+                "requested_memory_fields": entry.get(
+                    "requested_memory_fields", []
+                ),
+                "covered_memory_fields": entry.get(
+                    "covered_memory_fields", []
+                ),
+                "missing_memory_fields": entry.get("missing_memory_fields", []),
+                "memory_source_view_tokens": int(
+                    entry.get("memory_source_view_tokens", 0) or 0
+                ),
+                "minimal_role_view_tokens": int(
+                    entry.get("minimal_role_view_tokens", 0) or 0
+                ),
+                "role_view_reduction_ratio": float(
+                    entry.get("role_view_reduction_ratio", 0.0) or 0.0
+                ),
+                "memory_field_fetch_count": int(
+                    entry.get("memory_field_fetch_count", 0) or 0
+                ),
+                "memory_field_fetch_tokens": int(
+                    entry.get("memory_field_fetch_tokens", 0) or 0
+                ),
+                "memory_field_fetch_state_ids": entry.get(
+                    "memory_field_fetch_state_ids", []
+                ),
+                "current_task_source_tokens": int(
+                    entry.get("current_task_source_tokens", 0) or 0
+                ),
+                "current_task_role_view_tokens": int(
+                    entry.get("current_task_role_view_tokens", 0) or 0
+                ),
+                "current_task_role_view_reduction_ratio": float(
+                    entry.get("current_task_role_view_reduction_ratio", 0.0)
+                    or 0.0
                 ),
                 "prompt_view_preview": entry.get("prompt_view_preview", ""),
             }

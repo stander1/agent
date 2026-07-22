@@ -58,6 +58,9 @@ class StatePoolLiteTest(unittest.TestCase):
             self.assertEqual(state_ref.tier, "cold")
             self.assertEqual(state.tier, "cold")
             self.assertIsNotNone(state.audit_payload_ref)
+            resolved_ref = pool.resolve_ref(state_ref.state_id)
+            self.assertIsNotNone(resolved_ref)
+            self.assertEqual(resolved_ref.state_id, state_ref.state_id)
             prompt_view = pool.render_prompt_view(state_ref, "ReviewerAgent")
             self.assertIn("raw_content=cold_audit_only", prompt_view)
             self.assertNotIn(raw_content, prompt_view)
@@ -158,6 +161,10 @@ class MemoryStoreLiteTest(unittest.TestCase):
         self.assertEqual(report.promotion_view_count, 1)
         self.assertEqual(report.unresolved_slot_count, 0)
         self.assertEqual(report.memory_ref.slot_id, "slot.system.deliverable_requirement")
+        self.assertEqual(
+            store.source_state_ids(report.memory_ref),
+            ["state_a", "state_b"],
+        )
 
         hits = store.search_memory("最终手册预算表决策日志", tags=["travel_A"])
         self.assertTrue(hits)

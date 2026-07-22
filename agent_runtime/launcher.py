@@ -17,6 +17,7 @@ from agent_runtime.adapters.autogen_studio import (
 )
 from agent_runtime.eval.experiment_archive import (
     create_agentlite_session_binding,
+    extended_length_path,
     verify_bound_experiment,
     write_agentlite_session_result,
 )
@@ -121,7 +122,10 @@ class ManagedProcessLauncher:
                     experiment_dir / "agentlite_data" / "sessions" / session_id
                 )
                 archived_session_dir.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(session_dir, archived_session_dir)
+                shutil.copytree(
+                    extended_length_path(session_dir),
+                    extended_length_path(archived_session_dir),
+                )
                 bound = verify_bound_experiment(experiment_dir)
                 binding_verified = True
                 bound_run_id = str(bound["run_id"])
@@ -224,7 +228,7 @@ class ManagedProcessLauncher:
                 ),
                 "AGENTLITE_BOOTSTRAP_METADATA": json.dumps(
                     {
-                        "launcher_version": "v5.13q",
+                        "launcher_version": "v5.13r",
                         "parent_pid": os.getpid(),
                     },
                     ensure_ascii=False,

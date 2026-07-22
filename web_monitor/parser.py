@@ -531,6 +531,21 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "continuity_required_event_count": 0,
         "continuity_cost_override_count": 0,
         "continuity_memory_injection_count": 0,
+        "memory_source_view_tokens": 0,
+        "minimal_role_view_tokens": 0,
+        "role_view_saved_tokens": 0,
+        "role_view_reduction_ratio": 0.0,
+        "memory_field_fetch_count": 0,
+        "memory_field_fetch_tokens": 0,
+        "receiver_role_view_hydration_count": 0,
+        "current_task_source_tokens": 0,
+        "current_task_role_view_tokens": 0,
+        "current_task_role_view_saved_tokens": 0,
+        "current_task_role_view_reduction_ratio": 0.0,
+        "final_delivery_assessed_count": 0,
+        "final_delivery_valid_count": 0,
+        "final_delivery_invalid_count": 0,
+        "final_delivery_valid_rate": 0.0,
         "memory_candidate_deduplicated_count": 0,
         "memory_candidate_deduplicated_tokens": 0,
         "shadow_native_tokens": 0,
@@ -539,7 +554,7 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "shadow_potential_savings_ratio": 0.0,
         "shadow_event_count": 0,
         "event_count": 0,
-        "source": "autogen_trace_rewrite_outcomes_v3",
+        "source": "autogen_trace_role_views_v4",
     }
     actual_event_types = {
         "autogen_agent_input_real_rewrite",
@@ -561,6 +576,15 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
     continuity_required_events = 0
     continuity_cost_overrides = 0
     continuity_memory_injections = 0
+    memory_source_view_tokens = 0
+    minimal_role_view_tokens = 0
+    memory_field_fetch_count = 0
+    memory_field_fetch_tokens = 0
+    receiver_role_view_hydrations = 0
+    current_task_source_tokens = 0
+    current_task_role_view_tokens = 0
+    final_delivery_assessed = 0
+    final_delivery_valid = 0
     for event in trace_events:
         event_type = str(event.get("event_type", ""))
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
@@ -591,6 +615,16 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
             breakdown["unique_retrieved_memory_tokens"] += _int(
                 payload.get("retrieved_memory_tokens")
             )
+            continue
+        if event_type == "autogen_memory_candidate":
+            assessment = (
+                payload.get("delivery_assessment")
+                if isinstance(payload.get("delivery_assessment"), dict)
+                else {}
+            )
+            if assessment:
+                final_delivery_assessed += 1
+                final_delivery_valid += int(bool(assessment.get("valid")))
             continue
         if event_type == "autogen_model_client_usage":
             usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
@@ -658,6 +692,27 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         breakdown["memory_candidate_deduplicated_tokens"] += _int(
             payload.get("memory_candidate_deduplicated_tokens")
         )
+        memory_source_view_tokens += _int(
+            payload.get("memory_source_view_tokens")
+        )
+        minimal_role_view_tokens += _int(
+            payload.get("minimal_role_view_tokens")
+        )
+        memory_field_fetch_count += _int(payload.get("memory_field_fetch_count"))
+        memory_field_fetch_tokens += _int(payload.get("memory_field_fetch_tokens"))
+        current_task_source_tokens += _int(
+            payload.get("current_task_source_tokens")
+        )
+        current_task_role_view_tokens += _int(
+            payload.get("current_task_role_view_tokens")
+        )
+        rewrite_safety = (
+            payload.get("rewrite_safety")
+            if isinstance(payload.get("rewrite_safety"), dict)
+            else {}
+        )
+        if applied and rewrite_safety.get("team_receiver_role_view_hydration"):
+            receiver_role_view_hydrations += 1
         native, runtime, direct, prompt_view, retrieved_memory = _autogen_event_cost(
             payload
         )
@@ -706,6 +761,47 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
     breakdown["continuity_required_event_count"] = continuity_required_events
     breakdown["continuity_cost_override_count"] = continuity_cost_overrides
     breakdown["continuity_memory_injection_count"] = continuity_memory_injections
+    breakdown["memory_source_view_tokens"] = memory_source_view_tokens
+    breakdown["minimal_role_view_tokens"] = minimal_role_view_tokens
+    breakdown["role_view_saved_tokens"] = (
+        memory_source_view_tokens - minimal_role_view_tokens
+    )
+    breakdown["role_view_reduction_ratio"] = (
+        round(
+            (memory_source_view_tokens - minimal_role_view_tokens)
+            / memory_source_view_tokens,
+            6,
+        )
+        if memory_source_view_tokens > 0
+        else 0.0
+    )
+    breakdown["memory_field_fetch_count"] = memory_field_fetch_count
+    breakdown["memory_field_fetch_tokens"] = memory_field_fetch_tokens
+    breakdown["receiver_role_view_hydration_count"] = receiver_role_view_hydrations
+    breakdown["current_task_source_tokens"] = current_task_source_tokens
+    breakdown["current_task_role_view_tokens"] = current_task_role_view_tokens
+    breakdown["current_task_role_view_saved_tokens"] = (
+        current_task_source_tokens - current_task_role_view_tokens
+    )
+    breakdown["current_task_role_view_reduction_ratio"] = (
+        round(
+            (current_task_source_tokens - current_task_role_view_tokens)
+            / current_task_source_tokens,
+            6,
+        )
+        if current_task_source_tokens > 0
+        else 0.0
+    )
+    breakdown["final_delivery_assessed_count"] = final_delivery_assessed
+    breakdown["final_delivery_valid_count"] = final_delivery_valid
+    breakdown["final_delivery_invalid_count"] = (
+        final_delivery_assessed - final_delivery_valid
+    )
+    breakdown["final_delivery_valid_rate"] = (
+        round(final_delivery_valid / final_delivery_assessed, 6)
+        if final_delivery_assessed
+        else 0.0
+    )
     breakdown["event_count"] = seen_cost_events
     return breakdown
 

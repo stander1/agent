@@ -3405,6 +3405,25 @@ AgentLite 的 AutoGen Core 接管已经不局限于单一 content dataclass；
 
 本地验证已通过 192 项全量测试与完整 release gate；真实 Studio A1-A10 需使用全新数据目录重跑确认。
 
+## 55. v5.13r：最小充分角色视图与端到端核算
+
+### 55.1 对 v5.13q 的校正
+
+v5.13q 只解决必要记忆被纯 Token 门禁丢弃的问题；v5.13r 进一步避免把公共 MemoryView 和完整当前任务重复发送给所有 Agent。
+
+### 55.2 实现
+
+1. 框架无关、本地规则优先的 Planner / Writer / Reviewer / General 角色视图；
+2. 当前用户任务和已准入 MemoryView 分别生成最小充分角色视图；
+3. AutoGen Team 只携带接收者分区，Agent 调用前只水合自己的分区；
+4. 连续任务缺少明确字段时，通过来源 StateRef 解析受限相关片段；
+5. 同时记录任务视图、记忆视图、字段补取、端到端协作 Token 和最终交付规则通过率；
+6. 不使用 Question A 专用规则，不调用控制 LLM，不绕过 Schema、消息结构、协作组隔离和记忆准入。
+
+### 55.3 验证与边界
+
+本地 198 项测试和完整 release gate 通过。MemoryView 跨启动持久化已保留；来源状态的跨进程字段展开仍需共享 StatePool 索引持久化。
+
 ## 42. v5.13p：AutoGen Studio 网页 Run 级绑定
 
 ### 42.1 解决的问题

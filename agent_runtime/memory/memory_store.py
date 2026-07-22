@@ -814,6 +814,16 @@ class MemoryStoreLite:
     ) -> list[MemoryReferenceRecord]:
         return self.reference_manager.active_refs(memory_ref.memory_id, ref_type)  # type: ignore[arg-type]
 
+    def source_state_ids(self, memory_ref: MemoryRef) -> list[str]:
+        memory = self._memories.get(memory_ref.memory_id)
+        if memory is None or not memory.promotion_view_id:
+            return []
+        promotion = self._promotion_views.get(memory.promotion_view_id)
+        if promotion is None:
+            return []
+        ordered = [*promotion.source_state_ids, *promotion.evidence_refs]
+        return list(dict.fromkeys(state_id for state_id in ordered if state_id))
+
     def replace_memory(
         self, old_ref: MemoryRef, new_ref: MemoryRef, *, reason: str = ""
     ) -> int:

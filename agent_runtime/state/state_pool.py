@@ -1166,6 +1166,20 @@ class StatePoolLite:
     def ref_to_dict(self, state_ref: StateRef) -> dict[str, Any]:
         return asdict(state_ref)
 
+    def resolve_ref(self, state_id: str) -> StateRef | None:
+        state = self._states.get(state_id)
+        if state is None or state.lifecycle in {"deleted", "tombstoned", "evicted"}:
+            return None
+        return StateRef(
+            state_id=state.state_id,
+            state_type=state.state_type,
+            version=state.version,
+            payload_kind=state.payload_kind,
+            contains_embedding_refs=state.contains_embedding_refs,
+            usage_hint=state.state_type,
+            tier=state.tier,
+        )
+
     def validate_fencing_token(
         self,
         state_ref: StateRef,
@@ -1239,7 +1253,8 @@ class StatePoolLite:
         if not state.audit_payload_ref or not _exists(state.audit_payload_ref):
             self._raw_chunk_index[state.state_id] = []
             return []
-        payload = json.loads(_read_text(state.audit_payload_ref))
+        with self.leases.read_lease(state.state_id, owner="raw_chunk_index"):
+            payload = json.loads(_read_text(state.audit_payload_ref))
         text = self._payload_to_text(payload)
         chunks: list[RawChunk] = []
         for index, start in enumerate(range(0, len(text), max(1, chunk_chars)), start=1):
@@ -1289,9 +1304,10 @@ class StatePoolLite:
             )
         source_text = ""
         if state.audit_payload_ref and _exists(state.audit_payload_ref):
-            source_text = self._payload_to_text(
-                json.loads(_read_text(state.audit_payload_ref))
-            )
+            with self.leases.read_lease(state.state_id, owner="raw_span"):
+                source_text = self._payload_to_text(
+                    json.loads(_read_text(state.audit_payload_ref))
+                )
         content = "\n".join(
             source_text[chunk.offset_start : chunk.offset_end] for chunk in selected
         )
