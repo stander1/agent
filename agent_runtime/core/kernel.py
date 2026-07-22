@@ -316,7 +316,7 @@ class CollaborationKernel:
                 round_id=round_id,
                 mode=mode,
                 hit_count=len(search_report.refs),
-                useful_hit_count=len(search_report.refs),
+                useful_hit_count=0,
                 wrong_hit_count=0,
                 prompt_view="\n".join(prompt_views),
                 token_counter=self.token_counter,
@@ -333,6 +333,42 @@ class CollaborationKernel:
             prompt_views=prompt_views,
             deliverable_view=deliverable_view,
         )
+
+    def record_memory_use_feedback(
+        self,
+        *,
+        task: TaskSpec,
+        round_id: int,
+        mode: Mode,
+        useful_refs: list[MemoryRef],
+        wrong_refs: list[MemoryRef] | None = None,
+        supported_output: bool = False,
+    ) -> dict[str, int]:
+        """Apply evidence-backed memory feedback after a downstream output exists."""
+        wrong_refs = list(wrong_refs or [])
+        useful_ids = list(dict.fromkeys(ref.memory_id for ref in useful_refs))
+        wrong_ids = list(dict.fromkeys(ref.memory_id for ref in wrong_refs))
+        persisted_useful = self.memory_store.record_useful_hits(useful_ids)
+        self.metrics.record_memory_use_feedback(
+            task_id=task.task_id,
+            round_id=round_id,
+            mode=mode,
+            useful_hit_count=len(useful_ids),
+            wrong_hit_count=len(wrong_ids),
+        )
+        if supported_output:
+            self.metrics.record_memory_supported_output(
+                task_id=task.task_id,
+                round_id=round_id,
+                mode=mode,
+                count=1,
+            )
+        return {
+            "useful_hit_count": len(useful_ids),
+            "wrong_hit_count": len(wrong_ids),
+            "persisted_useful_hit_count": persisted_useful,
+            "memory_supported_output_count": int(supported_output),
+        }
 
     def before_agent_receive(
         self,

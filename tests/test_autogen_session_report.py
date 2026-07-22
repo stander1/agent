@@ -130,12 +130,23 @@ class AutoGenSessionReportTest(unittest.TestCase):
                 },
             },
             {
+                "event_type": "autogen_memory_adoption",
+                "payload": {
+                    "memory_injected_count": 1,
+                    "useful_memory_hit_count": 1,
+                    "wrong_memory_hit_count": 0,
+                    "unassessed_memory_hit_count": 0,
+                    "memory_supported_output_count": 1,
+                },
+            },
+            {
                 "event_type": "autogen_core_content_real_rewrite",
                 "payload": {
                     "rewrite_applied": False,
                     "rewrite_fallback_count": 1,
                     "fallback_reasons": ["unsupported_core_message_content_field"],
                     "fallback_buckets": ["core_message_contract_invalid"],
+                    "native_content_tokens": 0,
                 },
             },
         ]
@@ -144,8 +155,10 @@ class AutoGenSessionReportTest(unittest.TestCase):
 
         self.assertEqual(summary["memory_hit_count"], 1)
         self.assertEqual(summary["memory_injected_count"], 1)
-        self.assertEqual(summary["useful_memory_hit_count"], 0)
-        self.assertEqual(summary["unassessed_memory_hit_count"], 1)
+        self.assertEqual(summary["useful_memory_hit_count"], 1)
+        self.assertEqual(summary["unassessed_memory_hit_count"], 0)
+        self.assertEqual(summary["memory_adoption_event_count"], 1)
+        self.assertEqual(summary["memory_supported_output_count"], 1)
         self.assertEqual(summary["native_baseline_tokens"], 200)
         self.assertEqual(summary["runtime_tokens"], 140)
         self.assertEqual(summary["rewrite_audit_event_count"], 3)
@@ -153,7 +166,14 @@ class AutoGenSessionReportTest(unittest.TestCase):
         self.assertEqual(summary["rewrite_applied_event_count"], 1)
         self.assertEqual(summary["rewrite_fallback_event_count"], 2)
         self.assertEqual(summary["rewrite_cost_gate_fallback_count"], 1)
-        self.assertEqual(summary["rewrite_contract_fallback_count"], 1)
+        self.assertEqual(summary["rewrite_contract_fallback_count"], 0)
+        self.assertEqual(
+            summary["rewrite_ineligible_control_passthrough_count"],
+            1,
+        )
+        self.assertEqual(summary["rewrite_cost_guard_passthrough_count"], 1)
+        self.assertEqual(summary["rewrite_error_fallback_count"], 0)
+        self.assertEqual(summary["rewrite_error_fallback_rate"], 0.0)
         self.assertEqual(summary["actual_rewrite_event_count"], 1)
         self.assertEqual(summary["continuity_required_event_count"], 1)
         self.assertEqual(summary["continuity_cost_override_count"], 1)

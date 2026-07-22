@@ -857,6 +857,24 @@ class MemoryStoreLite:
         )
         return rendered[:budget_chars]
 
+    def resolve_ref(self, memory_id: str) -> MemoryRef | None:
+        """Return the current reference for a memory without changing hit counters."""
+        memory = self._memories.get(memory_id)
+        return self.ref(memory) if memory is not None else None
+
+    def record_useful_hits(self, memory_ids: list[str]) -> int:
+        """Persist evidence-backed downstream adoption for unique memories."""
+        updated = 0
+        for memory_id in dict.fromkeys(item for item in memory_ids if item):
+            memory = self._memories.get(memory_id)
+            if memory is None:
+                continue
+            memory.useful_hit_count += 1
+            updated += 1
+        if updated:
+            self._persist_snapshot()
+        return updated
+
     def render_audit_view(self, memory_ref: MemoryRef, budget_chars: int = 1800) -> str:
         memory = self._memories[memory_ref.memory_id]
         view = self._views[memory.memory_view_id]
@@ -1574,11 +1592,18 @@ class MemoryStoreLite:
 
     def _infer_slot_hint(self, tags: list[str], task_topic: str) -> str:
         joined = " ".join(tags + [task_topic]).lower()
-        if "reviewer" in joined or "failure" in joined:
+        if any(
+            term in joined
+            for term in ("failure", "error", "violation", "rejected", "outdated")
+        ):
             return "failure_reason"
-        if "memory_manager" in joined or "writer" in joined:
-            return "reuse_hint"
-        return "final_deliverable" if "最终" in task_topic else "reuse_hint"
+        if any(term in joined for term in ("requirement", "constraint", "preference")):
+            return "slot.project.requirement"
+        if "evidence" in joined:
+            return "slot.paper.evidence"
+        if any(term in joined for term in ("final", "deliverable", "最终")):
+            return "final_deliverable"
+        return "reuse_hint"
 
     def _next_id(self, prefix: str, task_id: str, source_agent: str, summary: str) -> str:
         seed = f"{prefix}:{task_id}:{source_agent}:{summary}:{len(self._claims)}"

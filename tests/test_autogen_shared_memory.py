@@ -16,6 +16,7 @@ from agent_runtime.drivers.autogen import (
     _continuity_cost_override_allowed,
     _continuity_requirement_reasons,
     _continuity_source_text,
+    _memory_adoption_evidence,
     _memory_view_facts_covered,
     _select_token_nonexpanding_view,
 )
@@ -74,6 +75,129 @@ class ProfiledTeam:
 
 
 class AutoGenSharedMemoryTest(unittest.TestCase):
+    def test_memory_adoption_requires_output_evidence_beyond_current_task(self) -> None:
+        evidence = _memory_adoption_evidence(
+            memory_prompt_view=(
+                "[memory_view:view_budget] slot=slot.project.requirement; "
+                "claim=claim_budget; 已确认总预算为2800元，偏好自然风景和轻徒步； "
+                "tags=[requirement]"
+            ),
+            injected_prompt_view="已确认总预算为2800元，偏好自然风景和轻徒步。",
+            current_task_text="请基于上一轮结果继续完善可执行方案。",
+            output_text="方案保留已确认的2800元总预算，并安排自然风景轻徒步。",
+            memory_id="mem_budget",
+            memory_view_id="view_budget",
+        )
+        duplicate = _memory_adoption_evidence(
+            memory_prompt_view=(
+                "[memory_view:view_budget] slot=slot.project.requirement; "
+                "claim=claim_budget; 已确认总预算为2800元，偏好自然风景和轻徒步； "
+                "tags=[requirement]"
+            ),
+            injected_prompt_view="已确认总预算为2800元，偏好自然风景和轻徒步。",
+            current_task_text="已确认总预算为2800元，偏好自然风景和轻徒步。",
+            output_text="已确认总预算为2800元，偏好自然风景和轻徒步。",
+            memory_id="mem_budget",
+            memory_view_id="view_budget",
+        )
+        omitted = _memory_adoption_evidence(
+            memory_prompt_view=(
+                "[memory_view:view_budget] slot=slot.project.requirement; "
+                "claim=claim_budget; 已确认总预算为2800元，偏好自然风景和轻徒步； "
+                "tags=[requirement]"
+            ),
+            injected_prompt_view="当前角色只需要输出风险清单。",
+            current_task_text="请继续完善可执行方案。",
+            output_text="已确认总预算为2800元，偏好自然风景和轻徒步。",
+            memory_id="mem_budget",
+            memory_view_id="view_budget",
+        )
+
+        self.assertTrue(evidence["adopted"])
+        self.assertGreater(evidence["matched_fact_count"], 0)
+        self.assertFalse(duplicate["adopted"])
+        self.assertGreater(duplicate["current_task_duplicate_fact_count"], 0)
+        self.assertFalse(omitted["adopted"])
+        self.assertEqual(omitted["candidate_fact_count"], 0)
+
+    def test_arbitrary_agent_output_persists_evidence_backed_memory_use(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = {
+                "AGENTLITE_AUTOGEN_BROADCAST_MODE": "real-rewrite",
+                "AGENTLITE_AUTOGEN_TEAM_REWRITE": "1",
+                "AGENTLITE_AUTOGEN_SHARED_MEMORY": "1",
+                "AGENTLITE_MEMORY_SCOPE": "generic-adoption-test",
+            }
+            with patch.dict("os.environ", env, clear=False):
+                manager = AutoGenHookManager(self._context(root, "launch_adoption"))
+                summary = "已确认总预算为2800元，偏好自然风景和轻徒步，避开拥挤商业景点。"
+                ref = manager.kernel.memory_store.write_memory(
+                    task_id="prior_task",
+                    source_agent="RequirementAnalyst",
+                    task_topic="generic.requirement",
+                    summary=summary,
+                    tags=["generic-adoption-test"],
+                    slot_hint="slot.project.requirement",
+                )
+                messages = [{
+                    "type": "TextMessage",
+                    "source": "user",
+                    "content": (
+                        "请基于上一轮已经确认的要求继续形成完整方案。"
+                        + "请保持事实一致并给出可执行细节。" * 500
+                    ),
+                }]
+                agent = ProfiledAgent(
+                    "DeliveryComposer",
+                    "Compose a complete deliverable from confirmed facts.",
+                    "Use supplied evidence and preserve confirmed constraints.",
+                )
+                context = manager.record_call_start(
+                    instance=agent,
+                    method_name="on_messages",
+                    target_kind="agentchat_agent",
+                    args=(messages,),
+                    kwargs={},
+                )
+                context.memory_context = MemoryContext(
+                    refs=[ref],
+                    prompt_views=[manager.kernel.memory_store.render_prompt_view(ref)],
+                )
+
+                rewritten_args, _ = manager.rewrite_call_arguments_if_safe(
+                    context,
+                    (messages,),
+                    {},
+                )
+                self.assertIn(SHARED_MEMORY_MARKER, rewritten_args[0][0]["content"])
+                manager.record_call_end(
+                    context,
+                    FakeTextMessage(
+                        "完整方案沿用已确认约束：总预算2800元，偏好自然风景和轻徒步，"
+                        "并避开拥挤商业景点。",
+                        "DeliveryComposer",
+                    ),
+                )
+
+                events = self._events(manager.output_dir / "trace.jsonl")
+                adoption = next(
+                    event
+                    for event in reversed(events)
+                    if event.get("event_type") == "autogen_memory_adoption"
+                )
+                self.assertEqual(adoption["payload"]["useful_memory_hit_count"], 1)
+                self.assertEqual(
+                    adoption["payload"]["memory_supported_output_count"],
+                    1,
+                )
+                memory = next(
+                    item
+                    for item in manager.kernel.memory_store.snapshot()["memories"]
+                    if item["memory_id"] == ref.memory_id
+                )
+                self.assertEqual(memory["useful_hit_count"], 1)
+
     def test_autogen_runtime_uuid_instance_maps_to_logical_business_agent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

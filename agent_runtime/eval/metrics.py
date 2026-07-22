@@ -258,6 +258,20 @@ class MetricsCollector:
         row = self._row(task_id, round_id, mode)
         row.memory_supported_output_count += count
 
+    def record_memory_use_feedback(
+        self,
+        *,
+        task_id: str,
+        round_id: int,
+        mode: Mode,
+        useful_hit_count: int = 0,
+        wrong_hit_count: int = 0,
+    ) -> None:
+        """Record post-output memory evidence without counting another retrieval."""
+        row = self._row(task_id, round_id, mode)
+        row.useful_memory_hit_count += useful_hit_count
+        row.wrong_memory_hit_count += wrong_hit_count
+
     def record_memory_write(
         self,
         *,

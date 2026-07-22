@@ -603,6 +603,8 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "useful_memory_hit_count": 0,
         "wrong_memory_hit_count": 0,
         "unassessed_memory_hit_count": 0,
+        "memory_adoption_event_count": 0,
+        "memory_supported_output_count": 0,
         "unique_retrieved_memory_tokens": 0,
         "fanout_retrieved_memory_tokens": 0,
         "end_to_end_collaboration_tokens": 0,
@@ -616,6 +618,12 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "rewrite_fallback_event_count": 0,
         "rewrite_cost_gate_fallback_count": 0,
         "rewrite_contract_fallback_count": 0,
+        "rewrite_ineligible_control_passthrough_count": 0,
+        "rewrite_cost_guard_passthrough_count": 0,
+        "rewrite_policy_guard_passthrough_count": 0,
+        "rewrite_error_fallback_count": 0,
+        "rewrite_eligible_event_count": 0,
+        "rewrite_error_fallback_rate": 0.0,
         "actual_rewrite_event_count": 0,
         "continuity_required_event_count": 0,
         "continuity_cost_override_count": 0,
@@ -654,7 +662,7 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "shadow_potential_savings_ratio": 0.0,
         "shadow_event_count": 0,
         "event_count": 0,
-        "source": "autogen_trace_capability_views_v5",
+        "source": "autogen_trace_memory_adoption_v6",
     }
     actual_event_types = {
         "autogen_agent_input_real_rewrite",
@@ -673,6 +681,10 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
     rewrite_fallback_events = 0
     rewrite_cost_gate_fallbacks = 0
     rewrite_contract_fallbacks = 0
+    rewrite_ineligible_control_passthroughs = 0
+    rewrite_cost_guard_passthroughs = 0
+    rewrite_policy_guard_passthroughs = 0
+    rewrite_error_fallbacks = 0
     continuity_required_events = 0
     continuity_cost_overrides = 0
     continuity_memory_injections = 0
@@ -746,6 +758,18 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
                 payload.get("retrieved_memory_tokens")
             )
             continue
+        if event_type == "autogen_memory_adoption":
+            breakdown["memory_adoption_event_count"] += 1
+            breakdown["useful_memory_hit_count"] += _int(
+                payload.get("useful_memory_hit_count")
+            )
+            breakdown["wrong_memory_hit_count"] += _int(
+                payload.get("wrong_memory_hit_count")
+            )
+            breakdown["memory_supported_output_count"] += _int(
+                payload.get("memory_supported_output_count")
+            )
+            continue
         if event_type == "autogen_memory_candidate":
             assessment = (
                 payload.get("delivery_assessment")
@@ -795,7 +819,11 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         ) > 0
         if applied:
             rewrite_applied_events += 1
-            if continuity_required and _int(payload.get("memory_injected_count")) > 0:
+            if (
+                event_type == "autogen_agent_input_real_rewrite"
+                and continuity_required
+                and _int(payload.get("memory_injected_count")) > 0
+            ):
                 continuity_memory_injections += 1
         else:
             rewrite_fallback_events += 1
@@ -809,11 +837,20 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
                 for item in (payload.get("fallback_reasons") or [])
                 if str(item)
             }
-            if "cost_gate_failed" in fallback_buckets or any(
-                "token_not_reduced" in reason for reason in fallback_reasons
-            ):
+            classification = _rewrite_passthrough_classification(payload)
+            if classification == "ineligible_control_passthrough":
+                rewrite_ineligible_control_passthroughs += 1
+            elif classification == "cost_guard_passthrough":
+                rewrite_cost_guard_passthroughs += 1
+            elif classification == "policy_guard_passthrough":
+                rewrite_policy_guard_passthroughs += 1
+            else:
+                rewrite_error_fallbacks += 1
+            if classification == "cost_guard_passthrough":
                 rewrite_cost_gate_fallbacks += 1
-            if any("contract" in bucket for bucket in fallback_buckets):
+            if classification == "error_fallback" and any(
+                "contract" in bucket for bucket in fallback_buckets
+            ):
                 rewrite_contract_fallbacks += 1
         breakdown["memory_candidate_deduplicated_count"] += _int(
             payload.get("memory_candidate_deduplicated_fanout_count")
@@ -877,8 +914,9 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
             retrieved_memory = 0
         else:
             injected_count = _int(payload.get("memory_injected_count"))
-            breakdown["memory_injected_count"] += injected_count
-            breakdown["unassessed_memory_hit_count"] += injected_count
+            if event_type == "autogen_agent_input_real_rewrite":
+                breakdown["memory_injected_count"] += injected_count
+                breakdown["unassessed_memory_hit_count"] += injected_count
         breakdown["native_baseline_tokens"] += native
         breakdown["direct_message_tokens"] += direct
         breakdown["prompt_view_tokens"] += prompt_view
@@ -908,6 +946,33 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
     breakdown["rewrite_fallback_event_count"] = rewrite_fallback_events
     breakdown["rewrite_cost_gate_fallback_count"] = rewrite_cost_gate_fallbacks
     breakdown["rewrite_contract_fallback_count"] = rewrite_contract_fallbacks
+    breakdown["rewrite_ineligible_control_passthrough_count"] = (
+        rewrite_ineligible_control_passthroughs
+    )
+    breakdown["rewrite_cost_guard_passthrough_count"] = (
+        rewrite_cost_guard_passthroughs
+    )
+    breakdown["rewrite_policy_guard_passthrough_count"] = (
+        rewrite_policy_guard_passthroughs
+    )
+    breakdown["rewrite_error_fallback_count"] = rewrite_error_fallbacks
+    rewrite_eligible_events = (
+        rewrite_applied_events
+        + rewrite_cost_guard_passthroughs
+        + rewrite_error_fallbacks
+    )
+    breakdown["rewrite_eligible_event_count"] = rewrite_eligible_events
+    breakdown["rewrite_error_fallback_rate"] = (
+        round(rewrite_error_fallbacks / rewrite_eligible_events, 6)
+        if rewrite_eligible_events
+        else 0.0
+    )
+    breakdown["unassessed_memory_hit_count"] = max(
+        0,
+        breakdown["memory_injected_count"]
+        - breakdown["useful_memory_hit_count"]
+        - breakdown["wrong_memory_hit_count"],
+    )
     breakdown["actual_rewrite_event_count"] = rewrite_applied_events
     breakdown["continuity_required_event_count"] = continuity_required_events
     breakdown["continuity_cost_override_count"] = continuity_cost_overrides
@@ -990,6 +1055,62 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
     ]
     breakdown["event_count"] = seen_cost_events
     return breakdown
+
+
+def _rewrite_passthrough_classification(payload: dict[str, Any]) -> str:
+    explicit = str(payload.get("passthrough_classification") or "")
+    if explicit:
+        return explicit
+    if bool(payload.get("rewrite_applied")) or _int(
+        payload.get("rewrite_applied_count")
+    ) > 0:
+        return "rewrite_applied"
+    reasons = {
+        str(item)
+        for item in (payload.get("fallback_reasons") or [])
+        if str(item)
+    }
+    buckets = {
+        str(item)
+        for item in (payload.get("fallback_buckets") or [])
+        if str(item)
+    }
+    native_tokens = max(
+        _int(payload.get("native_content_tokens")),
+        _int(payload.get("native_input_tokens")),
+        _int(payload.get("native_task_tokens")),
+        _int(payload.get("native_full_broadcast_tokens")),
+    )
+    if native_tokens <= 0 and reasons & {
+        "empty_messages",
+        "empty_text_payload",
+        "empty_team_task_payload",
+        "empty_core_message_payload",
+        "empty_core_response_payload",
+        "missing_core_message_argument",
+        "missing_core_response_result",
+        "unsupported_core_message_content_field",
+        "unsupported_core_response_content_field",
+    }:
+        return "ineligible_control_passthrough"
+    if "cost_gate_failed" in buckets or any(
+        "token_not_reduced" in reason for reason in reasons
+    ):
+        return "cost_guard_passthrough"
+    if any(
+        marker in bucket
+        for bucket in buckets
+        for marker in (
+            "env_guard",
+            "dry_run_guard",
+            "already_rewritten",
+            "control_guard",
+            "lineage_guard",
+            "unsupported_message_type",
+        )
+    ):
+        return "policy_guard_passthrough"
+    return "error_fallback"
 
 
 def _autogen_event_cost(payload: dict[str, Any]) -> tuple[int, int, int, int, int]:

@@ -550,7 +550,9 @@
     task.status = normalizeStatus(snapshot.status);
     task.agents = runtime.agents.length || baseline.agents.length || task.agents;
     task.duration = seconds(runtime.finished?.latency_ms || runtimeSummary.latency_ms || baseline.finished?.latency_ms || baselineSummary.latency_ms);
-    task.memoryHits = runtimeSummary.useful_memory_hit_count || runtimeSummary.memory_hit_count || countRefs(runtime.messages, "memory_refs");
+    task.memoryHits = Object.prototype.hasOwnProperty.call(snapshotTokenSummary, "useful_memory_hit_count")
+      ? Number(snapshotTokenSummary.useful_memory_hit_count || 0)
+      : (runtimeSummary.memory_hit_count || countRefs(runtime.messages, "memory_refs"));
     task.progress = task.status === "success" ? 100 : task.status === "failed" ? Math.max(10, task.progress || 10) : Math.min(95, 20 + runtime.timeline.length * 4);
     task.alerts = (snapshot.errors || []).length;
 

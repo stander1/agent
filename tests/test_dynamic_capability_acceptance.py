@@ -13,6 +13,9 @@ EXPERIMENT = ROOT / "experiments" / "v5.13s-dynamic-capability-acceptance"
 EXPERIMENT_V513T = (
     ROOT / "experiments" / "v5.13t-capability-identity-no-expansion"
 )
+EXPERIMENT_V513U = (
+    ROOT / "experiments" / "v5.13u-evidence-attribution-acceptance"
+)
 
 
 def load_module(filename: str, module_name: str):
@@ -65,6 +68,51 @@ class DynamicCapabilityAcceptanceTest(unittest.TestCase):
         self.assertIn("runs/v5.13t-capability-identity", source)
         self.assertIn("exports/v5.13t-capability-identity-", source)
         self.assertIn("--report-version v5.13t", source)
+
+    def test_v513u_runner_uses_dedicated_evidence_paths(self) -> None:
+        source = (EXPERIMENT_V513U / "run_openeuler.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("AGENTLITE_V513U_EXP_ID", source)
+        self.assertIn("runs/v5.13u-evidence-attribution", source)
+        self.assertIn("exports/v5.13u-evidence-attribution-", source)
+        self.assertIn("--report-version v5.13u", source)
+
+    def test_v513u_evidence_checks_separate_passthrough_and_memory_use(self) -> None:
+        verifier = load_module("verify_acceptance.py", "v513u_verify")
+        checks = []
+        token_summary = {
+            "rewrite_ineligible_control_passthrough_count": 12,
+            "rewrite_error_fallback_count": 0,
+            "memory_injected_count": 2,
+            "useful_memory_hit_count": 1,
+            "wrong_memory_hit_count": 0,
+            "unassessed_memory_hit_count": 1,
+            "memory_supported_output_count": 1,
+        }
+        events = [{
+            "event_type": "autogen_memory_adoption",
+            "payload": {
+                "call_id": "call_1",
+                "attribution_mode": "distinctive_fact_overlap_rules_v1",
+                "useful_memory_hit_count": 1,
+                "evidence": [{
+                    "adopted": True,
+                    "explicit_reference": False,
+                    "memory_ref": {"memory_id": "mem_1", "version_id": 1},
+                    "matched_fact_fingerprints": ["abc123"],
+                }],
+            },
+        }]
+
+        verifier._append_v513u_evidence_checks(
+            checks,
+            token_summary=token_summary,
+            events=events,
+        )
+
+        self.assertEqual(len(checks), 4)
+        self.assertTrue(all(check.passed for check in checks))
 
 
     def test_local_tool_returns_versioned_evidence(self) -> None:

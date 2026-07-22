@@ -40,7 +40,7 @@ from agent_runtime.drivers.loader import DriverActivation
 from agent_runtime.eval.metrics import MetricsCollector
 from agent_runtime.eval.token_counter import TokenCounter
 from agent_runtime.eval.trace_logger import TraceLogger
-from agent_runtime.memory.memory_store import MemoryStoreLite
+from agent_runtime.memory.memory_store import MemoryRef, MemoryStoreLite
 from agent_runtime.memory.context_views import (
     build_minimal_context_view,
     consumer_context_from_profile,
@@ -78,7 +78,7 @@ MEMORY_SCOPE_ENV = "AGENTLITE_MEMORY_SCOPE"
 FINAL_DELIVERY_MARKER_ENV = "AGENTLITE_AUTOGEN_FINAL_MARKER"
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
 CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
-DRIVER_PHASE = "v5.13t"
+DRIVER_PHASE = "v5.13u"
 _AUTOGEN_REPEATED_INSTANCE_ID_RE = re.compile(
     r"^(?P<logical>.+)_(?P<run>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
     r"[0-9a-f]{4}-[0-9a-f]{12})_(?P=run)$",
@@ -257,6 +257,14 @@ class _MemoryContextSelection:
     role_view_no_expansion_fallback: bool = False
 
 
+@dataclass(slots=True)
+class _InjectedMemoryRecord:
+    ref: MemoryRef
+    prompt_view: str
+    current_task_text: str
+    injected_prompt_view: str
+
+
 @dataclass(frozen=True, slots=True)
 class _TokenBoundViewSelection:
     text: str
@@ -354,6 +362,7 @@ class AutoGenHookManager:
         self._collaboration_group_by_agent: dict[str, str] = {}
         self._current_team_task_by_group: dict[str, str] = {}
         self._user_task_history_by_group: dict[str, list[str]] = {}
+        self._memory_injections_by_call: dict[str, list[_InjectedMemoryRecord]] = {}
         self._core_response_rewrite_depth = 0
         self._patched_methods: set[str] = set()
         self._patched_modules: set[str] = set()
@@ -545,6 +554,122 @@ class AutoGenHookManager:
             },
         )
         return memory_context
+
+    def _register_memory_injection(
+        self,
+        *,
+        context: HookCallContext,
+        memory_refs: list[dict[str, Any]],
+        injected_prompt_view: str,
+    ) -> None:
+        records: list[_InjectedMemoryRecord] = []
+        with self._memory_lock:
+            seen_refs: set[tuple[str, int]] = set()
+            current_task = self._current_team_task_by_group.get(
+                context.task.group_id,
+                "",
+            ) or context.task.prompt
+            for payload in memory_refs:
+                memory_id = str(payload.get("memory_id", "") or "")
+                if not memory_id:
+                    continue
+                ref = self.kernel.memory_store.resolve_ref(memory_id)
+                if ref is None:
+                    continue
+                ref_key = (ref.memory_id, ref.version_id)
+                if ref_key in seen_refs:
+                    continue
+                seen_refs.add(ref_key)
+                try:
+                    prompt_view = self.kernel.memory_store.render_prompt_view(
+                        ref,
+                        budget_chars=4000,
+                    )
+                except (KeyError, ValueError):
+                    continue
+                records.append(
+                    _InjectedMemoryRecord(
+                        ref=ref,
+                        prompt_view=prompt_view,
+                        current_task_text=current_task,
+                        injected_prompt_view=injected_prompt_view,
+                    )
+                )
+            if records:
+                self._memory_injections_by_call[context.call_id] = records
+
+    def _record_memory_adoption_feedback(
+        self,
+        *,
+        context: HookCallContext,
+        output_text: str,
+    ) -> None:
+        with self._memory_lock:
+            records = self._memory_injections_by_call.pop(context.call_id, [])
+        if not records:
+            return
+
+        useful_records: list[_InjectedMemoryRecord] = []
+        evidence_rows: list[dict[str, Any]] = []
+        for record in records:
+            evidence = _memory_adoption_evidence(
+                memory_prompt_view=record.prompt_view,
+                injected_prompt_view=record.injected_prompt_view,
+                current_task_text=record.current_task_text,
+                output_text=output_text,
+                memory_id=record.ref.memory_id,
+                memory_view_id=record.ref.memory_view_id,
+            )
+            if evidence["adopted"]:
+                useful_records.append(record)
+            evidence_rows.append(
+                {
+                    "memory_ref": _memory_ref_payload(record.ref),
+                    **evidence,
+                }
+            )
+
+        useful_refs = [record.ref for record in useful_records]
+        feedback = self._safe_kernel_call(
+            "record_autogen_memory_use_feedback",
+            lambda: self.kernel.record_memory_use_feedback(
+                task=context.task,
+                round_id=1,
+                mode="runtime_lite",
+                useful_refs=useful_refs,
+                wrong_refs=[],
+                supported_output=bool(useful_refs),
+            ),
+        )
+        unique_injected = {
+            (record.ref.memory_id, record.ref.version_id) for record in records
+        }
+        unique_useful = {
+            (record.ref.memory_id, record.ref.version_id) for record in useful_records
+        }
+        self.trace.write(
+            "autogen_memory_adoption",
+            {
+                "call_id": context.call_id,
+                "task_id": context.task.task_id,
+                "group_id": context.task.group_id,
+                "agent_id": context.agent.agent_id,
+                "role": context.agent.role,
+                "target_kind": context.target_kind,
+                "method": context.method_name,
+                "memory_injected_count": len(unique_injected),
+                "useful_memory_hit_count": len(unique_useful),
+                "wrong_memory_hit_count": 0,
+                "unassessed_memory_hit_count": max(
+                    0,
+                    len(unique_injected) - len(unique_useful),
+                ),
+                "memory_supported_output_count": int(bool(unique_useful)),
+                "attribution_mode": "distinctive_fact_overlap_rules_v1",
+                "feedback": feedback if isinstance(feedback, dict) else {},
+                "evidence": evidence_rows,
+            },
+        )
 
     def _promote_autogen_output_to_memory(
         self,
@@ -973,6 +1098,10 @@ class AutoGenHookManager:
     def record_call_end(self, context: HookCallContext, result: Any) -> None:
         decoded_messages = self.codec.decode_many(result)
         text = self.codec.render_text(decoded_messages) or _extract_text(result)
+        self._record_memory_adoption_feedback(
+            context=context,
+            output_text=text,
+        )
         state_refs: list[Any] = []
         if _has_semantic_payload(decoded_messages, text):
             written_state_refs = self._safe_kernel_call(
@@ -1568,6 +1697,11 @@ class AutoGenHookManager:
             rewritten_tokens - total_prompt_view_tokens,
         )
         fallback_buckets = _fallback_buckets(fallback_reasons)
+        rewrite_outcome = _classify_rewrite_outcome(
+            applied=applied,
+            fallback_reasons=fallback_reasons,
+            native_tokens=native_tokens,
+        )
         self.trace.write(
             "autogen_core_content_real_rewrite",
             {
@@ -1589,6 +1723,7 @@ class AutoGenHookManager:
                 "fallback_reasons": sorted(set(fallback_reasons)),
                 "fallback_buckets": fallback_buckets,
                 "fallback_bucket_counts": _count_values(fallback_buckets),
+                **rewrite_outcome,
                 "native_message_type": native_type,
                 "rewritten_field": field_name,
                 "state_refs": state_refs or [],
@@ -1962,6 +2097,11 @@ class AutoGenHookManager:
         native_tokens = _count_tokens(self.token_counter, native_text)
         rewritten_tokens = _count_tokens(self.token_counter, rewritten_content)
         fallback_buckets = _fallback_buckets(fallback_reasons)
+        rewrite_outcome = _classify_rewrite_outcome(
+            applied=applied,
+            fallback_reasons=fallback_reasons,
+            native_tokens=native_tokens,
+        )
         self.trace.write(
             "autogen_core_response_real_rewrite",
             {
@@ -1983,6 +2123,7 @@ class AutoGenHookManager:
                 "fallback_reasons": sorted(set(fallback_reasons)),
                 "fallback_buckets": fallback_buckets,
                 "fallback_bucket_counts": _count_values(fallback_buckets),
+                **rewrite_outcome,
                 "native_response_type": native_type,
                 "rewritten_field": field_name,
                 "state_refs": state_refs or [],
@@ -3494,6 +3635,17 @@ class AutoGenHookManager:
             rewritten_tokens - total_prompt_view_tokens,
         )
         fallback_buckets = _fallback_buckets(fallback_reasons)
+        rewrite_outcome = _classify_rewrite_outcome(
+            applied=applied,
+            fallback_reasons=fallback_reasons,
+            native_tokens=native_tokens,
+        )
+        if applied and memory_refs:
+            self._register_memory_injection(
+                context=context,
+                memory_refs=memory_refs,
+                injected_prompt_view=prompt_view_text,
+            )
         self.trace.write(
             "autogen_agent_input_real_rewrite",
             {
@@ -3513,6 +3665,7 @@ class AutoGenHookManager:
                 "fallback_reasons": sorted(set(fallback_reasons)),
                 "fallback_buckets": fallback_buckets,
                 "fallback_bucket_counts": _count_values(fallback_buckets),
+                **rewrite_outcome,
                 "continuity_context_required": (
                     context.continuity_context_required
                 ),
@@ -3734,6 +3887,11 @@ class AutoGenHookManager:
             for entry in receiver_entries
         )
         fallback_buckets = _fallback_buckets(fallback_reasons)
+        rewrite_outcome = _classify_rewrite_outcome(
+            applied=applied,
+            fallback_reasons=fallback_reasons,
+            native_tokens=native_tokens,
+        )
         self.trace.write(
             "autogen_team_input_real_rewrite",
             {
@@ -3755,6 +3913,7 @@ class AutoGenHookManager:
                 "fallback_reasons": sorted(set(fallback_reasons)),
                 "fallback_buckets": fallback_buckets,
                 "fallback_bucket_counts": _count_values(fallback_buckets),
+                **rewrite_outcome,
                 "continuity_context_required": (
                     context.continuity_context_required
                 ),
@@ -4415,6 +4574,11 @@ class AutoGenHookManager:
     def record_call_error(
         self, context: HookCallContext | None, error: BaseException
     ) -> None:
+        if context is not None:
+            self._record_memory_adoption_feedback(
+                context=context,
+                output_text="",
+            )
         self.trace.write(
             "autogen_hooked_call_error",
             {
@@ -5294,6 +5458,64 @@ def _fallback_buckets(reasons: Iterable[str]) -> list[str]:
     return sorted(set(buckets))
 
 
+def _classify_rewrite_outcome(
+    *,
+    applied: bool,
+    fallback_reasons: Iterable[str],
+    native_tokens: int,
+) -> dict[str, Any]:
+    """Separate safe native passthrough from a real rewrite failure."""
+    reasons = {str(reason) for reason in fallback_reasons if str(reason)}
+    buckets = set(_fallback_buckets(reasons))
+    if applied:
+        classification = "rewrite_applied"
+        eligible = True
+    elif native_tokens <= 0 and reasons & {
+        "empty_messages",
+        "empty_text_payload",
+        "empty_team_task_payload",
+        "empty_core_message_payload",
+        "empty_core_response_payload",
+        "missing_core_message_argument",
+        "missing_core_response_result",
+        "unsupported_core_message_content_field",
+        "unsupported_core_response_content_field",
+    }:
+        classification = "ineligible_control_passthrough"
+        eligible = False
+    elif reasons and all("token_not_reduced" in reason for reason in reasons):
+        classification = "cost_guard_passthrough"
+        eligible = True
+    elif "cost_gate_failed" in buckets and not any(
+        "contract" in bucket or "schema" in bucket for bucket in buckets
+    ):
+        classification = "cost_guard_passthrough"
+        eligible = True
+    elif any(
+        marker in bucket
+        for bucket in buckets
+        for marker in (
+            "env_guard",
+            "dry_run_guard",
+            "already_rewritten",
+            "control_guard",
+            "lineage_guard",
+            "unsupported_message_type",
+        )
+    ):
+        classification = "policy_guard_passthrough"
+        eligible = False
+    else:
+        classification = "error_fallback"
+        eligible = bool(native_tokens > 0)
+    return {
+        "rewrite_eligible": eligible,
+        "rewrite_outcome": classification,
+        "passthrough_classification": classification,
+        "error_fallback_required": classification == "error_fallback",
+    }
+
+
 def _build_non_text_rewrite_safety(decoded_messages: list[Any]) -> dict[str, Any]:
     message_kinds = _unique_strings(
         str(getattr(message, "message_kind", "") or "")
@@ -6106,8 +6328,99 @@ def _memory_view_body(prompt_view: str) -> str:
     body = re.sub(r"^\[memory_view:[^\]]+\]\s*", "", prompt_view.strip())
     body = re.sub(r"^slot=[^;]*;\s*", "", body)
     body = re.sub(r"^claim=[^;]*;\s*", "", body)
-    body = re.sub(r";\s*tags=\[[^\]]*\]\s*$", "", body)
+    body = re.sub(r"[;；]\s*tags=\[[^\]]*\]\s*$", "", body)
     return body.strip()
+
+
+def _memory_adoption_evidence(
+    *,
+    memory_prompt_view: str,
+    injected_prompt_view: str,
+    current_task_text: str,
+    output_text: str,
+    memory_id: str,
+    memory_view_id: str,
+) -> dict[str, Any]:
+    """Build conservative, rules-first evidence that output reused injected memory."""
+    normalized_output = _normalize_fact_text(output_text)
+    explicit_reference = any(
+        identifier and _normalize_fact_text(identifier) in normalized_output
+        for identifier in (memory_id, memory_view_id)
+    )
+    source_units = _adoption_fact_units(_memory_view_body(memory_prompt_view))
+    candidate_units = [
+        unit
+        for unit in source_units
+        if _fact_support_score(unit, injected_prompt_view) >= 0.68
+    ]
+    matched: list[tuple[str, float]] = []
+    excluded_as_current_task: list[str] = []
+    for unit in candidate_units:
+        baseline_score = _fact_support_score(unit, current_task_text)
+        if baseline_score >= 0.9:
+            excluded_as_current_task.append(unit)
+            continue
+        output_score = _fact_support_score(unit, output_text)
+        if output_score >= 0.68:
+            matched.append((unit, output_score))
+
+    adopted = explicit_reference or bool(matched)
+    return {
+        "adopted": adopted,
+        "status": "useful" if adopted else "unassessed",
+        "explicit_reference": explicit_reference,
+        "source_fact_count": len(source_units),
+        "candidate_fact_count": len(candidate_units),
+        "not_injected_fact_count": len(source_units) - len(candidate_units),
+        "current_task_duplicate_fact_count": len(excluded_as_current_task),
+        "matched_fact_count": len(matched),
+        "matched_fact_fingerprints": [
+            hashlib.sha256(unit.encode("utf-8")).hexdigest()[:16]
+            for unit, _ in matched[:5]
+        ],
+        "matched_fact_previews": [
+            _preview(unit, limit=120) for unit, _ in matched[:3]
+        ],
+        "match_scores": [round(score, 6) for _, score in matched[:5]],
+    }
+
+
+def _adoption_fact_units(text: str) -> list[str]:
+    without_markdown = re.sub(r"(?m)^\s{0,3}(?:#{1,6}|[-*])\s*", "", text)
+    parts = re.split(r"(?:\r?\n)+|(?<=[。！？!?；;，,])", without_markdown)
+    units = [_normalize_fact_text(part) for part in parts]
+    return list(dict.fromkeys(unit for unit in units if len(unit) >= 8))
+
+
+def _fact_support_score(memory_unit: str, candidate_text: str) -> float:
+    candidate = _normalize_fact_text(candidate_text)
+    if not memory_unit or not candidate:
+        return 0.0
+    if memory_unit in candidate:
+        return 1.0
+    memory_numbers = set(_number_signature(memory_unit))
+    candidate_numbers = set(_number_signature(candidate))
+    if memory_numbers and not memory_numbers.issubset(candidate_numbers):
+        return 0.0
+    memory_grams = _character_ngrams(memory_unit, size=3)
+    candidate_grams = _character_ngrams(candidate, size=3)
+    if not memory_grams or not candidate_grams:
+        return 0.0
+    ngram_score = len(memory_grams & candidate_grams) / len(memory_grams)
+    memory_chars = set(memory_unit)
+    candidate_chars = set(candidate)
+    character_score = (
+        len(memory_chars & candidate_chars) / len(memory_chars)
+        if memory_chars
+        else 0.0
+    )
+    shared_anchor = bool(
+        _character_ngrams(memory_unit, size=4)
+        & _character_ngrams(candidate, size=4)
+    )
+    if memory_numbers or shared_anchor:
+        return max(ngram_score, character_score)
+    return ngram_score
 
 
 def _fact_units(text: str) -> list[str]:

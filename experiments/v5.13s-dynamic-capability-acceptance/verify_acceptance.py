@@ -258,6 +258,12 @@ def verify_acceptance(
             f"continuity_memory_injection={continuity_injected}"
         ),
     )
+    if report_version == "v5.13u":
+        _append_v513u_evidence_checks(
+            checks,
+            token_summary=token_summary,
+            events=events,
+        )
 
     for group, run in runs.items():
         summary = dict(run.get("summary") or {})
@@ -378,6 +384,10 @@ def render_markdown(payload: dict[str, Any]) -> str:
             f"- 动态能力上下文视图：{_int(token_summary.get('capability_context_view_count'))}",
             f"- 真实消息改写：{_int(token_summary.get('rewrite_applied_event_count'))}",
             f"- 连续任务必要记忆注入：{_int(token_summary.get('continuity_memory_injection_count'))}",
+            f"- 无可改写内容控制消息透传：{_int(token_summary.get('rewrite_ineligible_control_passthrough_count'))}",
+            f"- 真实错误回退：{_int(token_summary.get('rewrite_error_fallback_count'))}",
+            f"- 有采用证据的记忆：{_int(token_summary.get('useful_memory_hit_count'))}",
+            f"- 记忆支持的下游输出：{_int(token_summary.get('memory_supported_output_count'))}",
             "",
             "## Provider Token 与质量",
             "",
@@ -448,6 +458,88 @@ def _profile_versions(profiles: dict[str, dict[str, Any]]) -> dict[str, int]:
         agent_id: _int((profiles.get(agent_id) or {}).get("profile_version"))
         for agent_id in EXPECTED_AGENT_IDS
     }
+
+
+def _append_v513u_evidence_checks(
+    checks: list[Check],
+    *,
+    token_summary: dict[str, Any],
+    events: list[dict[str, Any]],
+) -> None:
+    ineligible = _int(
+        token_summary.get("rewrite_ineligible_control_passthrough_count")
+    )
+    error_fallbacks = _int(token_summary.get("rewrite_error_fallback_count"))
+    _check(
+        checks,
+        "control_passthrough_separated_from_error_fallback",
+        ineligible > 0 and error_fallbacks == 0,
+        f"ineligible_control={ineligible}, error_fallback={error_fallbacks}",
+    )
+
+    injected = _int(token_summary.get("memory_injected_count"))
+    useful = _int(token_summary.get("useful_memory_hit_count"))
+    wrong = _int(token_summary.get("wrong_memory_hit_count"))
+    unassessed = _int(token_summary.get("unassessed_memory_hit_count"))
+    supported_outputs = _int(token_summary.get("memory_supported_output_count"))
+    adoption_events = [
+        event
+        for event in events
+        if event.get("event_type") == "autogen_memory_adoption"
+    ]
+    _check(
+        checks,
+        "memory_adoption_evidence_recorded",
+        bool(adoption_events) and useful > 0 and supported_outputs > 0,
+        (
+            f"events={len(adoption_events)}, injected={injected}, useful={useful}, "
+            f"supported_outputs={supported_outputs}"
+        ),
+    )
+    _check(
+        checks,
+        "memory_use_accounting_complete",
+        injected > 0 and useful + wrong + unassessed == injected,
+        (
+            f"injected={injected}, useful={useful}, wrong={wrong}, "
+            f"unassessed={unassessed}"
+        ),
+    )
+    malformed = []
+    for event in adoption_events:
+        payload = event.get("payload")
+        payload = payload if isinstance(payload, dict) else {}
+        if payload.get("attribution_mode") != "distinctive_fact_overlap_rules_v1":
+            malformed.append(str(payload.get("call_id") or "unknown"))
+            continue
+        evidence = payload.get("evidence")
+        if not isinstance(evidence, list) or not evidence:
+            malformed.append(str(payload.get("call_id") or "unknown"))
+            continue
+        if any(
+            not isinstance(row, dict)
+            or not isinstance(row.get("memory_ref"), dict)
+            or not row["memory_ref"].get("memory_id")
+            for row in evidence
+        ):
+            malformed.append(str(payload.get("call_id") or "unknown"))
+            continue
+        if _int(payload.get("useful_memory_hit_count")) > 0 and not any(
+            bool(row.get("adopted"))
+            and (
+                bool(row.get("explicit_reference"))
+                or bool(row.get("matched_fact_fingerprints"))
+            )
+            for row in evidence
+            if isinstance(row, dict)
+        ):
+            malformed.append(str(payload.get("call_id") or "unknown"))
+    _check(
+        checks,
+        "memory_adoption_evidence_is_traceable",
+        bool(adoption_events) and not malformed,
+        f"events={len(adoption_events)}, malformed_calls={malformed}",
+    )
 
 
 def _read_json(path: Path) -> dict[str, Any]:

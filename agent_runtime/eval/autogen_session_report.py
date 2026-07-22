@@ -126,7 +126,8 @@ def build_autogen_session_report(request: SessionReportRequest) -> dict[str, Any
             "llm_* 优先来自 AutoGen 模型客户端 usage hook；钩子无数据且提供 --provider-usage 时，改用外部 Provider 用量文件。",
             "记忆命中、注入与有效采用是三个不同阶段；未取得下游引用证据的命中保持 unassessed。",
             "unique_retrieved_memory_tokens 统计检索候选，fanout_retrieved_memory_tokens 只统计实际注入；成本门禁拒绝候选时，后者可以更小。",
-            "rewrite_audit_event_count 是全部改写决策；rewrite_applied_event_count 是真正修改消息的次数；rewrite_fallback_event_count 是保留原生消息的次数。",
+            "rewrite_audit_event_count 是全部改写决策；rewrite_applied_event_count 是真正修改消息的次数；rewrite_fallback_event_count 兼容表示全部原生透传，真实错误只看 rewrite_error_fallback_count。",
+            "无文本 AutoGen 控制消息属于 ineligible_control_passthrough（无可改写内容透传），不属于协议错误。",
             "memory_candidate_deduplicated_* 统计规则在候选阶段移除的上下文重复记忆，不等同于已注入或有效记忆。",
             "角色视图候选不比语义等价来源更短时，实际注入来源视图；候选 Token 与不膨胀回退次数单独记录。",
         ],
@@ -358,6 +359,12 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
     unassessed_memory_hit_count = _int(
         token_summary.get("unassessed_memory_hit_count")
     )
+    memory_adoption_event_count = _int(
+        token_summary.get("memory_adoption_event_count")
+    )
+    memory_supported_output_count = _int(
+        token_summary.get("memory_supported_output_count")
+    )
     unique_retrieved = _int(token_summary.get("unique_retrieved_memory_tokens"))
     fanout_retrieved = _int(token_summary.get("fanout_retrieved_memory_tokens"))
     shadow_native = _int(token_summary.get("shadow_native_tokens"))
@@ -371,6 +378,24 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
     )
     rewrite_contract_fallback = _int(
         token_summary.get("rewrite_contract_fallback_count")
+    )
+    rewrite_ineligible_control_passthrough = _int(
+        token_summary.get("rewrite_ineligible_control_passthrough_count")
+    )
+    rewrite_cost_guard_passthrough = _int(
+        token_summary.get("rewrite_cost_guard_passthrough_count")
+    )
+    rewrite_policy_guard_passthrough = _int(
+        token_summary.get("rewrite_policy_guard_passthrough_count")
+    )
+    rewrite_error_fallback = _int(
+        token_summary.get("rewrite_error_fallback_count")
+    )
+    rewrite_eligible_event_count = _int(
+        token_summary.get("rewrite_eligible_event_count")
+    )
+    rewrite_error_fallback_rate = float(
+        token_summary.get("rewrite_error_fallback_rate", 0.0) or 0.0
     )
     continuity_required = _int(
         token_summary.get("continuity_required_event_count")
@@ -508,9 +533,39 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
         _row("rewrite_audit_event_count", rewrite_audit, "进入真实改写审计的全部决策次数"),
         _row("rewrite_costed_event_count", rewrite_costed, "具有可比较原生/运行时 Token 的改写决策次数"),
         _row("rewrite_applied_event_count", rewrite_applied, "真正修改了 AutoGen 消息的次数"),
-        _row("rewrite_fallback_event_count", rewrite_fallback, "未修改消息并保留原生内容的次数"),
-        _row("rewrite_cost_gate_fallback_count", rewrite_cost_gate_fallback, "因候选不比原生更省而回退的次数"),
-        _row("rewrite_contract_fallback_count", rewrite_contract_fallback, "因消息结构不受支持而回退的次数"),
+        _row("rewrite_fallback_event_count", rewrite_fallback, "兼容指标：所有未修改并保留原生内容的透传次数"),
+        _row("rewrite_cost_gate_fallback_count", rewrite_cost_gate_fallback, "兼容指标：因候选不比原生更省而透传的次数"),
+        _row("rewrite_contract_fallback_count", rewrite_contract_fallback, "真实错误回退中由消息契约失败导致的次数"),
+        _row(
+            "rewrite_ineligible_control_passthrough_count",
+            rewrite_ineligible_control_passthrough,
+            "无文本或无可改写字段的 AutoGen 控制消息正常透传次数",
+        ),
+        _row(
+            "rewrite_cost_guard_passthrough_count",
+            rewrite_cost_guard_passthrough,
+            "候选未降低成本而选择原生消息的安全透传次数",
+        ),
+        _row(
+            "rewrite_policy_guard_passthrough_count",
+            rewrite_policy_guard_passthrough,
+            "受类型、环境或协议策略保护而保留原生消息的次数",
+        ),
+        _row(
+            "rewrite_error_fallback_count",
+            rewrite_error_fallback,
+            "具备可改写内容但结构或可靠性校验失败的真实回退次数",
+        ),
+        _row(
+            "rewrite_eligible_event_count",
+            rewrite_eligible_event_count,
+            "具备真实改写资格的消息决策次数",
+        ),
+        _row(
+            "rewrite_error_fallback_rate",
+            rewrite_error_fallback_rate,
+            "真实错误回退占可改写消息的比例",
+        ),
         _row(
             "continuity_required_event_count",
             continuity_required,
@@ -646,6 +701,16 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
             "agentlite_unassessed_memory_hit_count",
             unassessed_memory_hit_count,
             "已注入但尚无采用或错误判定证据的记忆条数",
+        ),
+        _row(
+            "agentlite_memory_adoption_event_count",
+            memory_adoption_event_count,
+            "下游输出完成后执行记忆采用归因的次数",
+        ),
+        _row(
+            "agentlite_memory_supported_output_count",
+            memory_supported_output_count,
+            "存在可追溯记忆采用证据的下游输出数量",
         ),
         _row(
             "agentlite_unique_retrieved_memory_tokens",

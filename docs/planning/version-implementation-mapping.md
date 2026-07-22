@@ -3473,6 +3473,37 @@ openEuler 实验发现，能力画像事件会随 AutoGen 钩子重复写入，U
 4. `current_task_role_view_tokens <= current_task_source_tokens`；
 5. 质量、完整交付、通信、记忆、控制和重试成本继续按端到端口径联合判断。
 
+## 58. v5.13u：透传分类与 MemoryView 采用证据
+
+### 58.1 对 v5.13t 实验口径的校正
+
+v5.13t 的 `rewrite_fallback_event_count` 同时包含无文本控制消息、成本门禁和真实错误，不能直接当作故障率。记忆指标也只覆盖检索与注入，尚未证明下游输出真正采用了记忆。
+
+### 58.2 实现
+
+1. 改写结果分为成功改写、无可改写内容透传、成本门禁透传、策略透传和真实错误回退；
+2. 无文本 AutoGen 控制包装不再计入契约错误；
+3. 只为实际进入 Agent Prompt View 的 MemoryRef 建立采用跟踪；
+4. 输出完成后按通用事实规则排除当前任务自带事实并建立采用证据；
+5. 采用事件记录 MemoryRef、事实指纹、匹配分数和归因算法；
+6. 只有取得证据才回写 `useful_hit_count` 和 `memory_supported_output_count`；
+7. 无证据保持 `unassessed`，错误或过期仍需独立可靠性证据。
+8. 记忆槽位兜底推断只依据任务语义标签，不再依赖固定 Agent 角色名。
+
+### 58.3 与最终创新方案的对应
+
+该版本补齐 TLC-Memory 的“命中不等于有效复用”反馈闭环，同时保持 SHP 的 Schema、消息类型和成本门禁。算法不识别固定 Agent 角色或领域题目；动态能力画像仍决定角色视图，记忆归因只观察实际 MemoryView 与下游输出。
+
+### 58.4 验收标准
+
+1. `rewrite_error_fallback_count` 与正常透传分开统计；
+2. `useful + wrong + unassessed = memory_injected`；
+3. 至少一条采用证据可追溯到 MemoryRef 与事实指纹；
+4. 三组使用相同任务、Agent、轮次和模型；
+5. 质量、Provider Token 与端到端协作成本继续联合报告。
+
+详细说明：`docs/experiments/v5.13u-passthrough-memory-adoption.md`。
+
 ## 42. v5.13p：AutoGen Studio 网页 Run 级绑定
 
 ### 42.1 解决的问题
