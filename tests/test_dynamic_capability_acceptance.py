@@ -16,6 +16,9 @@ EXPERIMENT_V513T = (
 EXPERIMENT_V513U = (
     ROOT / "experiments" / "v5.13u-evidence-attribution-acceptance"
 )
+EXPERIMENT_V513V = (
+    ROOT / "experiments" / "v5.13v-conservative-evidence-quality"
+)
 
 
 def load_module(filename: str, module_name: str):
@@ -78,6 +81,17 @@ class DynamicCapabilityAcceptanceTest(unittest.TestCase):
         self.assertIn("exports/v5.13u-evidence-attribution-", source)
         self.assertIn("--report-version v5.13u", source)
 
+    def test_v513v_runner_adds_technical_review_and_normalized_cost(self) -> None:
+        source = (EXPERIMENT_V513V / "run_openeuler.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("AGENTLITE_V513V_EXP_ID", source)
+        self.assertIn("runs/v5.13v-conservative-evidence-quality", source)
+        self.assertIn("judge_stateful_technical_blind_batch.py", source)
+        self.assertIn("--technical-scores", source)
+        self.assertIn("--comparison-summary", source)
+        self.assertIn("--report-version v5.13v", source)
+
     def test_v513u_evidence_checks_separate_passthrough_and_memory_use(self) -> None:
         verifier = load_module("verify_acceptance.py", "v513u_verify")
         checks = []
@@ -109,6 +123,71 @@ class DynamicCapabilityAcceptanceTest(unittest.TestCase):
             checks,
             token_summary=token_summary,
             events=events,
+        )
+
+        self.assertEqual(len(checks), 4)
+        self.assertTrue(all(check.passed for check in checks))
+
+    def test_v513v_checks_require_conservative_attribution_and_dual_judge(
+        self,
+    ) -> None:
+        verifier = load_module("verify_acceptance.py", "v513v_verify")
+        checks = []
+        events = [
+            {
+                "event_type": "autogen_memory_adoption",
+                "payload": {
+                    "call_id": "call_1",
+                    "current_task_source": "team_task_by_group",
+                    "current_task_fingerprint": "task123",
+                    "evidence": [
+                        {
+                            "adopted": True,
+                            "explicit_reference": False,
+                            "attribution_threshold": 0.68,
+                            "current_task_overlap_threshold": 0.68,
+                            "current_task_duplicate_fact_count": 2,
+                            "matched_fact_fingerprints": ["fact123"],
+                            "attribution_margins": [0.4],
+                        }
+                    ],
+                },
+            }
+        ]
+        quality = {
+            "technical_review_applied": True,
+            "evaluation_judge_usage": {
+                "primary": {"total_tokens": 100},
+                "technical": {"total_tokens": 120},
+                "included_in_runtime_collaboration_cost": False,
+            },
+            "by_group": {
+                group: {
+                    "technical_review_applied": True,
+                    "technical_mean_score": 8.0,
+                }
+                for group in ("native", "observed", "managed")
+            },
+        }
+        comparison = {
+            "summary": {
+                "normalized_common_calls": {
+                    "available": True,
+                    "common_call_count": 12,
+                    "groups": {
+                        group: {"matched_call_count": 12}
+                        for group in ("native", "observed", "managed")
+                    },
+                    "managed_vs_native": {"total": {"token_delta": -100}},
+                }
+            }
+        }
+
+        verifier._append_v513v_evidence_checks(
+            checks,
+            events=events,
+            quality=quality,
+            comparison=comparison,
         )
 
         self.assertEqual(len(checks), 4)

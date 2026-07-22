@@ -31,6 +31,22 @@ JUDGE_GLOBALS = runpy.run_path(
         / "judge_stateful_blind_batch.py"
     )
 )
+TECHNICAL_JUDGE_GLOBALS = runpy.run_path(
+    str(
+        PROJECT_ROOT
+        / "experiments"
+        / "ordinary-developer-autogen"
+        / "judge_stateful_technical_blind_batch.py"
+    )
+)
+SUMMARIZE_GLOBALS = runpy.run_path(
+    str(
+        PROJECT_ROOT
+        / "experiments"
+        / "ordinary-developer-autogen"
+        / "summarize_stateful_blind_scores.py"
+    )
+)
 TEAM_TEMPLATE = (
     PROJECT_ROOT
     / "experiments"
@@ -60,6 +76,173 @@ class _FakeResponse:
 
 
 class OrdinaryDeveloperExperimentTests(unittest.TestCase):
+    def test_technical_judge_caps_scores_and_blocks_high_severity(self) -> None:
+        normalize_result = TECHNICAL_JUDGE_GLOBALS["normalize_result"]
+        parsed = {
+            "task_id": "T1",
+            "evaluations": [
+                {
+                    "candidate_id": "c1",
+                    "constraint_fidelity": 2,
+                    "technical_correctness": 4,
+                    "internal_consistency": 2,
+                    "executability": 2,
+                    "delivery_usable": True,
+                    "findings": [
+                        {
+                            "severity": "medium",
+                            "evidence": "a concrete command",
+                            "issue": "the command uses the wrong option",
+                            "repair": "replace the option",
+                        }
+                    ],
+                    "strengths": [],
+                },
+                {
+                    "candidate_id": "c2",
+                    "constraint_fidelity": 2,
+                    "technical_correctness": 4,
+                    "internal_consistency": 2,
+                    "executability": 2,
+                    "delivery_usable": True,
+                    "findings": [
+                        {
+                            "severity": "high",
+                            "evidence": "destructive operation",
+                            "issue": "the operation can lose data",
+                            "repair": "use a verified non-destructive sequence",
+                        }
+                    ],
+                    "strengths": [],
+                },
+                {
+                    "candidate_id": "c3",
+                    "constraint_fidelity": 2,
+                    "technical_correctness": 4,
+                    "internal_consistency": 2,
+                    "executability": 2,
+                    "delivery_usable": True,
+                    "findings": [],
+                    "strengths": [],
+                },
+            ],
+        }
+
+        result = normalize_result(
+            parsed,
+            task_id="T1",
+            candidate_ids=["c1", "c2", "c3"],
+        )
+
+        self.assertEqual([row["total"] for row in result["evaluations"]], [8, 6, 10])
+        self.assertTrue(result["evaluations"][0]["delivery_usable"])
+        self.assertFalse(result["evaluations"][1]["delivery_usable"])
+        self.assertEqual(result["best_candidate_ids"], ["c3"])
+
+    def test_quality_summary_combines_primary_and_technical_blind_scores(
+        self,
+    ) -> None:
+        summarize_scores = SUMMARIZE_GLOBALS["summarize_scores"]
+        groups = ("native", "observed", "managed")
+        candidates = ("c1", "c2", "c3")
+        primary_rows = []
+        technical_rows = []
+        for candidate_id in candidates:
+            primary_rows.append(
+                {
+                    "candidate_id": candidate_id,
+                    "task_completion": 4,
+                    "context_retention": 3,
+                    "correctness_consistency": 2,
+                    "clarity_actionability": 1,
+                    "total": 10,
+                    "delivery_complete": True,
+                }
+            )
+            technical_total = {"c1": 8, "c2": 6, "c3": 10}[candidate_id]
+            blocking = candidate_id == "c2"
+            technical_rows.append(
+                {
+                    "candidate_id": candidate_id,
+                    "total": technical_total,
+                    "delivery_usable": not blocking,
+                    "finding_count": int(candidate_id != "c3"),
+                    "blocking_finding_count": int(blocking),
+                    "findings": [] if candidate_id == "c3" else [{"severity": "high" if blocking else "medium"}],
+                }
+            )
+        scores = {
+            "frozen_before_unblinding": True,
+            "results": [
+                {
+                    "task_id": "T1",
+                    "evaluations": primary_rows,
+                    "summary": "",
+                    "judge_usage": {
+                        "prompt_tokens": 80,
+                        "completion_tokens": 20,
+                        "total_tokens": 100,
+                    },
+                    "judge_latency_ms": 12,
+                }
+            ],
+        }
+        technical_scores = {
+            "frozen_before_unblinding": True,
+            "results": [
+                {
+                    "task_id": "T1",
+                    "evaluations": technical_rows,
+                    "summary": "",
+                    "judge_usage": {
+                        "prompt_tokens": 90,
+                        "completion_tokens": 30,
+                        "total_tokens": 120,
+                    },
+                    "judge_latency_ms": 15,
+                }
+            ],
+        }
+        mapping = {
+            "scenario_id": "technical-test",
+            "mapping": [
+                {
+                    "task_id": "T1",
+                    "candidate_id": candidate_id,
+                    "group": group,
+                }
+                for candidate_id, group in zip(candidates, groups)
+            ],
+        }
+
+        result = summarize_scores(
+            scores=scores,
+            mapping=mapping,
+            technical_scores=technical_scores,
+        )
+
+        self.assertTrue(result["technical_review_applied"])
+        self.assertEqual(
+            result["tasks"][0]["scores"],
+            {"native": 8, "observed": 6, "managed": 10},
+        )
+        self.assertEqual(result["tasks"][0]["winners"], ["managed"])
+        self.assertFalse(result["tasks"][0]["delivery_complete"]["observed"])
+        self.assertEqual(result["by_group"]["native"]["primary_mean_score"], 10)
+        self.assertEqual(result["by_group"]["native"]["technical_mean_score"], 8)
+        self.assertEqual(
+            result["evaluation_judge_usage"]["primary"]["total_tokens"], 100
+        )
+        self.assertEqual(
+            result["evaluation_judge_usage"]["technical"]["total_tokens"],
+            120,
+        )
+        self.assertFalse(
+            result["evaluation_judge_usage"][
+                "included_in_runtime_collaboration_cost"
+            ]
+        )
+
     def test_blind_judge_normalizes_scores_and_requires_every_candidate(
         self,
     ) -> None:
@@ -108,6 +291,7 @@ class OrdinaryDeveloperExperimentTests(unittest.TestCase):
             tasks = []
             candidates = []
             mapping = []
+            usage_rows = []
             for index, task_id in enumerate(("A1", "A2"), start=1):
                 usage = {
                     "calls": 3,
@@ -135,6 +319,18 @@ class OrdinaryDeveloperExperimentTests(unittest.TestCase):
                 mapping.append(
                     {"candidate_id": candidate_id, "task_id": task_id}
                 )
+                prompt_base = {"native": 20, "observed": 22, "managed": 12}[group]
+                for agent in ("analyst", "composer", "auditor"):
+                    prompt_tokens = prompt_base + index
+                    usage_rows.append(
+                        {
+                            "task_id": task_id,
+                            "agent": agent,
+                            "llm_prompt_tokens": prompt_tokens,
+                            "llm_completion_tokens": 3,
+                            "llm_total_tokens": prompt_tokens + 3,
+                        }
+                    )
             sequence = {
                 "summary": {
                     "scenario_id": "A",
@@ -167,6 +363,10 @@ class OrdinaryDeveloperExperimentTests(unittest.TestCase):
                 json.dumps({"scenario_id": "A", "mapping": mapping}),
                 encoding="utf-8",
             )
+            (root / "llm_usage.jsonl").write_text(
+                "\n".join(json.dumps(row) for row in usage_rows) + "\n",
+                encoding="utf-8",
+            )
 
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -195,6 +395,17 @@ class OrdinaryDeveloperExperimentTests(unittest.TestCase):
         self.assertEqual(result["summary"]["managed_vs_native"]["token_delta"], -20)
         self.assertTrue(
             result["summary"]["managed_vs_native"]["actual_llm_tokens_lower"]
+        )
+        normalized = result["summary"]["normalized_common_calls"]
+        self.assertTrue(normalized["available"])
+        self.assertEqual(normalized["common_call_count"], 6)
+        self.assertEqual(
+            normalized["groups"]["managed"]["unmatched_call_count"],
+            0,
+        )
+        self.assertLess(
+            normalized["groups"]["managed"]["llm_prompt_tokens"],
+            normalized["groups"]["native"]["llm_prompt_tokens"],
         )
         self.assertEqual(len(blind_batch["tasks"][0]["candidates"]), 3)
         self.assertNotIn("group", blind_batch["tasks"][0]["candidates"][0])

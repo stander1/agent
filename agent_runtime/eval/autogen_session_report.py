@@ -362,6 +362,12 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
     memory_adoption_event_count = _int(
         token_summary.get("memory_adoption_event_count")
     )
+    memory_current_task_duplicate_fact_count = _int(
+        token_summary.get("memory_current_task_duplicate_fact_count")
+    )
+    memory_attributed_fact_count = _int(
+        token_summary.get("memory_attributed_fact_count")
+    )
     memory_supported_output_count = _int(
         token_summary.get("memory_supported_output_count")
     )
@@ -706,6 +712,16 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
             "agentlite_memory_adoption_event_count",
             memory_adoption_event_count,
             "下游输出完成后执行记忆采用归因的次数",
+        ),
+        _row(
+            "agentlite_memory_current_task_duplicate_fact_count",
+            memory_current_task_duplicate_fact_count,
+            "因当前任务已经包含而从记忆贡献中排除的事实数",
+        ),
+        _row(
+            "agentlite_memory_attributed_fact_count",
+            memory_attributed_fact_count,
+            "排除当前任务基线后可归因于记忆的输出事实数",
         ),
         _row(
             "agentlite_memory_supported_output_count",

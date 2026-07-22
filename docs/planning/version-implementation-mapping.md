@@ -4502,3 +4502,20 @@ AgentLite 已经在单进程 AutoGen Core SingleThreadedAgentRuntime 中覆盖 s
 2. AssistantAgent / GroupChat / Core 混合端到端链路；
 3. 真实 LLM agent 的质量和成本对比。
 ```
+
+## 59. v5.13v：保守记忆归因、归一化成本与技术质量评审
+
+v5.13v 不改变 AgentLite 的业务行为，重点修正 v5.13u 实验中暴露的三项证据缺口：当前任务事实可能被误归因为记忆贡献、额外协作轮次干扰总 Token 对比、主盲评对技术错误存在满分上限效应。
+
+实现映射：
+
+- `agent_runtime/drivers/autogen.py`：记忆归因升级为 `distinctive_fact_overlap_rules_v2`，记录当前任务来源和指纹，并在归因前排除当前任务已给出的事实；
+- `web_monitor/parser.py` 与 `agent_runtime/eval/autogen_session_report.py`：汇总被排除的当前任务事实数和最终可归因事实数；
+- `experiments/ordinary-developer-autogen/compare_stateful_runs.py`：新增相同逻辑调用归一化 Token 口径；
+- `experiments/ordinary-developer-autogen/judge_stateful_technical_blind_batch.py`：新增独立匿名技术审查；
+- `experiments/ordinary-developer-autogen/summarize_stateful_blind_scores.py`：合并主盲评和技术盲评，最终分取较低值；
+- `experiments/v5.13v-conservative-evidence-quality/`：完整 openEuler 验收和不可变证据打包入口。
+
+本阶段仍保持通用边界：核心运行时不认识 Question A/D，不固定 Agent 角色名，技术盲评只属于实验评测，不进入运行时，也不计入协作 Token。
+
+详细说明：`docs/experiments/v5.13v-conservative-attribution-technical-quality.md`。

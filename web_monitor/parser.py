@@ -604,6 +604,8 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "wrong_memory_hit_count": 0,
         "unassessed_memory_hit_count": 0,
         "memory_adoption_event_count": 0,
+        "memory_current_task_duplicate_fact_count": 0,
+        "memory_attributed_fact_count": 0,
         "memory_supported_output_count": 0,
         "unique_retrieved_memory_tokens": 0,
         "fanout_retrieved_memory_tokens": 0,
@@ -662,7 +664,7 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "shadow_potential_savings_ratio": 0.0,
         "shadow_event_count": 0,
         "event_count": 0,
-        "source": "autogen_trace_memory_adoption_v6",
+        "source": "autogen_trace_memory_adoption_v7",
     }
     actual_event_types = {
         "autogen_agent_input_real_rewrite",
@@ -769,6 +771,17 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
             breakdown["memory_supported_output_count"] += _int(
                 payload.get("memory_supported_output_count")
             )
+            evidence_rows = payload.get("evidence")
+            if isinstance(evidence_rows, list):
+                for row in evidence_rows:
+                    if not isinstance(row, dict):
+                        continue
+                    breakdown["memory_current_task_duplicate_fact_count"] += _int(
+                        row.get("current_task_duplicate_fact_count")
+                    )
+                    breakdown["memory_attributed_fact_count"] += _int(
+                        row.get("matched_fact_count")
+                    )
             continue
         if event_type == "autogen_memory_candidate":
             assessment = (

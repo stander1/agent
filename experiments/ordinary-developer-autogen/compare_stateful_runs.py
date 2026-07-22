@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import random
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -74,11 +75,13 @@ def compare_runs(
     native_total = group_summaries["native"]["llm_total_tokens"]
     managed_total = group_summaries["managed"]["llm_total_tokens"]
     observed_total = group_summaries["observed"]["llm_total_tokens"]
+    normalized_common_calls = _normalized_common_call_summary(run_dirs)
     summary = {
         "scenario_id": runs["native"]["summary"]["scenario_id"],
         "groups": group_summaries,
         "managed_vs_native": _token_delta(managed_total, native_total),
         "observed_vs_native": _token_delta(observed_total, native_total),
+        "normalized_common_calls": normalized_common_calls,
         "quality_evaluation_status": "pending_blind_review",
         "archive_binding_required": require_immutable,
         "archive_evidence": archive_evidence,
@@ -231,6 +234,95 @@ def _token_delta(value: int, baseline: int) -> dict[str, Any]:
         "token_change_ratio": ratio,
         "actual_llm_tokens_lower": delta < 0,
     }
+
+
+def _normalized_common_call_summary(
+    run_dirs: dict[str, Path],
+) -> dict[str, Any]:
+    rows_by_group: dict[str, dict[tuple[str, str, int], dict[str, Any]]] = {}
+    for group in GROUPS:
+        usage_path = run_dirs[group] / "llm_usage.jsonl"
+        if not usage_path.is_file():
+            return {
+                "available": False,
+                "reason": f"missing {group}/llm_usage.jsonl",
+                "common_call_count": 0,
+                "groups": {},
+            }
+        ordinal_by_agent_task: defaultdict[tuple[str, str], int] = defaultdict(int)
+        keyed: dict[tuple[str, str, int], dict[str, Any]] = {}
+        for line_number, line in enumerate(
+            usage_path.read_text(encoding="utf-8").splitlines(),
+            start=1,
+        ):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                raise ValueError(f"Invalid usage row: {usage_path}:{line_number}")
+            task_id = str(row.get("task_id") or "")
+            agent = str(row.get("agent") or "")
+            if not task_id or not agent:
+                raise ValueError(
+                    f"Usage row lacks task_id/agent: {usage_path}:{line_number}"
+                )
+            ordinal_key = (task_id, agent)
+            ordinal_by_agent_task[ordinal_key] += 1
+            key = (task_id, agent, ordinal_by_agent_task[ordinal_key])
+            keyed[key] = row
+        rows_by_group[group] = keyed
+
+    common_keys = set.intersection(
+        *(set(rows_by_group[group]) for group in GROUPS)
+    )
+    ordered_keys = [
+        key for key in rows_by_group["native"] if key in common_keys
+    ]
+    group_summaries: dict[str, dict[str, Any]] = {}
+    for group in GROUPS:
+        rows = [rows_by_group[group][key] for key in ordered_keys]
+        prompt = sum(_usage_int(row, "llm_prompt_tokens") for row in rows)
+        completion = sum(
+            _usage_int(row, "llm_completion_tokens") for row in rows
+        )
+        total = sum(_usage_int(row, "llm_total_tokens") for row in rows)
+        group_summaries[group] = {
+            "matched_call_count": len(rows),
+            "unmatched_call_count": len(rows_by_group[group]) - len(rows),
+            "llm_prompt_tokens": prompt,
+            "llm_completion_tokens": completion,
+            "llm_total_tokens": total,
+            "average_prompt_tokens_per_call": (
+                prompt / len(rows) if rows else 0.0
+            ),
+        }
+    native = group_summaries["native"]
+    managed = group_summaries["managed"]
+    return {
+        "available": bool(ordered_keys),
+        "matching_key": "task_id+agent+ordinal_within_task_agent",
+        "common_call_count": len(ordered_keys),
+        "groups": group_summaries,
+        "managed_vs_native": {
+            "prompt": _token_delta(
+                managed["llm_prompt_tokens"], native["llm_prompt_tokens"]
+            ),
+            "completion": _token_delta(
+                managed["llm_completion_tokens"],
+                native["llm_completion_tokens"],
+            ),
+            "total": _token_delta(
+                managed["llm_total_tokens"], native["llm_total_tokens"]
+            ),
+        },
+    }
+
+
+def _usage_int(row: dict[str, Any], key: str) -> int:
+    try:
+        return int(row.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _task_comparison(runs: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
@@ -399,10 +491,49 @@ def _render_markdown(payload: dict[str, Any]) -> str:
             f"- Actual LLM tokens lower: {delta['actual_llm_tokens_lower']}",
             "- Quality status: pending blind review",
             "",
-            "## Warnings",
-            "",
         ]
     )
+    normalized = summary.get("normalized_common_calls") or {}
+    if normalized.get("available"):
+        common = int(normalized.get("common_call_count") or 0)
+        lines.extend(
+            [
+                "## Normalized common logical calls",
+                "",
+                (
+                    "Calls are matched by task, agent, and ordinal within that "
+                    "task-agent pair. Extra turns are excluded from this table."
+                ),
+                "",
+                "| Group | Matched calls | Unmatched calls | Prompt | Completion | Total |",
+                "|---|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for group in GROUPS:
+            item = normalized["groups"][group]
+            lines.append(
+                f"| {group} | {common} | {item['unmatched_call_count']} | "
+                f"{item['llm_prompt_tokens']:,} | "
+                f"{item['llm_completion_tokens']:,} | "
+                f"{item['llm_total_tokens']:,} |"
+            )
+        normalized_delta = normalized["managed_vs_native"]["total"]
+        normalized_ratio = normalized_delta["token_change_ratio"]
+        normalized_ratio_text = (
+            "n/a" if normalized_ratio is None else f"{normalized_ratio:+.1%}"
+        )
+        lines.extend(
+            [
+                "",
+                (
+                    "- Managed versus native normalized total delta: "
+                    f"{normalized_delta['token_delta']:+,} "
+                    f"({normalized_ratio_text})"
+                ),
+                "",
+            ]
+        )
+    lines.extend(["## Warnings", ""])
     lines.extend(f"- {warning}" for warning in payload["warnings"])
     lines.append("")
     return "\n".join(lines)

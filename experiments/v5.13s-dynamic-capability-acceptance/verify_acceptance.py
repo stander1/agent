@@ -39,6 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--managed-dir", type=Path, required=True)
     parser.add_argument("--managed-data-dir", type=Path, required=True)
     parser.add_argument("--quality-summary", type=Path, required=True)
+    parser.add_argument("--comparison-summary", type=Path)
     parser.add_argument("--output-json", type=Path, required=True)
     parser.add_argument("--output-markdown", type=Path, required=True)
     parser.add_argument("--report-version", default="v5.13s")
@@ -53,6 +54,7 @@ def main() -> int:
         managed_dir=args.managed_dir,
         managed_data_dir=args.managed_data_dir,
         quality_summary=args.quality_summary,
+        comparison_summary=args.comparison_summary,
         report_version=args.report_version,
     )
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
@@ -72,6 +74,7 @@ def verify_acceptance(
     managed_dir: Path,
     managed_data_dir: Path,
     quality_summary: Path,
+    comparison_summary: Path | None = None,
     report_version: str = "v5.13s",
 ) -> dict[str, Any]:
     run_dirs = {
@@ -85,6 +88,11 @@ def verify_acceptance(
     }
     report = _read_json(run_dirs["managed"] / "agentlite_session_report.json")
     quality = _read_json(quality_summary.expanduser().resolve())
+    comparison = (
+        _read_json(comparison_summary.expanduser().resolve())
+        if comparison_summary is not None
+        else {}
+    )
     trace_path = _resolve_trace_path(
         managed_dir=run_dirs["managed"],
         managed_data_dir=managed_data_dir.expanduser().resolve(),
@@ -258,11 +266,23 @@ def verify_acceptance(
             f"continuity_memory_injection={continuity_injected}"
         ),
     )
-    if report_version == "v5.13u":
+    if report_version in {"v5.13u", "v5.13v"}:
         _append_v513u_evidence_checks(
             checks,
             token_summary=token_summary,
             events=events,
+            expected_attribution_mode=(
+                "distinctive_fact_overlap_rules_v2"
+                if report_version == "v5.13v"
+                else "distinctive_fact_overlap_rules_v1"
+            ),
+        )
+    if report_version == "v5.13v":
+        _append_v513v_evidence_checks(
+            checks,
+            events=events,
+            quality=quality,
+            comparison=comparison,
         )
 
     for group, run in runs.items():
@@ -343,6 +363,10 @@ def verify_acceptance(
             "provider_llm_total_tokens": provider_tokens,
             "managed_vs_native_provider_token_delta": token_delta,
             "managed_vs_native_provider_token_change_ratio": token_change_ratio,
+            "normalized_common_calls": dict(
+                ((comparison.get("summary") or {}).get("normalized_common_calls"))
+                or {}
+            ),
             "note": (
                 "Provider Token 变化用于结果分析，不作为接管成功的单一门禁；"
                 "必须结合质量、连续性和端到端协作成本解释。"
@@ -402,6 +426,59 @@ def render_markdown(payload: dict[str, Any]) -> str:
             f"{float(group_quality.get('mean_score') or 0.0):.3f} | "
             f"{_int(group_quality.get('delivery_complete_count'))} |"
         )
+    if payload.get("quality", {}).get("technical_review_applied"):
+        judge_usage = (
+            payload.get("quality", {}).get("evaluation_judge_usage") or {}
+        )
+        lines.extend(
+            [
+                "",
+                "### 独立技术质量审查",
+                "",
+                "| 组别 | 主盲评均分 | 技术盲评均分 | 合并均分 | 技术问题数 | 阻断问题数 |",
+                "|---|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for group in ("native", "observed", "managed"):
+            group_quality = quality.get(group, {})
+            lines.append(
+                f"| {group} | "
+                f"{float(group_quality.get('primary_mean_score') or 0.0):.3f} | "
+                f"{float(group_quality.get('technical_mean_score') or 0.0):.3f} | "
+                f"{float(group_quality.get('mean_score') or 0.0):.3f} | "
+                f"{_int(group_quality.get('technical_finding_count'))} | "
+                f"{_int(group_quality.get('blocking_finding_count'))} |"
+            )
+        primary_judge = judge_usage.get("primary") or {}
+        technical_judge = judge_usage.get("technical") or {}
+        lines.extend(
+            [
+                "",
+                f"- 主盲评模型 Token：{_int(primary_judge.get('total_tokens'))}",
+                f"- 技术盲评模型 Token：{_int(technical_judge.get('total_tokens'))}",
+                "- 以上评审 Token 仅属于赛后评价，不计入运行时协作成本。",
+            ]
+        )
+    normalized = dict(metrics.get("normalized_common_calls") or {})
+    if normalized.get("available"):
+        lines.extend(
+            [
+                "",
+                "### 相同逻辑调用归一化成本",
+                "",
+                "| 组别 | 匹配调用 | 额外调用 | Prompt Token | Completion Token | 总 Token |",
+                "|---|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for group in ("native", "observed", "managed"):
+            row = (normalized.get("groups") or {}).get(group, {})
+            lines.append(
+                f"| {group} | {_int(row.get('matched_call_count'))} | "
+                f"{_int(row.get('unmatched_call_count'))} | "
+                f"{_int(row.get('llm_prompt_tokens'))} | "
+                f"{_int(row.get('llm_completion_tokens'))} | "
+                f"{_int(row.get('llm_total_tokens'))} |"
+            )
     ratio = metrics.get("managed_vs_native_provider_token_change_ratio")
     ratio_text = "不可计算" if ratio is None else f"{float(ratio):.2%}"
     lines.extend(
@@ -465,6 +542,7 @@ def _append_v513u_evidence_checks(
     *,
     token_summary: dict[str, Any],
     events: list[dict[str, Any]],
+    expected_attribution_mode: str = "distinctive_fact_overlap_rules_v1",
 ) -> None:
     ineligible = _int(
         token_summary.get("rewrite_ineligible_control_passthrough_count")
@@ -509,7 +587,7 @@ def _append_v513u_evidence_checks(
     for event in adoption_events:
         payload = event.get("payload")
         payload = payload if isinstance(payload, dict) else {}
-        if payload.get("attribution_mode") != "distinctive_fact_overlap_rules_v1":
+        if payload.get("attribution_mode") != expected_attribution_mode:
             malformed.append(str(payload.get("call_id") or "unknown"))
             continue
         evidence = payload.get("evidence")
@@ -538,7 +616,151 @@ def _append_v513u_evidence_checks(
         checks,
         "memory_adoption_evidence_is_traceable",
         bool(adoption_events) and not malformed,
-        f"events={len(adoption_events)}, malformed_calls={malformed}",
+        (
+            f"mode={expected_attribution_mode}, events={len(adoption_events)}, "
+            f"malformed_calls={malformed}"
+        ),
+    )
+
+
+def _append_v513v_evidence_checks(
+    checks: list[Check],
+    *,
+    events: list[dict[str, Any]],
+    quality: dict[str, Any],
+    comparison: dict[str, Any],
+) -> None:
+    adoption_payloads = [
+        event.get("payload")
+        for event in events
+        if event.get("event_type") == "autogen_memory_adoption"
+        and isinstance(event.get("payload"), dict)
+    ]
+    malformed_calls: list[str] = []
+    duplicate_fact_count = 0
+    attributed_fact_count = 0
+    for payload in adoption_payloads:
+        call_id = str(payload.get("call_id") or "unknown")
+        if not payload.get("current_task_source") or not payload.get(
+            "current_task_fingerprint"
+        ):
+            malformed_calls.append(call_id)
+            continue
+        evidence = payload.get("evidence")
+        if not isinstance(evidence, list) or not evidence:
+            malformed_calls.append(call_id)
+            continue
+        for row in evidence:
+            if not isinstance(row, dict):
+                malformed_calls.append(call_id)
+                continue
+            threshold = float(row.get("attribution_threshold") or 0.0)
+            baseline_threshold = float(
+                row.get("current_task_overlap_threshold") or 0.0
+            )
+            if (
+                threshold <= 0.0
+                or threshold > 0.68
+                or baseline_threshold != threshold
+            ):
+                malformed_calls.append(call_id)
+            duplicate_fact_count += _int(
+                row.get("current_task_duplicate_fact_count")
+            )
+            if bool(row.get("adopted")) and not bool(
+                row.get("explicit_reference")
+            ):
+                fingerprints = list(row.get("matched_fact_fingerprints") or [])
+                margins = [
+                    float(value)
+                    for value in row.get("attribution_margins") or []
+                ]
+                attributed_fact_count += len(fingerprints)
+                if not fingerprints or len(margins) != len(fingerprints) or any(
+                    margin <= 0.0 for margin in margins
+                ):
+                    malformed_calls.append(call_id)
+    _check(
+        checks,
+        "memory_attribution_excludes_current_task_facts",
+        bool(adoption_payloads)
+        and duplicate_fact_count > 0
+        and attributed_fact_count > 0
+        and not malformed_calls,
+        (
+            f"events={len(adoption_payloads)}, excluded_current_task_facts="
+            f"{duplicate_fact_count}, attributed_facts={attributed_fact_count}, "
+            f"malformed_calls={sorted(set(malformed_calls))}"
+        ),
+    )
+
+    by_group = dict(quality.get("by_group") or {})
+    technical_ready = bool(quality.get("technical_review_applied")) and all(
+        bool((by_group.get(group) or {}).get("technical_review_applied"))
+        and (by_group.get(group) or {}).get("technical_mean_score") is not None
+        for group in ("native", "observed", "managed")
+    )
+    technically_reviewed_groups = sorted(
+        group
+        for group, row in by_group.items()
+        if (row or {}).get("technical_review_applied")
+    )
+    _check(
+        checks,
+        "independent_technical_quality_review_applied",
+        technical_ready,
+        (
+            "technical_review_applied="
+            f"{quality.get('technical_review_applied')!r}, groups="
+            f"{technically_reviewed_groups}"
+        ),
+    )
+    judge_usage = quality.get("evaluation_judge_usage")
+    judge_usage = judge_usage if isinstance(judge_usage, dict) else {}
+    primary_judge_usage = judge_usage.get("primary")
+    primary_judge_usage = (
+        primary_judge_usage if isinstance(primary_judge_usage, dict) else {}
+    )
+    technical_judge_usage = judge_usage.get("technical")
+    technical_judge_usage = (
+        technical_judge_usage if isinstance(technical_judge_usage, dict) else {}
+    )
+    _check(
+        checks,
+        "evaluation_judge_cost_separated_from_runtime",
+        _int(primary_judge_usage.get("total_tokens")) > 0
+        and _int(technical_judge_usage.get("total_tokens")) > 0
+        and judge_usage.get("included_in_runtime_collaboration_cost") is False,
+        (
+            f"primary_tokens={primary_judge_usage.get('total_tokens')}, "
+            f"technical_tokens={technical_judge_usage.get('total_tokens')}, "
+            "included_in_runtime="
+            f"{judge_usage.get('included_in_runtime_collaboration_cost')!r}"
+        ),
+    )
+
+    normalized = dict(
+        ((comparison.get("summary") or {}).get("normalized_common_calls")) or {}
+    )
+    normalized_groups = dict(normalized.get("groups") or {})
+    normalized_ready = (
+        bool(normalized.get("available"))
+        and _int(normalized.get("common_call_count")) > 0
+        and all(
+            group in normalized_groups
+            for group in ("native", "observed", "managed")
+        )
+        and isinstance(normalized.get("managed_vs_native"), dict)
+    )
+    _check(
+        checks,
+        "normalized_common_call_cost_recorded",
+        normalized_ready,
+        (
+            f"available={normalized.get('available')!r}, "
+            f"common_calls={normalized.get('common_call_count')}, "
+            f"groups={sorted(normalized_groups)}"
+        ),
     )
 
 

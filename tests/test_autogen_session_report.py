@@ -137,6 +137,12 @@ class AutoGenSessionReportTest(unittest.TestCase):
                     "wrong_memory_hit_count": 0,
                     "unassessed_memory_hit_count": 0,
                     "memory_supported_output_count": 1,
+                    "evidence": [
+                        {
+                            "current_task_duplicate_fact_count": 2,
+                            "matched_fact_count": 1,
+                        }
+                    ],
                 },
             },
             {
@@ -158,6 +164,8 @@ class AutoGenSessionReportTest(unittest.TestCase):
         self.assertEqual(summary["useful_memory_hit_count"], 1)
         self.assertEqual(summary["unassessed_memory_hit_count"], 0)
         self.assertEqual(summary["memory_adoption_event_count"], 1)
+        self.assertEqual(summary["memory_current_task_duplicate_fact_count"], 2)
+        self.assertEqual(summary["memory_attributed_fact_count"], 1)
         self.assertEqual(summary["memory_supported_output_count"], 1)
         self.assertEqual(summary["native_baseline_tokens"], 200)
         self.assertEqual(summary["runtime_tokens"], 140)

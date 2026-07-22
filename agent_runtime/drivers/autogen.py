@@ -78,7 +78,7 @@ MEMORY_SCOPE_ENV = "AGENTLITE_MEMORY_SCOPE"
 FINAL_DELIVERY_MARKER_ENV = "AGENTLITE_AUTOGEN_FINAL_MARKER"
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
 CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
-DRIVER_PHASE = "v5.13u"
+DRIVER_PHASE = "v5.13v"
 _AUTOGEN_REPEATED_INSTANCE_ID_RE = re.compile(
     r"^(?P<logical>.+)_(?P<run>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
     r"[0-9a-f]{4}-[0-9a-f]{12})_(?P=run)$",
@@ -86,6 +86,28 @@ _AUTOGEN_REPEATED_INSTANCE_ID_RE = re.compile(
 )
 CONTINUITY_COST_GATE_REASONS = frozenset(
     {"token_not_reduced", "team_task_token_not_reduced"}
+)
+_GENERIC_NUMERIC_CONCEPT_BIGRAMS = frozenset(
+    {
+        "任务",
+        "系统",
+        "方案",
+        "数据",
+        "配置",
+        "支持",
+        "用户",
+        "当前",
+        "已经",
+        "需要",
+        "进行",
+        "使用",
+        "实现",
+        "完成",
+        "提供",
+    }
+)
+_GENERIC_NUMERIC_CONCEPT_CHARS = frozenset(
+    "任务系统方案数据配置支持用户当前已经需要进行使用实现完成提供个第项目"
 )
 CONTINUITY_CUE_PATTERNS = (
     (
@@ -262,6 +284,7 @@ class _InjectedMemoryRecord:
     ref: MemoryRef
     prompt_view: str
     current_task_text: str
+    current_task_source: str
     injected_prompt_view: str
 
 
@@ -565,10 +588,14 @@ class AutoGenHookManager:
         records: list[_InjectedMemoryRecord] = []
         with self._memory_lock:
             seen_refs: set[tuple[str, int]] = set()
-            current_task = self._current_team_task_by_group.get(
+            team_task = self._current_team_task_by_group.get(
                 context.task.group_id,
                 "",
-            ) or context.task.prompt
+            )
+            current_task = team_task or context.task.prompt
+            current_task_source = (
+                "team_task_by_group" if team_task else "call_prompt"
+            )
             for payload in memory_refs:
                 memory_id = str(payload.get("memory_id", "") or "")
                 if not memory_id:
@@ -592,6 +619,7 @@ class AutoGenHookManager:
                         ref=ref,
                         prompt_view=prompt_view,
                         current_task_text=current_task,
+                        current_task_source=current_task_source,
                         injected_prompt_view=injected_prompt_view,
                     )
                 )
@@ -665,7 +693,11 @@ class AutoGenHookManager:
                     len(unique_injected) - len(unique_useful),
                 ),
                 "memory_supported_output_count": int(bool(unique_useful)),
-                "attribution_mode": "distinctive_fact_overlap_rules_v1",
+                "attribution_mode": "distinctive_fact_overlap_rules_v2",
+                "current_task_source": records[0].current_task_source,
+                "current_task_fingerprint": _text_fingerprint(
+                    records[0].current_task_text
+                ),
                 "feedback": feedback if isinstance(feedback, dict) else {},
                 "evidence": evidence_rows,
             },
@@ -6342,6 +6374,8 @@ def _memory_adoption_evidence(
     memory_view_id: str,
 ) -> dict[str, Any]:
     """Build conservative, rules-first evidence that output reused injected memory."""
+    adoption_threshold = 0.68
+    current_task_overlap_threshold = adoption_threshold
     normalized_output = _normalize_fact_text(output_text)
     explicit_reference = any(
         identifier and _normalize_fact_text(identifier) in normalized_output
@@ -6353,36 +6387,63 @@ def _memory_adoption_evidence(
         for unit in source_units
         if _fact_support_score(unit, injected_prompt_view) >= 0.68
     ]
-    matched: list[tuple[str, float]] = []
-    excluded_as_current_task: list[str] = []
+    matched: list[tuple[str, float, float]] = []
+    excluded_as_current_task: list[tuple[str, float]] = []
     for unit in candidate_units:
         baseline_score = _fact_support_score(unit, current_task_text)
-        if baseline_score >= 0.9:
-            excluded_as_current_task.append(unit)
+        if baseline_score >= current_task_overlap_threshold:
+            excluded_as_current_task.append((unit, baseline_score))
             continue
         output_score = _fact_support_score(unit, output_text)
-        if output_score >= 0.68:
-            matched.append((unit, output_score))
+        if output_score >= adoption_threshold:
+            matched.append((unit, output_score, baseline_score))
 
     adopted = explicit_reference or bool(matched)
     return {
         "adopted": adopted,
         "status": "useful" if adopted else "unassessed",
         "explicit_reference": explicit_reference,
+        "attribution_threshold": adoption_threshold,
+        "current_task_overlap_threshold": current_task_overlap_threshold,
+        "current_task_fingerprint": _text_fingerprint(current_task_text),
+        "current_task_fact_count": len(_adoption_fact_units(current_task_text)),
         "source_fact_count": len(source_units),
         "candidate_fact_count": len(candidate_units),
         "not_injected_fact_count": len(source_units) - len(candidate_units),
         "current_task_duplicate_fact_count": len(excluded_as_current_task),
+        "current_task_duplicate_fact_fingerprints": [
+            hashlib.sha256(unit.encode("utf-8")).hexdigest()[:16]
+            for unit, _ in excluded_as_current_task[:5]
+        ],
+        "current_task_duplicate_fact_previews": [
+            _preview(unit, limit=120)
+            for unit, _ in excluded_as_current_task[:3]
+        ],
+        "current_task_duplicate_scores": [
+            round(score, 6) for _, score in excluded_as_current_task[:5]
+        ],
         "matched_fact_count": len(matched),
         "matched_fact_fingerprints": [
             hashlib.sha256(unit.encode("utf-8")).hexdigest()[:16]
-            for unit, _ in matched[:5]
+            for unit, _, _ in matched[:5]
         ],
         "matched_fact_previews": [
-            _preview(unit, limit=120) for unit, _ in matched[:3]
+            _preview(unit, limit=120) for unit, _, _ in matched[:3]
         ],
-        "match_scores": [round(score, 6) for _, score in matched[:5]],
+        "match_scores": [round(score, 6) for _, score, _ in matched[:5]],
+        "current_task_match_scores": [
+            round(score, 6) for _, _, score in matched[:5]
+        ],
+        "attribution_margins": [
+            round(output_score - baseline_score, 6)
+            for _, output_score, baseline_score in matched[:5]
+        ],
     }
+
+
+def _text_fingerprint(text: str) -> str:
+    normalized = _normalize_fact_text(text)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
 
 
 def _adoption_fact_units(text: str) -> list[str]:
@@ -6418,6 +6479,21 @@ def _fact_support_score(memory_unit: str, candidate_text: str) -> float:
         _character_ngrams(memory_unit, size=4)
         & _character_ngrams(candidate, size=4)
     )
+    shared_bigrams = (
+        _character_ngrams(memory_unit, size=2)
+        & _character_ngrams(candidate, size=2)
+    )
+    numeric_concept_anchor = bool(
+        memory_numbers
+        and any(
+            gram not in _GENERIC_NUMERIC_CONCEPT_BIGRAMS
+            and not any(character.isdigit() for character in gram)
+            and not set(gram) <= _GENERIC_NUMERIC_CONCEPT_CHARS
+            for gram in shared_bigrams
+        )
+    )
+    if numeric_concept_anchor:
+        return max(0.75, ngram_score, character_score)
     if memory_numbers or shared_anchor:
         return max(ngram_score, character_score)
     return ngram_score

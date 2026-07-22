@@ -16,6 +16,7 @@ from agent_runtime.drivers.autogen import (
     _continuity_cost_override_allowed,
     _continuity_requirement_reasons,
     _continuity_source_text,
+    _fact_support_score,
     _memory_adoption_evidence,
     _memory_view_facts_covered,
     _select_token_nonexpanding_view,
@@ -119,6 +120,52 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
         self.assertGreater(duplicate["current_task_duplicate_fact_count"], 0)
         self.assertFalse(omitted["adopted"])
         self.assertEqual(omitted["candidate_fact_count"], 0)
+
+    def test_memory_adoption_excludes_partial_current_task_overlap(self) -> None:
+        evidence = _memory_adoption_evidence(
+            memory_prompt_view=(
+                "[memory_view:view_architecture] "
+                "slot=slot.system.deliverable_requirement; "
+                "claim=claim_architecture; "
+                "已确认核心架构为 SQLite WAL 加文件载荷；"
+                "峰值并发提升至50个任务；审计记录保留7天；"
+                "tags=[requirement]"
+            ),
+            injected_prompt_view=(
+                "已确认核心架构为 SQLite WAL 加文件载荷；"
+                "峰值并发提升至50个任务；审计记录保留7天。"
+            ),
+            current_task_text=(
+                "请基于前序结论形成部署清单，必须覆盖50并发控制和7天审计保留。"
+            ),
+            output_text=(
+                "已确认核心架构为 SQLite WAL 加文件载荷，并实现50并发控制与7天审计保留。"
+            ),
+            memory_id="mem_architecture",
+            memory_view_id="view_architecture",
+        )
+
+        self.assertTrue(evidence["adopted"])
+        self.assertGreaterEqual(
+            evidence["current_task_duplicate_fact_count"],
+            2,
+        )
+        self.assertGreater(evidence["matched_fact_count"], 0)
+        self.assertTrue(evidence["current_task_fingerprint"])
+        self.assertTrue(
+            all(score >= 0.68 for score in evidence["current_task_duplicate_scores"])
+        )
+        self.assertTrue(
+            all(margin > 0 for margin in evidence["attribution_margins"])
+        )
+
+    def test_numeric_fact_match_rejects_generic_shared_words(self) -> None:
+        score = _fact_support_score(
+            "峰值并发提升至50个任务",
+            "第50个任务需要用户确认",
+        )
+
+        self.assertLess(score, 0.68)
 
     def test_arbitrary_agent_output_persists_evidence_backed_memory_use(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
