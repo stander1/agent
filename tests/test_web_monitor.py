@@ -165,6 +165,18 @@ class WebMonitorParserTest(unittest.TestCase):
                             "memory_candidates": [],
                             "claim_candidates": [],
                         },
+                        "capability_profiles": {
+                            "EvidenceScout": {
+                                "agent_id": "EvidenceScout",
+                                "role": "ResearchSpecialist",
+                                "profile_version": 4,
+                                "capabilities": ["retrieval", "evidence_ranking"],
+                                "preferred_actions": ["RETRIEVE_EVIDENCE"],
+                                "available_tools": ["web_search"],
+                                "accepted_state_types": ["retrieval_state"],
+                                "message_types": ["state_ref_handoff"],
+                            }
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -174,6 +186,11 @@ class WebMonitorParserTest(unittest.TestCase):
             graph = snapshot["modes"]["runtime_lite"]["memory_graph"]
             self.assertFalse(graph["fallback"])
             self.assertTrue(any(node["id"] == "view_a" for node in graph["nodes"]))
+            profile = snapshot["summary"]["agent_profiles"]["EvidenceScout"]
+            self.assertEqual(profile["profile_version"], 4)
+            self.assertIn("retrieval", profile["capabilities"])
+            self.assertIn("retrieval_state", profile["accepted"])
+            self.assertIn("web_search", profile["summary"])
             self.assertTrue(
                 any(
                     edge["source"] == "pv_a"

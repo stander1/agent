@@ -818,6 +818,7 @@ class V0Runtime:
             "mode": mode,
             "state_pool": self.state_pool.snapshot(),
             "memory_store": memory_snapshot,
+            "capability_profiles": self.capability_profiles.snapshot(),
         }
         path = self.trace.output_dir / "pool_snapshot_latest.json"
         tmp_path = path.with_suffix(".json.tmp")

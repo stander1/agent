@@ -22,9 +22,10 @@ def build_run_snapshot(
     run_id = run_id or run_dir.name
     trace_events = _read_jsonl(run_dir / "trace.jsonl")
     summary = _read_json(run_dir / "summary.json", default={})
-    if isinstance(summary, dict):
-        summary = {**summary, "agent_profiles": _agent_profiles()}
     pool_snapshot = _read_json(run_dir / "pool_snapshot_latest.json", default={})
+    agent_profiles = _agent_profiles(trace_events, pool_snapshot=pool_snapshot)
+    if isinstance(summary, dict):
+        summary = {**summary, "agent_profiles": agent_profiles}
 
     snapshot: dict[str, Any] = {
         "run_id": run_id,
@@ -33,7 +34,7 @@ def build_run_snapshot(
         "modes": {mode: _empty_mode_snapshot() for mode in DEFAULT_MODES},
         "summary": summary,
         "token_summary": _summary_token_summary(summary),
-        "agent_profiles": _agent_profiles(),
+        "agent_profiles": agent_profiles,
         "errors": errors or [],
     }
 
@@ -115,6 +116,21 @@ def build_run_snapshot(
     )
     if not has_memory_nodes:
         memory_graph = _fallback_memory_graph(snapshot)
+
+    runtime_profile_rows = (
+        pool_snapshot.get("capability_profiles", {})
+        if isinstance(pool_snapshot, dict)
+        else {}
+    )
+    if isinstance(runtime_profile_rows, dict):
+        runtime_mode = snapshot["modes"].setdefault(
+            "runtime_lite", _empty_mode_snapshot()
+        )
+        for agent_id, profile in runtime_profile_rows.items():
+            if not isinstance(profile, dict):
+                continue
+            agent = _agent(runtime_mode, str(agent_id))
+            agent["capability_profile"] = profile
 
     for mode, mode_view in snapshot["modes"].items():
         _finalize_agents(mode_view)
@@ -275,11 +291,20 @@ def build_session_snapshot(
     state_pool: list[dict[str, Any]] = []
     event_counts: dict[str, int] = {}
     token_summary = _autogen_token_summary(trace_events)
+    agent_profiles = _agent_profiles(trace_events)
     for event in trace_events:
         event_type = str(event.get("event_type", ""))
         event_counts[event_type] = event_counts.get(event_type, 0) + 1
         mode_view["timeline"].append(_timeline_item(event))
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        if event_type in {"capability_profile_updated", "capability_profile_feedback"}:
+            profile = payload.get("profile")
+            agent_id = str(payload.get("agent_id") or "")
+            if agent_id:
+                agent = _agent(mode_view, agent_id)
+                if isinstance(profile, dict):
+                    agent["capability_profile"] = profile
+            continue
         if event_type == "state_written":
             state = payload.get("state")
             if isinstance(state, dict):
@@ -332,7 +357,7 @@ def build_session_snapshot(
             "event_counts": event_counts,
             "trace_path": str(trace_path) if trace_path.exists() else "",
             "token_summary": token_summary,
-            "agent_profiles": _agent_profiles(),
+            "agent_profiles": agent_profiles,
             "by_mode": {
                 "runtime_lite": token_summary,
                 "baseline_text": {
@@ -353,6 +378,7 @@ def build_session_snapshot(
                 },
             },
         },
+        "agent_profiles": agent_profiles,
         "token_summary": token_summary,
         "errors": [status.get("error", "")] if status.get("error") else [],
         "bootstrap_status": status,
@@ -431,7 +457,11 @@ def _summary_token_summary(summary: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _agent_profiles() -> dict[str, Any]:
+def _agent_profiles(
+    trace_events: list[dict[str, Any]] | None = None,
+    *,
+    pool_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     profiles = CapabilityProfileManagerLite([]).snapshot()
     profiles.update(
         {
@@ -465,7 +495,57 @@ def _agent_profiles() -> dict[str, Any]:
             },
         }
     )
+    snapshot_profiles = (
+        pool_snapshot.get("capability_profiles", {})
+        if isinstance(pool_snapshot, dict)
+        else {}
+    )
+    if isinstance(snapshot_profiles, dict):
+        profiles.update(
+            {
+                str(agent_id): _monitor_capability_profile(profile)
+                for agent_id, profile in snapshot_profiles.items()
+                if isinstance(profile, dict)
+            }
+        )
+    for event in trace_events or []:
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        event_type = str(event.get("event_type") or "")
+        if event_type == "capability_profile_updated":
+            profile = payload.get("profile")
+        elif event_type == "autogen_agent_receive":
+            profile = payload.get("capability_profile")
+        else:
+            continue
+        agent_id = str(
+            payload.get("agent_id")
+            or (profile.get("agent_id") if isinstance(profile, dict) else "")
+            or ""
+        )
+        if agent_id and isinstance(profile, dict) and profile:
+            profiles[agent_id] = _monitor_capability_profile(profile)
     return profiles
+
+
+def _monitor_capability_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(profile)
+    capabilities = [str(item) for item in profile.get("capabilities", []) or []]
+    accepted = list(
+        dict.fromkeys(
+            [
+                *(str(item) for item in profile.get("accepted_state_types", []) or []),
+                *(str(item) for item in profile.get("message_types", []) or []),
+            ]
+        )
+    )
+    normalized["capabilities"] = capabilities
+    normalized["accepted"] = accepted
+    normalized["summary"] = (
+        f"画像 v{int(profile.get('profile_version', 0) or 0)}；"
+        f"动作 {', '.join(profile.get('preferred_actions', []) or []) or '按任务推断'}；"
+        f"工具 {', '.join(profile.get('available_tools', []) or []) or '无'}"
+    )
+    return normalized
 
 
 def _mode_token_breakdown(row: dict[str, Any]) -> dict[str, int]:
@@ -546,6 +626,11 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "final_delivery_valid_count": 0,
         "final_delivery_invalid_count": 0,
         "final_delivery_valid_rate": 0.0,
+        "capability_profile_update_count": 0,
+        "capability_profile_feedback_count": 0,
+        "registered_capability_profile_count": 0,
+        "capability_context_view_count": 0,
+        "capability_action_counts": {},
         "memory_candidate_deduplicated_count": 0,
         "memory_candidate_deduplicated_tokens": 0,
         "shadow_native_tokens": 0,
@@ -554,7 +639,7 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "shadow_potential_savings_ratio": 0.0,
         "shadow_event_count": 0,
         "event_count": 0,
-        "source": "autogen_trace_role_views_v4",
+        "source": "autogen_trace_capability_views_v5",
     }
     actual_event_types = {
         "autogen_agent_input_real_rewrite",
@@ -585,9 +670,25 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
     current_task_role_view_tokens = 0
     final_delivery_assessed = 0
     final_delivery_valid = 0
+    registered_profile_ids: set[str] = set()
+    capability_action_counts: dict[str, int] = {}
     for event in trace_events:
         event_type = str(event.get("event_type", ""))
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        if event_type == "capability_profile_updated":
+            breakdown["capability_profile_update_count"] += 1
+            agent_id = str(payload.get("agent_id") or "")
+            if agent_id:
+                registered_profile_ids.add(agent_id)
+            continue
+        if event_type == "capability_profile_feedback":
+            breakdown["capability_profile_feedback_count"] += 1
+            action = str(payload.get("action") or "HANDLE_TASK")
+            capability_action_counts[action] = capability_action_counts.get(action, 0) + 1
+            continue
+        if event_type == "autogen_agent_receive":
+            action = str(payload.get("semantic_action") or "HANDLE_TASK")
+            capability_action_counts[action] = capability_action_counts.get(action, 0) + 1
         if event_type == "autogen_memory_retrieval":
             breakdown["memory_query_count"] += _int(
                 payload.get("memory_query_count")
@@ -713,6 +814,15 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         )
         if applied and rewrite_safety.get("team_receiver_role_view_hydration"):
             receiver_role_view_hydrations += 1
+        receiver_entries = payload.get("receiver_plans") or []
+        if isinstance(receiver_entries, list):
+            breakdown["capability_context_view_count"] += sum(
+                1
+                for entry in receiver_entries
+                if isinstance(entry, dict)
+                and entry.get("memory_view_mode")
+                == "capability_action_context_view_v1"
+            )
         native, runtime, direct, prompt_view, retrieved_memory = _autogen_event_cost(
             payload
         )
@@ -802,6 +912,23 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         if final_delivery_assessed
         else 0.0
     )
+    breakdown["registered_capability_profile_count"] = len(registered_profile_ids)
+    breakdown["capability_action_counts"] = dict(
+        sorted(capability_action_counts.items())
+    )
+    breakdown["minimal_context_view_tokens"] = breakdown[
+        "minimal_role_view_tokens"
+    ]
+    breakdown["context_view_saved_tokens"] = breakdown["role_view_saved_tokens"]
+    breakdown["context_view_reduction_ratio"] = breakdown[
+        "role_view_reduction_ratio"
+    ]
+    breakdown["receiver_context_view_hydration_count"] = breakdown[
+        "receiver_role_view_hydration_count"
+    ]
+    breakdown["current_task_context_view_tokens"] = breakdown[
+        "current_task_role_view_tokens"
+    ]
     breakdown["event_count"] = seen_cost_events
     return breakdown
 

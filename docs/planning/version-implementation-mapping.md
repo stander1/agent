@@ -3424,6 +3424,27 @@ v5.13q 只解决必要记忆被纯 Token 门禁丢弃的问题；v5.13r 进一�
 
 本地 198 项测试和完整 release gate 通过。MemoryView 跨启动持久化已保留；来源状态的跨进程字段展开仍需共享 StatePool 索引持久化。
 
+## 56. v5.13s：动态能力画像与能力动作视图
+
+### 56.1 对 v5.13r 的校正
+
+v5.13r 用 Planner、Writer、Reviewer 和 General 验证了最小充分上下文，但生产视图仍依赖固定职责分类。最终创新方案要求角色只作为能力来源之一，工具变化和运行结果也必须更新画像，任意名称的 Agent 都应被支持。
+
+### 56.2 实现
+
+1. Capability Profile Manager 按 role、tool、runtime 三来源维护版本化画像；
+2. Tool-Capability Synchronizer 自动处理工具增加、移除、来源与成本；
+3. Capability Router 使用最终方案 RouteScore，区分 active 路由和 AutoGen advisory 路由；
+4. Cold Start Tie Resolver 按专用度、工具、记忆局部性、负载、Schema、成本和确定性哈希处理同类平局；
+5. 只有语义不确定才动态寻找具备任务分解或路由能力的 Agent，不写死 Planner 名称；
+6. 当前任务、状态和记忆均按真实接收者能力与当前动作生成最小上下文视图；
+7. AutoGen Driver 自动发现真实 Agent 的说明、系统提示、工具、输出类型和参与者；
+8. Trace、Pool Snapshot、报告和监控页展示画像版本、动作、工具、执行反馈和建议路由。
+
+### 56.3 验证与边界
+
+本地全量测试 209 项全部通过。当前 AutoGen 集成保持框架原生调度权，AgentLite 的 Capability Router 在 AutoGen 路径中为 advisory；框架无关 Runtime 可使用 active 模式。旧固定角色函数仅保留归档和 API 兼容，生产 AutoGen 路径不再调用。
+
 ## 42. v5.13p：AutoGen Studio 网页 Run 级绑定
 
 ### 42.1 解决的问题

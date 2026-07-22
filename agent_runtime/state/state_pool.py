@@ -8,7 +8,38 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
+
+
+def _retrieval_view_policy(
+    *,
+    capabilities: Iterable[str],
+    action: str,
+) -> tuple[str, int]:
+    """Choose retrieval-state detail from capability and current action."""
+    capability_set = {str(item).strip().casefold() for item in capabilities}
+    normalized_action = str(action or "").strip().upper()
+    evidence_actions = {
+        "RETRIEVE_EVIDENCE",
+        "VERIFY_CLAIM",
+        "REVIEW_OUTPUT",
+        "ANALYZE_DATA",
+    }
+    evidence_capabilities = {
+        "retrieval",
+        "evidence_ranking",
+        "validation",
+        "data_analysis",
+    }
+    compact_capabilities = {"writing", "synthesis", "summarization", "coding"}
+    metadata_capabilities = {"routing", "orchestration", "task_decomposition"}
+    if normalized_action in evidence_actions or capability_set & evidence_capabilities:
+        return "evidence_snippets", 5
+    if capability_set & compact_capabilities:
+        return "evidence_snippets", 3
+    if capability_set & metadata_capabilities:
+        return "metadata", 0
+    return "evidence_snippets", 2
 
 
 def _io_path(path: Path | str) -> Path:
@@ -594,14 +625,30 @@ class StatePoolLite:
         )
 
     def render_prompt_view(
-        self, state_ref: StateRef, agent_role: str, budget_chars: int = 900
+        self,
+        state_ref: StateRef,
+        agent_role: str,
+        budget_chars: int = 900,
+        *,
+        capabilities: Iterable[str] = (),
+        action: str = "",
     ) -> str:
         return self.render_prompt_view_with_report(
-            state_ref, agent_role, budget_chars=budget_chars
+            state_ref,
+            agent_role,
+            budget_chars=budget_chars,
+            capabilities=capabilities,
+            action=action,
         )[0]
 
     def render_prompt_view_with_report(
-        self, state_ref: StateRef, agent_role: str, budget_chars: int = 900
+        self,
+        state_ref: StateRef,
+        agent_role: str,
+        budget_chars: int = 900,
+        *,
+        capabilities: Iterable[str] = (),
+        action: str = "",
     ) -> tuple[str, StateAccessReport]:
         state = self._states.get(state_ref.state_id)
         if state is None:
@@ -642,7 +689,10 @@ class StatePoolLite:
                 ranked = payload.get("evidence_rank", [])
                 score_map = payload.get("score_map", {})
                 snippets = []
-                limit = 3 if agent_role in {"WriterAgent", "PlannerAgent"} else 5
+                access_level, limit = _retrieval_view_policy(
+                    capabilities=capabilities,
+                    action=action,
+                )
                 for chunk_id in ranked[:limit]:
                     item = payload.get("chunks", {}).get(chunk_id, {})
                     snippets.append(
@@ -659,10 +709,11 @@ class StatePoolLite:
                 )
                 report = StateAccessReport(
                     state_id=state.state_id,
-                    access_level="evidence_snippets",
+                    access_level=access_level,
                     fencing_token=lease.fencing_token,
                     lease_ttl_seconds=lease.ttl_seconds,
-                    evidence_snippet_access_count=1,
+                    evidence_snippet_access_count=int(limit > 0),
+                    summary_access_count=int(limit == 0),
                 )
             elif state.state_type == "embedding_state":
                 rendered = (
@@ -853,10 +904,16 @@ class StatePoolLite:
         expected_recovery_tokens: int = 128,
         raw_need_probability: float = 0.25,
         budget_chars: int = 900,
+        capabilities: Iterable[str] = (),
+        action: str = "",
     ) -> AccessEscalationReport:
         state = self._states[state_ref.state_id]
         prompt_view, prompt_report = self.render_prompt_view_with_report(
-            state_ref, agent_role=agent_role, budget_chars=budget_chars
+            state_ref,
+            agent_role=agent_role,
+            budget_chars=budget_chars,
+            capabilities=capabilities,
+            action=action,
         )
         probability = self._clamp01(raw_need_probability)
         summary_first_cost = expected_summary_tokens + probability * (

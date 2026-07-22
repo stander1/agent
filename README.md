@@ -2,7 +2,7 @@
 
 本仓库用于迭代实现一个面向多 Agent 协作的跨框架运行时工具层，目标是在多 Agent 任务中通过结构化通信、非文本状态传递和共享记忆复用降低协作开销。
 
-当前开发版本：`v5.13r minimal sufficient role views`
+当前开发版本：`v5.13s dynamic capability profiles`
 
 最新发行包门禁版本：`v5.13h package release gate`
 
@@ -66,7 +66,12 @@
 - [docs/experiments/v5.13p-autogen-studio-run-binding.md](docs/experiments/v5.13p-autogen-studio-run-binding.md)
 - [docs/experiments/v5.13q-continuity-memory-guard.md](docs/experiments/v5.13q-continuity-memory-guard.md)
 - [docs/experiments/v5.13r-minimal-sufficient-role-views.md](docs/experiments/v5.13r-minimal-sufficient-role-views.md)
+- [docs/experiments/v5.13s-dynamic-capability-profiles.md](docs/experiments/v5.13s-dynamic-capability-profiles.md)
 - [docs/release/v5.12z-final-release-notes.md](docs/release/v5.12z-final-release-notes.md)
+
+## v5.13s Current Note
+
+`v5.13s` replaces fixed Planner/Writer/Reviewer production views with versioned capability profiles discovered from each real Agent's role description, tools, declared metadata, outputs, and runtime feedback. Tool changes update capability sources automatically; routing uses the final-design RouteScore and deterministic cold-start tie resolver; semantic uncertainty selects a planning-capable Agent without depending on its name. AutoGen remains the scheduling owner while AgentLite records advisory routing and hydrates only the matching receiver's capability/action context view. Legacy fixed-role helpers remain compatibility-only and are not used by the current AutoGen path.
 
 ## v5.13r Current Note
 

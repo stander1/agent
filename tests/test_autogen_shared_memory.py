@@ -45,7 +45,88 @@ class FakeAgent:
     name = "writer"
 
 
+class FakeTool:
+    def __init__(self, name: str, description: str) -> None:
+        self.name = name
+        self.description = description
+
+
+class ProfiledAgent:
+    def __init__(self, name: str, description: str, system_prompt: str, tools=None) -> None:
+        self.name = name
+        self.description = description
+        self._system_messages = [SimpleNamespace(content=system_prompt)]
+        self._tools = list(tools or [])
+        self._handoff_tools = []
+
+
+class ProfiledTeam:
+    def __init__(self, participants) -> None:
+        self._participants = list(participants)
+        self._participant_names = [item.name for item in self._participants]
+
+
 class AutoGenSharedMemoryTest(unittest.TestCase):
+    def test_autogen_registers_arbitrary_agents_and_syncs_runtime_feedback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scout = ProfiledAgent(
+                "EvidenceScout",
+                "Research sources and rank evidence.",
+                "Retrieve reliable citations and verify claims.",
+                tools=[FakeTool("web_search", "Search sources and retrieve evidence")],
+            )
+            composer = ProfiledAgent(
+                "DeliveryComposer",
+                "Synthesize evidence and write deliverables.",
+                "Integrate confirmed facts into the final answer.",
+            )
+            manager = AutoGenHookManager(self._context(root, "launch_profiles"))
+
+            manager.record_call_start(
+                instance=ProfiledTeam([scout, composer]),
+                method_name="run_stream",
+                target_kind="agentchat_team",
+                args=(),
+                kwargs={"task": "Research evidence and prepare a verified report."},
+            )
+
+            scout_profile = manager.kernel.capability_profiles.get("EvidenceScout")
+            composer_profile = manager.kernel.capability_profiles.get(
+                "DeliveryComposer"
+            )
+            self.assertIn("retrieval", scout_profile.capabilities)
+            self.assertIn("web_search", scout_profile.available_tools)
+            self.assertIn("synthesis", composer_profile.capabilities)
+            self.assertIsNone(manager.kernel.capability_profiles.get("planner"))
+
+            call = manager.record_call_start(
+                instance=scout,
+                method_name="on_messages",
+                target_kind="agentchat_agent",
+                args=([FakeTextMessage("Retrieve and verify the evidence", "user")],),
+                kwargs={},
+            )
+            manager.record_call_end(
+                call,
+                FakeTextMessage("Verified evidence from source S1.", "EvidenceScout"),
+            )
+            scout_profile = manager.kernel.capability_profiles.get("EvidenceScout")
+            self.assertEqual(scout_profile.success_count, 1)
+            self.assertGreater(scout_profile.total_cost_tokens, 0)
+
+            scout._tools = []
+            manager.record_call_start(
+                instance=scout,
+                method_name="on_messages",
+                target_kind="agentchat_agent",
+                args=([FakeTextMessage("Review the existing evidence", "user")],),
+                kwargs={},
+            )
+            scout_profile = manager.kernel.capability_profiles.get("EvidenceScout")
+            self.assertEqual(scout_profile.available_tools, set())
+            self.assertNotIn("tool_use", scout_profile.tool_capabilities)
+
     def test_continuity_override_never_bypasses_structural_guard(self) -> None:
         context = SimpleNamespace(
             continuity_context_required=True,
@@ -588,8 +669,9 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                     {},
                 )
                 hydrated = hydrated_args[0][0]["content"]
-                self.assertIn("AGENTLITE_RECEIVER_ROLE_VIEW v1", hydrated)
-                self.assertIn("semantic_role=writer", hydrated)
+                self.assertIn("AGENTLITE_RECEIVER_CAPABILITY_VIEW v1", hydrated)
+                self.assertIn("semantic_action=WRITE_OUTPUT", hydrated)
+                self.assertIn("capabilities=", hydrated)
                 self.assertEqual(hydrated.count(SHARED_MEMORY_MARKER), 1)
                 self.assertNotIn("--- receiver: planner", hydrated)
                 self.assertNotIn("--- receiver: reviewer", hydrated)

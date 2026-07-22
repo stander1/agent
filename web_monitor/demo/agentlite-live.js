@@ -845,11 +845,16 @@
     if (value.includes("roundrobingroupchat")) return "team";
     if (value.includes("singlethreadedagentruntime")) return "runtime_bridge";
     if (value.includes("autogen")) return "autogen_driver";
-    return value.replace(/_[0-9a-f-]{8,}.*/i, "").replace(/[^a-z0-9_]+/g, "_") || "autogen_driver";
+    return value
+      .replace(/_[0-9a-f-]{8,}.*/i, "")
+      .replace(/[^\p{L}\p{N}_-]+/gu, "_")
+      .replace(/^_+|_+$/g, "") || "autogen_driver";
   }
 
   function capabilityProfileFor(agentId) {
-    const profile = appState.snapshot?.summary?.agent_profiles?.[agentId] || CAPABILITY_PROFILES[agentId];
+    const runtimeProfiles = appState.snapshot?.summary?.agent_profiles || appState.snapshot?.agent_profiles || {};
+    const matchedProfileKey = Object.keys(runtimeProfiles).find((key) => canonicalAgentId(key) === canonicalAgentId(agentId));
+    const profile = runtimeProfiles[matchedProfileKey] || CAPABILITY_PROFILES[agentId];
     const fallback = CAPABILITY_PROFILES[agentId] || {};
     if (!profile) {
       return {

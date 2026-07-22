@@ -18,7 +18,7 @@ from dataclasses import replace as dataclass_replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
-from typing import TYPE_CHECKING, Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable, Mapping
 
 from agent_runtime.adapters.autogen_studio import (
     FrameworkRunBinding,
@@ -42,9 +42,10 @@ from agent_runtime.eval.token_counter import TokenCounter
 from agent_runtime.eval.trace_logger import TraceLogger
 from agent_runtime.memory.memory_store import MemoryStoreLite
 from agent_runtime.memory.context_views import (
-    build_minimal_role_view,
+    build_minimal_context_view,
+    consumer_context_from_profile,
     field_fetch_query,
-    infer_collaboration_role,
+    infer_semantic_action,
 )
 from agent_runtime.reliability.final_delivery_guard import assess_final_delivery
 from agent_runtime.state.state_pool import StatePoolLite, StateRef
@@ -77,7 +78,7 @@ MEMORY_SCOPE_ENV = "AGENTLITE_MEMORY_SCOPE"
 FINAL_DELIVERY_MARKER_ENV = "AGENTLITE_AUTOGEN_FINAL_MARKER"
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
 CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
-DRIVER_PHASE = "v5.13r"
+DRIVER_PHASE = "v5.13s"
 CONTINUITY_COST_GATE_REASONS = frozenset(
     {"token_not_reduced", "team_task_token_not_reduced"}
 )
@@ -215,6 +216,8 @@ class HookCallContext:
     )
     continuity_context_required: bool = False
     continuity_context_reasons: tuple[str, ...] = ()
+    semantic_action: str = "HANDLE_TASK"
+    started_at: float = field(default_factory=time.perf_counter)
     display_restore_enabled: bool = False
     display_original_text: str = ""
     display_original_source: str = "user"
@@ -227,7 +230,11 @@ class _MemoryContextSelection:
     candidate_count: int = 0
     deduplicated_count: int = 0
     deduplicated_views: list[str] = field(default_factory=list)
-    role: str = "general"
+    consumer_id: str = "unknown"
+    semantic_action: str = "HANDLE_TASK"
+    profile_version: int = 0
+    capabilities: tuple[str, ...] = ()
+    information_fields: tuple[str, ...] = ()
     source_prompt_views: list[str] = field(default_factory=list)
     requested_fields: tuple[str, ...] = ()
     covered_fields: tuple[str, ...] = ()
@@ -624,6 +631,7 @@ class AutoGenHookManager:
             "memory_scope_id": self.memory_scope_id,
             "state_pool": self.kernel.state_pool.snapshot(),
             "memory_store": self.kernel.memory_store.snapshot(),
+            "capability_profiles": self.kernel.capability_profiles.snapshot(),
         }
         path = self.output_dir / "pool_snapshot_latest.json"
         temporary = path.with_suffix(".json.tmp")
@@ -711,12 +719,38 @@ class AutoGenHookManager:
             instance,
             target_kind=target_kind,
         )
+        discovered_agents = self.describe_team_agents(
+            instance,
+            target_kind=target_kind,
+        )
+        for discovered in discovered_agents:
+            self._safe_kernel_call(
+                "register_autogen_team_agent",
+                lambda descriptor=discovered: self.kernel.register_agent(descriptor),
+            )
+        self._safe_kernel_call(
+            "register_autogen_call_agent",
+            lambda: self.kernel.register_agent(agent),
+        )
         decoded_messages = self.codec.decode_many({"args": args, "kwargs": kwargs})
         prompt = self.codec.render_text(decoded_messages) or _extract_text(
             {"args": args, "kwargs": kwargs}
         )
+        semantic_source_text = _continuity_source_text(
+            decoded_messages,
+            fallback=prompt,
+        )
         continuity_context_reasons = _continuity_requirement_reasons(
-            _continuity_source_text(decoded_messages, fallback=prompt)
+            semantic_source_text
+        )
+        agent_profile = self.kernel.capability_profiles.get(agent.agent_id)
+        semantic_action = infer_semantic_action(
+            semantic_source_text,
+            preferred_actions=(
+                agent_profile.preferred_actions if agent_profile is not None else ()
+            ),
+            method_name=method_name,
+            target_kind=target_kind,
         )
         collaboration_group_id = _resolve_collaboration_group_id(
             memory_scope_id=self.memory_scope_id,
@@ -799,7 +833,16 @@ class AutoGenHookManager:
             memory_context=memory_context,
             continuity_context_required=bool(continuity_context_reasons),
             continuity_context_reasons=continuity_context_reasons,
+            semantic_action=semantic_action,
         )
+        if target_kind == "agentchat_agent":
+            self._safe_kernel_call(
+                "begin_autogen_capability_execution",
+                lambda: self.kernel.begin_agent_execution(
+                    agent_id=agent.agent_id,
+                    memory_keys=(ref.memory_id for ref in memory_context.refs),
+                ),
+            )
         self._record_framework_run_start(hook_context)
         self._safe_kernel_call(
             "before_agent_receive",
@@ -830,6 +873,10 @@ class AutoGenHookManager:
                 "memory_hit_count": len(memory_context.refs),
                 "continuity_context_required": bool(continuity_context_reasons),
                 "continuity_context_reasons": list(continuity_context_reasons),
+                "semantic_action": semantic_action,
+                "capability_profile": (
+                    agent_profile.to_dict() if agent_profile is not None else {}
+                ),
                 "retrieved_memory_tokens": _count_tokens(
                     self.token_counter,
                     "\n".join(memory_context.prompt_views),
@@ -986,6 +1033,22 @@ class AutoGenHookManager:
             state_ref_payload=state_ref_payload,
             native_scope="team_output",
         )
+        if context.target_kind == "agentchat_agent":
+            self._safe_kernel_call(
+                "record_autogen_capability_feedback",
+                lambda: self.kernel.record_agent_execution(
+                    agent_id=context.agent.agent_id,
+                    success=_has_semantic_payload(decoded_messages, text),
+                    schema_valid=bool(text.strip() or decoded_messages),
+                    action=context.semantic_action,
+                    cost_tokens=(
+                        _count_tokens(self.token_counter, context.task.prompt)
+                        + _count_tokens(self.token_counter, text)
+                    ),
+                    latency_ms=(time.perf_counter() - context.started_at) * 1000,
+                ),
+            )
+        self._write_pool_snapshot(context.task)
         self._record_framework_run_end(context)
 
     def _record_shadow_handoff(
@@ -1018,6 +1081,9 @@ class AutoGenHookManager:
                 summary=plan.summary,
                 state_refs=state_refs,
                 memory_refs=memory_refs,
+                required_action=context.semantic_action,
+                route_candidates=context.team_participants or None,
+                routing_mode="advisory",
             ),
         )
         if not isinstance(envelope_json, str) or not envelope_json:
@@ -1172,6 +1238,9 @@ class AutoGenHookManager:
                 summary=summary,
                 state_refs=state_refs,
                 memory_refs=[],
+                required_action=context.semantic_action,
+                route_candidates=context.team_participants or None,
+                routing_mode="advisory",
             ),
         )
         if not isinstance(envelope_json, str) or not envelope_json:
@@ -1189,9 +1258,10 @@ class AutoGenHookManager:
         for state_ref in state_refs:
             view = self._safe_kernel_call(
                 "autogen_core_transport_prompt_view",
-                lambda ref=state_ref: self.kernel.state_pool.render_prompt_view(
-                    ref,
-                    receiver,
+                lambda ref=state_ref: self._render_state_prompt_view(
+                    state_ref=ref,
+                    receiver_id=receiver,
+                    context=context,
                 ),
             )
             if isinstance(view, str) and view:
@@ -1327,9 +1397,10 @@ class AutoGenHookManager:
         for state_ref in state_refs:
             view = self._safe_kernel_call(
                 "core_content_real_rewrite_prompt_view",
-                lambda ref=state_ref: self.kernel.state_pool.render_prompt_view(
-                    ref,
-                    receiver,
+                lambda ref=state_ref: self._render_state_prompt_view(
+                    state_ref=ref,
+                    receiver_id=receiver,
+                    context=context,
                 ),
             )
             if isinstance(view, str) and view:
@@ -1354,6 +1425,9 @@ class AutoGenHookManager:
                 ),
                 state_refs=state_refs,
                 memory_refs=memory_refs,
+                required_action=context.semantic_action,
+                route_candidates=context.team_participants or None,
+                routing_mode="advisory",
             ),
         )
         envelope_payload = (
@@ -1532,9 +1606,10 @@ class AutoGenHookManager:
             for state_ref in state_refs:
                 view = self._safe_kernel_call(
                     "core_receiver_hydrate_prompt_view",
-                    lambda ref=state_ref: self.kernel.state_pool.render_prompt_view(
-                        ref,
-                        context.agent.agent_id,
+                    lambda ref=state_ref: self._render_state_prompt_view(
+                        state_ref=ref,
+                        receiver_id=context.agent.agent_id,
+                        context=context,
                     ),
                 )
                 if isinstance(view, str) and view:
@@ -1737,9 +1812,10 @@ class AutoGenHookManager:
         for state_ref in state_refs:
             view = self._safe_kernel_call(
                 "core_response_real_rewrite_prompt_view",
-                lambda ref=state_ref: self.kernel.state_pool.render_prompt_view(
-                    ref,
-                    receiver,
+                lambda ref=state_ref: self._render_state_prompt_view(
+                    state_ref=ref,
+                    receiver_id=receiver,
+                    context=context,
                 ),
             )
             if isinstance(view, str) and view:
@@ -1759,6 +1835,9 @@ class AutoGenHookManager:
                 ),
                 state_refs=state_refs,
                 memory_refs=[],
+                required_action=context.semantic_action,
+                route_candidates=context.team_participants or None,
+                routing_mode="advisory",
             ),
         )
         envelope_payload = (
@@ -1918,9 +1997,10 @@ class AutoGenHookManager:
             for state_ref in state_refs:
                 view = self._safe_kernel_call(
                     "core_response_hydrate_prompt_view",
-                    lambda ref=state_ref: self.kernel.state_pool.render_prompt_view(
-                        ref,
-                        receiver,
+                    lambda ref=state_ref: self._render_state_prompt_view(
+                        state_ref=ref,
+                        receiver_id=receiver,
+                        context=context,
                     ),
                 )
                 if isinstance(view, str) and view:
@@ -2499,7 +2579,7 @@ class AutoGenHookManager:
             return None
         if _contains_agentlite_rewrite_marker(native_text):
             if "AGENTLITE_TEAM_REAL_REWRITE v1" in native_text:
-                hydrated = self._hydrate_team_receiver_role_view(
+                hydrated = self._hydrate_team_receiver_context_view(
                     context=context,
                     messages=messages,
                     source=source,
@@ -2568,9 +2648,10 @@ class AutoGenHookManager:
         for state_ref in state_refs:
             view = self._safe_kernel_call(
                 "real_rewrite_prompt_view",
-                lambda ref=state_ref: self.kernel.state_pool.render_prompt_view(
-                    ref,
-                    context.agent.agent_id,
+                lambda ref=state_ref: self._render_state_prompt_view(
+                    state_ref=ref,
+                    receiver_id=context.agent.agent_id,
+                    context=context,
                     budget_chars=max(900, len(chronology_view) + 512),
                 ),
             )
@@ -2601,6 +2682,9 @@ class AutoGenHookManager:
                 ),
                 state_refs=state_refs,
                 memory_refs=memory_refs,
+                required_action=context.semantic_action,
+                route_candidates=context.team_participants or None,
+                routing_mode="advisory",
             ),
         )
         envelope_payload = (
@@ -2706,7 +2790,7 @@ class AutoGenHookManager:
         )
         return new_args, new_kwargs
 
-    def _hydrate_team_receiver_role_view(
+    def _hydrate_team_receiver_context_view(
         self,
         *,
         context: HookCallContext,
@@ -2726,7 +2810,7 @@ class AutoGenHookManager:
             ),
             "",
         )
-        receiver_view = _extract_team_receiver_role_view(
+        receiver_view = _extract_team_receiver_context_view(
             team_payload,
             receiver_id=context.agent.agent_id,
         )
@@ -2734,7 +2818,7 @@ class AutoGenHookManager:
             self._record_agent_rewrite_audit(
                 context=context,
                 applied=False,
-                fallback_reasons=["team_receiver_role_view_missing"],
+                fallback_reasons=["team_receiver_context_view_missing"],
                 native_text=native_text,
             )
             return None
@@ -2750,12 +2834,17 @@ class AutoGenHookManager:
             and str(getattr(message, "source", "") or "").casefold() != "user"
         ]
         sections = [
-            "AGENTLITE_RECEIVER_ROLE_VIEW v1",
+            "AGENTLITE_RECEIVER_CAPABILITY_VIEW v1",
             f"receiver={context.agent.agent_id}",
-            f"semantic_role={receiver_view['semantic_role']}",
+            f"semantic_action={receiver_view['semantic_action']}",
+            f"capability_profile_version={receiver_view['capability_profile_version']}",
+            "capabilities="
+            + json.dumps(receiver_view["capabilities"], ensure_ascii=False),
+            "information_fields="
+            + json.dumps(receiver_view["information_fields"], ensure_ascii=False),
             "CURRENT_USER_TASK (highest priority):",
             receiver_view["current_task"],
-            "ROLE_PROMPT_VIEW:",
+            "CAPABILITY_PROMPT_VIEW:",
             receiver_view["prompt_view"],
         ]
         wire_envelope = receiver_view.get("wire_envelope", {})
@@ -2825,7 +2914,10 @@ class AutoGenHookManager:
                     self.token_counter,
                     receiver_view.get("memory_prompt_view", ""),
                 ),
-                rewrite_safety={"team_receiver_role_view_hydration": True},
+                rewrite_safety={
+                    "team_receiver_context_view_hydration": True,
+                    "team_receiver_role_view_hydration": True,
+                },
                 continuity_cost_override=continuity_cost_override,
             )
             return None
@@ -2853,7 +2945,10 @@ class AutoGenHookManager:
                 self.token_counter,
                 receiver_view.get("memory_prompt_view", ""),
             ),
-            rewrite_safety={"team_receiver_role_view_hydration": True},
+            rewrite_safety={
+                "team_receiver_context_view_hydration": True,
+                "team_receiver_role_view_hydration": True,
+            },
             continuity_cost_override=continuity_cost_override,
         )
         return new_args, new_kwargs
@@ -2914,9 +3009,10 @@ class AutoGenHookManager:
         for state_ref in state_refs:
             view = self._safe_kernel_call(
                 "handoff_typed_candidate_prompt_view",
-                lambda ref=state_ref: self.kernel.state_pool.render_prompt_view(
-                    ref,
-                    receiver,
+                lambda ref=state_ref: self._render_state_prompt_view(
+                    state_ref=ref,
+                    receiver_id=receiver,
+                    context=context,
                 ),
             )
             if isinstance(view, str) and view:
@@ -2936,6 +3032,9 @@ class AutoGenHookManager:
                 ),
                 state_refs=state_refs,
                 memory_refs=[],
+                required_action=context.semantic_action,
+                route_candidates=context.team_participants or None,
+                routing_mode="advisory",
             ),
         )
         envelope_payload = (
@@ -3085,9 +3184,10 @@ class AutoGenHookManager:
         for state_ref in state_refs:
             view = self._safe_kernel_call(
                 "tool_summary_typed_candidate_prompt_view",
-                lambda ref=state_ref: self.kernel.state_pool.render_prompt_view(
-                    ref,
-                    receiver,
+                lambda ref=state_ref: self._render_state_prompt_view(
+                    state_ref=ref,
+                    receiver_id=receiver,
+                    context=context,
                 ),
             )
             if isinstance(view, str) and view:
@@ -3108,6 +3208,9 @@ class AutoGenHookManager:
                 ),
                 state_refs=state_refs,
                 memory_refs=[],
+                required_action=context.semantic_action,
+                route_candidates=context.team_participants or None,
+                routing_mode="advisory",
             ),
         )
         envelope_payload = (
@@ -3402,12 +3505,34 @@ class AutoGenHookManager:
                 "memory_candidate_deduplicated_tokens": memory_deduplicated_tokens,
                 "memory_deduplication_mode": "fact_overlap_rules_v1",
                 "memory_view_mode": (
-                    "minimal_sufficient_role_view_v1"
+                    "capability_action_context_view_v1"
                     if role_memory_selection is not None
                     else "native_prompt_view"
                 ),
-                "semantic_role": (
-                    role_memory_selection.role if role_memory_selection else ""
+                "consumer_id": (
+                    role_memory_selection.consumer_id
+                    if role_memory_selection
+                    else ""
+                ),
+                "semantic_action": (
+                    role_memory_selection.semantic_action
+                    if role_memory_selection
+                    else context.semantic_action
+                ),
+                "capability_profile_version": (
+                    role_memory_selection.profile_version
+                    if role_memory_selection
+                    else 0
+                ),
+                "capabilities": (
+                    list(role_memory_selection.capabilities)
+                    if role_memory_selection
+                    else []
+                ),
+                "information_fields": (
+                    list(role_memory_selection.information_fields)
+                    if role_memory_selection
+                    else []
                 ),
                 "requested_memory_fields": (
                     list(role_memory_selection.requested_fields)
@@ -3610,7 +3735,7 @@ class AutoGenHookManager:
                     memory_deduplicated_tokens
                 ),
                 "memory_deduplication_mode": "fact_overlap_rules_v1",
-                "memory_view_mode": "minimal_sufficient_role_view_v1",
+                "memory_view_mode": "capability_action_context_view_v1",
                 "memory_source_view_tokens": memory_source_view_tokens,
                 "minimal_role_view_tokens": minimal_role_view_tokens,
                 "role_view_reduction_ratio": (
@@ -3890,6 +4015,27 @@ class AutoGenHookManager:
             },
         )
 
+    def _render_state_prompt_view(
+        self,
+        *,
+        state_ref: Any,
+        receiver_id: str,
+        context: HookCallContext,
+        budget_chars: int = 900,
+        action: str = "",
+    ) -> str:
+        profile = self.kernel.capability_profiles.get(
+            _safe_identifier(receiver_id)
+        ) or self.kernel.capability_profiles.get(receiver_id)
+        capabilities = profile.capabilities if profile is not None else ()
+        return self.kernel.state_pool.render_prompt_view(
+            state_ref,
+            receiver_id,
+            budget_chars=budget_chars,
+            capabilities=capabilities,
+            action=action or context.semantic_action,
+        )
+
     def _build_receiver_broadcast_entry(
         self,
         *,
@@ -3899,13 +4045,34 @@ class AutoGenHookManager:
         state_ref_payload: list[dict[str, Any]],
         include_memory: bool = True,
     ) -> dict[str, Any]:
+        with self._memory_lock:
+            current_task = self._current_team_task_by_group.get(
+                context.task.group_id,
+                "",
+            )
+        current_task = current_task or context.task.prompt
+        receiver_profile = self.kernel.capability_profiles.get(
+            receiver_plan.declared_receiver
+        )
+        consumer = consumer_context_from_profile(
+            receiver_profile,
+            consumer_id=receiver_plan.declared_receiver,
+        )
+        receiver_action = infer_semantic_action(
+            current_task,
+            preferred_actions=consumer.preferred_actions,
+            method_name=context.method_name,
+            target_kind="agentchat_agent",
+        )
         state_prompt_views = []
         for state_ref in state_refs:
             view = self._safe_kernel_call(
                 "autogen_broadcast_prompt_view",
-                lambda ref=state_ref: self.kernel.state_pool.render_prompt_view(
-                    ref,
-                    receiver_plan.declared_receiver,
+                lambda ref=state_ref: self._render_state_prompt_view(
+                    state_ref=ref,
+                    receiver_id=receiver_plan.declared_receiver,
+                    context=context,
+                    action=receiver_action,
                 ),
             )
             if isinstance(view, str) and view:
@@ -3915,19 +4082,15 @@ class AutoGenHookManager:
             receiver_id=receiver_plan.declared_receiver,
             state_prompt_views=state_prompt_views,
             include_memory=include_memory,
+            semantic_action=receiver_action,
         )
         memory_refs = memory_selection.refs
         memory_prompt_views = memory_selection.prompt_views
-        with self._memory_lock:
-            current_task = self._current_team_task_by_group.get(
-                context.task.group_id,
-                "",
-            )
-        current_task = current_task or context.task.prompt
-        current_task_view = build_minimal_role_view(
+        current_task_view = build_minimal_context_view(
             query=current_task,
             prompt_views=[current_task],
-            role=memory_selection.role,
+            consumer=consumer,
+            action=memory_selection.semantic_action,
         )
         envelope_json = self._safe_kernel_call(
             "autogen_build_broadcast_shadow_handoff",
@@ -3940,6 +4103,9 @@ class AutoGenHookManager:
                 summary=receiver_plan.summary,
                 state_refs=state_refs,
                 memory_refs=memory_refs,
+                required_action=context.semantic_action,
+                route_candidates=context.team_participants or None,
+                routing_mode="advisory",
             ),
         )
         if not isinstance(envelope_json, str) or not envelope_json:
@@ -3981,8 +4147,12 @@ class AutoGenHookManager:
                 "\n".join(memory_selection.deduplicated_views),
             ),
             "memory_deduplication_mode": "fact_overlap_rules_v1",
-            "memory_view_mode": "minimal_sufficient_role_view_v1",
-            "semantic_role": memory_selection.role,
+            "memory_view_mode": "capability_action_context_view_v1",
+            "consumer_id": memory_selection.consumer_id,
+            "semantic_action": memory_selection.semantic_action,
+            "capability_profile_version": memory_selection.profile_version,
+            "capabilities": list(memory_selection.capabilities),
+            "information_fields": list(memory_selection.information_fields),
             "requested_memory_fields": list(memory_selection.requested_fields),
             "covered_memory_fields": list(memory_selection.covered_fields),
             "missing_memory_fields": list(memory_selection.missing_fields),
@@ -4035,6 +4205,7 @@ class AutoGenHookManager:
         receiver_id: str,
         state_prompt_views: list[str],
         include_memory: bool = True,
+        semantic_action: str = "",
     ) -> _MemoryContextSelection:
         base = _select_nonredundant_memory_context(
             state_prompt_views=state_prompt_views,
@@ -4043,8 +4214,14 @@ class AutoGenHookManager:
                 list(context.memory_context.prompt_views) if include_memory else []
             ),
         )
-        role = infer_collaboration_role(receiver_id, context.agent.role)
-        base.role = role
+        profile = self.kernel.capability_profiles.get(receiver_id)
+        consumer = consumer_context_from_profile(
+            profile,
+            consumer_id=receiver_id,
+        )
+        base.consumer_id = receiver_id
+        base.profile_version = consumer.profile_version
+        base.capabilities = consumer.capabilities
         base.source_prompt_views = list(base.prompt_views)
         if not base.prompt_views:
             return base
@@ -4054,10 +4231,18 @@ class AutoGenHookManager:
                 "",
             )
         query = current_task or _continuity_source_text([], fallback=context.task.prompt)
-        initial = build_minimal_role_view(
+        semantic_action = semantic_action or infer_semantic_action(
+            query,
+            preferred_actions=consumer.preferred_actions,
+            method_name=context.method_name,
+            target_kind=context.target_kind,
+        )
+        base.semantic_action = semantic_action
+        initial = build_minimal_context_view(
             query=query,
             prompt_views=base.prompt_views,
-            role=role,
+            consumer=consumer,
+            action=semantic_action,
         )
         fetched_views: list[str] = []
         fetched_state_ids: list[str] = []
@@ -4102,15 +4287,17 @@ class AutoGenHookManager:
                         break
                 if len(fetched_views) >= 2:
                     break
-        final_view = build_minimal_role_view(
+        final_view = build_minimal_context_view(
             query=query,
             prompt_views=[*base.prompt_views, *fetched_views],
-            role=role,
+            consumer=consumer,
+            action=semantic_action,
         )
         base.prompt_views = [final_view.text] if final_view.text else []
         base.requested_fields = final_view.requested_fields
         base.covered_fields = final_view.covered_fields
         base.missing_fields = final_view.missing_fields
+        base.information_fields = final_view.information_fields
         base.role_view_source_chars = final_view.source_chars
         base.role_view_selected_chars = final_view.selected_chars
         base.role_view_reduction_ratio = final_view.reduction_ratio
@@ -4127,7 +4314,11 @@ class AutoGenHookManager:
                     "call_id": context.call_id,
                     "task_id": context.task.task_id,
                     "receiver": receiver_id,
-                    "semantic_role": role,
+                    "consumer_id": receiver_id,
+                    "semantic_action": semantic_action,
+                    "capability_profile_version": consumer.profile_version,
+                    "capabilities": list(consumer.capabilities),
+                    "information_fields": list(final_view.information_fields),
                     "requested_fields": list(initial.requested_fields),
                     "initial_missing_fields": list(initial.missing_fields),
                     "final_missing_fields": list(final_view.missing_fields),
@@ -4154,6 +4345,21 @@ class AutoGenHookManager:
                 ),
             },
         )
+        if context is not None and context.target_kind == "agentchat_agent":
+            self._safe_kernel_call(
+                "record_autogen_capability_failure",
+                lambda: self.kernel.record_agent_execution(
+                    agent_id=context.agent.agent_id,
+                    success=False,
+                    schema_valid=None,
+                    action=context.semantic_action,
+                    cost_tokens=_count_tokens(
+                        self.token_counter,
+                        context.task.prompt,
+                    ),
+                    latency_ms=(time.perf_counter() - context.started_at) * 1000,
+                ),
+            )
         self._record_framework_run_end(context, error=error)
 
     def record_model_client_usage(
@@ -4240,16 +4446,91 @@ class AutoGenHookManager:
         )
         agent_id = _safe_identifier(str(raw_name))
         role = "team" if target_kind == "agentchat_team" else type(instance).__name__
-        capabilities = _capabilities_for(target_kind)
+        metadata = _mapping_or_empty(
+            getattr(instance, "metadata", None)
+            or getattr(instance, "_metadata", None)
+        )
+        declared_capabilities = _string_sequence(
+            metadata.get("capabilities")
+            or metadata.get("capability_tags")
+        )
+        capabilities = tuple(
+            dict.fromkeys([*_capabilities_for(target_kind), *declared_capabilities])
+        )
+        role_description = str(
+            getattr(instance, "description", None)
+            or getattr(instance, "_description", None)
+            or metadata.get("description")
+            or ""
+        ).strip()
+        system_prompt = _autogen_system_prompt(instance)
+        tools = tuple(_autogen_tool_descriptors(instance))
+        output_type = _autogen_output_type(instance)
         return AgentDescriptor(
             agent_id=agent_id,
             role=role,
             capabilities=capabilities,
+            role_description=role_description,
+            system_prompt=system_prompt,
+            tools=tools,
+            preferred_actions=tuple(
+                _string_sequence(metadata.get("preferred_actions"))
+            ),
+            input_preference=tuple(
+                _string_sequence(metadata.get("input_preference"))
+            ),
+            output_types=tuple(
+                dict.fromkeys(
+                    [
+                        *_string_sequence(metadata.get("output_types")),
+                        *([output_type] if output_type else []),
+                    ]
+                )
+            ),
             framework_metadata={
                 "framework": "autogen",
                 "native_class": f"{type(instance).__module__}.{type(instance).__name__}",
                 "target_kind": target_kind,
+                "accepted_state_types": _string_sequence(
+                    metadata.get("accepted_state_types")
+                ),
+                "message_types": _string_sequence(metadata.get("message_types")),
+                "tool_count": len(tools),
             },
+        )
+
+    def describe_team_agents(
+        self,
+        instance: object,
+        *,
+        target_kind: str,
+    ) -> tuple[AgentDescriptor, ...]:
+        if target_kind != "agentchat_team":
+            return ()
+        raw_participants = getattr(instance, "_participants", None)
+        if raw_participants is None:
+            raw_participants = getattr(instance, "participants", None)
+        descriptors = [
+            self.describe_agent(participant, target_kind="agentchat_agent")
+            for participant in list(raw_participants or [])
+        ]
+        if descriptors:
+            return tuple(descriptors)
+        return tuple(
+            AgentDescriptor(
+                agent_id=name,
+                role=name,
+                role_description=name,
+                framework_metadata={
+                    "framework": "autogen",
+                    "target_kind": "agentchat_agent",
+                    "discovery_source": "participant_name_only",
+                },
+            )
+            for name in self.describe_team_participants(
+                instance,
+                target_kind=target_kind,
+            )
         )
 
     def describe_team_participants(
@@ -4805,6 +5086,78 @@ def _capabilities_for(target_kind: str) -> tuple[str, ...]:
     if target_kind == "core_agent":
         return ("runtime_message_receive", "prompt_view_hydration")
     return ("agent_message_handling", "artifact_generation")
+
+
+def _mapping_or_empty(value: object) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _autogen_system_prompt(instance: object) -> str:
+    messages = getattr(instance, "_system_messages", None)
+    if messages is None:
+        raw = getattr(instance, "system_message", None)
+        return str(raw or "").strip()
+    parts = []
+    for message in list(messages or []):
+        content = getattr(message, "content", None)
+        text = _extract_text(content if content is not None else message).strip()
+        if text:
+            parts.append(text)
+    return "\n".join(parts)
+
+
+def _autogen_tool_descriptors(instance: object) -> list[dict[str, Any]]:
+    raw_tools = [
+        *list(getattr(instance, "_tools", None) or []),
+        *list(getattr(instance, "_handoff_tools", None) or []),
+    ]
+    descriptors: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for tool in raw_tools:
+        name = str(
+            getattr(tool, "name", None)
+            or getattr(tool, "_name", None)
+            or type(tool).__name__
+        ).strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        metadata = _mapping_or_empty(
+            getattr(tool, "metadata", None)
+            or getattr(tool, "_metadata", None)
+        )
+        descriptors.append(
+            {
+                "tool_id": name,
+                "description": str(
+                    getattr(tool, "description", None)
+                    or getattr(tool, "_description", None)
+                    or metadata.get("description")
+                    or ""
+                ),
+                "capability_tags": _string_sequence(
+                    metadata.get("capability_tags")
+                    or getattr(tool, "capability_tags", None)
+                ),
+                "supported_actions": _string_sequence(
+                    metadata.get("supported_actions")
+                    or getattr(tool, "supported_actions", None)
+                ),
+                "cost_level": float(
+                    metadata.get("cost_level")
+                    or getattr(tool, "cost_level", 0.0)
+                    or 0.0
+                ),
+            }
+        )
+    return descriptors
+
+
+def _autogen_output_type(instance: object) -> str:
+    output_type = getattr(instance, "_output_content_type", None)
+    if output_type is None:
+        return ""
+    return str(getattr(output_type, "__name__", None) or output_type).strip()
 
 
 def _resolve_broadcast_mode(value: str) -> str:
@@ -5909,7 +6262,13 @@ def _build_team_real_rewrite_content(
                 "receiver": entry.get("receiver", ""),
                 "shp_wire": entry.get("shadow_wire_envelope", {}),
                 "memory_refs": entry.get("memory_refs", []) or [],
-                "semantic_role": entry.get("semantic_role", "general"),
+                "consumer_id": entry.get("consumer_id", ""),
+                "semantic_action": entry.get("semantic_action", "HANDLE_TASK"),
+                "capability_profile_version": int(
+                    entry.get("capability_profile_version", 0) or 0
+                ),
+                "capabilities": entry.get("capabilities", []) or [],
+                "information_fields": entry.get("information_fields", []) or [],
             }
             for entry in receiver_entries
         ],
@@ -5930,14 +6289,32 @@ def _build_team_real_rewrite_content(
         sections.extend(
             [
                 f"--- receiver: {receiver}",
-                f"semantic_role: {entry.get('semantic_role', 'general')}",
+                "context_profile: "
+                + json.dumps(
+                    {
+                        "consumer_id": entry.get("consumer_id", receiver),
+                        "semantic_action": entry.get(
+                            "semantic_action", "HANDLE_TASK"
+                        ),
+                        "capability_profile_version": int(
+                            entry.get("capability_profile_version", 0) or 0
+                        ),
+                        "capabilities": entry.get("capabilities", []) or [],
+                        "information_fields": entry.get(
+                            "information_fields", []
+                        )
+                        or [],
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
                 prompt_view_text,
             ]
         )
     return "\n".join(sections)
 
 
-def _extract_team_receiver_role_view(
+def _extract_team_receiver_context_view(
     content: str,
     *,
     receiver_id: str,
@@ -5957,13 +6334,24 @@ def _extract_team_receiver_role_view(
             break
     if not selected_text:
         return {}
-    role_match = re.match(r"semantic_role:\s*([^\n]+)\n?", selected_text)
-    semantic_role = role_match.group(1).strip() if role_match else "general"
-    prompt_view = (
-        selected_text[role_match.end() :].strip()
-        if role_match
-        else selected_text
+    context_match = re.match(r"context_profile:\s*(\{[^\n]*\})\n?", selected_text)
+    context_profile = (
+        _json_object_or_empty(context_match.group(1)) if context_match else {}
     )
+    # Compatibility only: archived v5.13r payloads used semantic_role.
+    legacy_role_match = (
+        None
+        if context_match
+        else re.match(r"semantic_role:\s*([^\n]+)\n?", selected_text)
+    )
+    prompt_start = (
+        context_match.end()
+        if context_match
+        else legacy_role_match.end()
+        if legacy_role_match
+        else 0
+    )
+    prompt_view = selected_text[prompt_start:].strip()
     current_task_view, receiver_prompt_view = _split_current_task_role_view(
         prompt_view
     )
@@ -5986,7 +6374,31 @@ def _extract_team_receiver_role_view(
         memory_prompt_view = prompt_view[marker_index:].strip()
     return {
         "current_task": current_task_view,
-        "semantic_role": semantic_role,
+        "consumer_id": str(
+            context_profile.get("consumer_id")
+            or receiver_wire.get("consumer_id")
+            or receiver_id
+        ),
+        "semantic_action": str(
+            context_profile.get("semantic_action")
+            or receiver_wire.get("semantic_action")
+            or "HANDLE_TASK"
+        ),
+        "capability_profile_version": int(
+            context_profile.get("capability_profile_version")
+            or receiver_wire.get("capability_profile_version")
+            or 0
+        ),
+        "capabilities": list(
+            context_profile.get("capabilities")
+            or receiver_wire.get("capabilities")
+            or []
+        ),
+        "information_fields": list(
+            context_profile.get("information_fields")
+            or receiver_wire.get("information_fields")
+            or []
+        ),
         "prompt_view": receiver_prompt_view,
         "memory_prompt_view": memory_prompt_view,
         "wire_envelope": dict(receiver_wire.get("shp_wire", {}) or {}),
@@ -6045,7 +6457,13 @@ def _team_rewrite_receiver_audit(
                     entry.get("memory_candidate_deduplicated_tokens", 0) or 0
                 ),
                 "memory_view_mode": entry.get("memory_view_mode", ""),
-                "semantic_role": entry.get("semantic_role", "general"),
+                "consumer_id": entry.get("consumer_id", ""),
+                "semantic_action": entry.get("semantic_action", "HANDLE_TASK"),
+                "capability_profile_version": int(
+                    entry.get("capability_profile_version", 0) or 0
+                ),
+                "capabilities": entry.get("capabilities", []) or [],
+                "information_fields": entry.get("information_fields", []) or [],
                 "requested_memory_fields": entry.get(
                     "requested_memory_fields", []
                 ),

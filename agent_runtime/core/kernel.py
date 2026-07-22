@@ -43,6 +43,12 @@ class AgentDescriptor:
     agent_id: str
     role: str
     capabilities: tuple[str, ...] = ()
+    role_description: str = ""
+    system_prompt: str = ""
+    tools: tuple[dict[str, Any], ...] = ()
+    preferred_actions: tuple[str, ...] = ()
+    input_preference: tuple[str, ...] = ()
+    output_types: tuple[str, ...] = ()
     framework_metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -114,6 +120,99 @@ class CollaborationKernel:
         self.control_budget = ControlBudgetLite()
         self._sessions: dict[str, KernelSession] = {}
         self._closed = False
+
+    def register_agent(self, agent: AgentDescriptor) -> dict[str, object]:
+        self._ensure_open()
+        profile = self.capability_profiles.register_or_update(
+            agent_id=agent.agent_id,
+            role=agent.role,
+            role_description=agent.role_description,
+            system_prompt=agent.system_prompt,
+            declared_capabilities=agent.capabilities,
+            tools=agent.tools,
+            preferred_actions=agent.preferred_actions,
+            input_preference=agent.input_preference,
+            output_types=agent.output_types,
+            accepted_state_types=tuple(
+                agent.framework_metadata.get("accepted_state_types", ()) or ()
+            ),
+            message_types=tuple(
+                agent.framework_metadata.get("message_types", ()) or ()
+            ),
+        )
+        payload = profile.to_dict() if profile is not None else {}
+        if payload:
+            self.trace.write(
+                "capability_profile_updated",
+                {
+                    "agent_id": agent.agent_id,
+                    "profile": payload,
+                },
+            )
+        return payload
+
+    def record_agent_execution(
+        self,
+        *,
+        agent_id: str,
+        success: bool,
+        schema_valid: bool | None = None,
+        action: str = "",
+        cost_tokens: int = 0,
+        latency_ms: float = 0.0,
+    ) -> dict[str, object]:
+        self._ensure_open()
+        profile = self.capability_profiles.record_execution(
+            agent_id,
+            success=success,
+            schema_valid=schema_valid,
+            action=action,
+            cost_tokens=cost_tokens,
+            latency_ms=latency_ms,
+        )
+        payload = profile.to_dict() if profile is not None else {}
+        if payload:
+            self.trace.write(
+                "capability_profile_feedback",
+                {
+                    "agent_id": agent_id,
+                    "success": success,
+                    "schema_valid": schema_valid,
+                    "action": action,
+                    "cost_tokens": max(0, int(cost_tokens)),
+                    "latency_ms": round(max(0.0, float(latency_ms)), 3),
+                    "profile_version": payload.get("profile_version", 0),
+                    "schema_reliability": payload.get("schema_reliability", 0.0),
+                    "history": payload.get("history", {}),
+                    "profile": payload,
+                },
+            )
+        return payload
+
+    def begin_agent_execution(
+        self,
+        *,
+        agent_id: str,
+        memory_keys: Iterable[str] = (),
+    ) -> dict[str, object]:
+        self._ensure_open()
+        profile = self.capability_profiles.record_execution_start(
+            agent_id,
+            memory_keys=memory_keys,
+        )
+        payload = profile.to_dict() if profile is not None else {}
+        if payload:
+            self.trace.write(
+                "capability_profile_execution_started",
+                {
+                    "agent_id": agent_id,
+                    "current_load": payload.get("current_load", 0),
+                    "memory_locality_count": payload.get(
+                        "memory_locality_count", 0
+                    ),
+                },
+            )
+        return payload
 
     def open_session(
         self,
@@ -231,6 +330,15 @@ class CollaborationKernel:
         state_budget_chars: int = 700,
     ) -> PreparedAgentInput:
         self._ensure_open()
+        self.register_agent(agent)
+        profile = self.capability_profiles.get(agent.agent_id)
+        capabilities = profile.capabilities if profile is not None else ()
+        preferred_actions = (
+            sorted(profile.preferred_actions) if profile is not None else []
+        )
+        state_access_action = (
+            preferred_actions[0] if len(preferred_actions) == 1 else ""
+        )
         state_views: list[str] = []
         state_read_ms = 0.0
         raw_access_total = 0
@@ -242,6 +350,8 @@ class CollaborationKernel:
                 reason="runtime_prompt_view",
                 need_raw=False,
                 budget_chars=state_budget_chars,
+                capabilities=capabilities,
+                action=state_access_action,
             )
             state_read_ms += (time.perf_counter() - started) * 1000
             state_views.append(escalation_report.prompt_view)
@@ -602,8 +712,17 @@ class CollaborationKernel:
         summary: str,
         state_refs: list[StateRef],
         memory_refs: list[MemoryRef],
+        required_action: str | None = None,
+        route_candidates: Iterable[str] | None = None,
+        routing_mode: str = "active",
     ) -> str:
         self._ensure_open()
+        candidates = (
+            tuple(dict.fromkeys(route_candidates))
+            if route_candidates is not None
+            else tuple(self.capability_profiles.agent_ids())
+        )
+        memory_keys = tuple(ref.memory_id for ref in memory_refs)
         readiness_report = self.readiness_barrier.assess(
             state_refs=state_refs,
             degraded=any(ref.state_type == "failure_state" for ref in state_refs),
@@ -613,6 +732,23 @@ class CollaborationKernel:
             declared_receiver=declared_receiver,
             state_refs=state_refs,
             readiness=readiness_report.readiness,
+            required_action=required_action,
+            candidates=candidates,
+            routing_mode=routing_mode,
+            task_id=task.task_id,
+            candidate_memory_locality={
+                candidate: self.capability_profiles.memory_locality_score(
+                    candidate,
+                    memory_keys,
+                )
+                for candidate in candidates
+            },
+            candidate_load={
+                candidate: float(
+                    getattr(self.capability_profiles.get(candidate), "current_load", 0)
+                )
+                for candidate in candidates
+            },
         )
         budget_report = self.control_budget.record_decision(
             task_id=task.task_id,

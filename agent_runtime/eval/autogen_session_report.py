@@ -423,6 +423,19 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
     final_delivery_valid_rate = float(
         token_summary.get("final_delivery_valid_rate", 0.0) or 0.0
     )
+    capability_profile_update_count = _int(
+        token_summary.get("capability_profile_update_count")
+    )
+    capability_profile_feedback_count = _int(
+        token_summary.get("capability_profile_feedback_count")
+    )
+    registered_capability_profile_count = _int(
+        token_summary.get("registered_capability_profile_count")
+    )
+    capability_context_view_count = _int(
+        token_summary.get("capability_context_view_count")
+    )
+    capability_action_counts = token_summary.get("capability_action_counts", {})
     memory_deduplicated = _int(
         token_summary.get("memory_candidate_deduplicated_count")
     )
@@ -438,6 +451,31 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
         _row("llm_prompt_tokens", llm_prompt, "LLM 输入 token；网页端可由 provider usage 补充"),
         _row("llm_completion_tokens", llm_completion, "LLM 输出 token；网页端可由 provider usage 补充"),
         _row("llm_total_tokens", llm_total, "LLM 实际调用总 token"),
+        _row(
+            "registered_capability_profile_count",
+            registered_capability_profile_count,
+            "本次运行实际注册的 Agent 能力画像数量",
+        ),
+        _row(
+            "capability_profile_update_count",
+            capability_profile_update_count,
+            "角色描述或工具变化触发能力画像同步的次数",
+        ),
+        _row(
+            "capability_profile_feedback_count",
+            capability_profile_feedback_count,
+            "执行结果回写成功率、可靠性、成本与时延的次数",
+        ),
+        _row(
+            "capability_context_view_count",
+            capability_context_view_count,
+            "按接收者能力与当前动作生成最小上下文视图的次数",
+        ),
+        _row(
+            "capability_action_counts",
+            json.dumps(capability_action_counts, ensure_ascii=False, sort_keys=True),
+            "运行中识别到的语义动作分布",
+        ),
         _row("rewrite_audit_event_count", rewrite_audit, "进入真实改写审计的全部决策次数"),
         _row("rewrite_costed_event_count", rewrite_costed, "具有可比较原生/运行时 Token 的改写决策次数"),
         _row("rewrite_applied_event_count", rewrite_applied, "真正修改了 AutoGen 消息的次数"),
