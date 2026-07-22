@@ -468,6 +468,7 @@ def _agent_profiles(
             "team": {
                 "agent_id": "team",
                 "role": "AutoGenTeam",
+                "registry_scope": "system",
                 "summary": "AutoGen Team 入口，负责组级任务广播",
                 "capabilities": ["Team 调度", "广播入口", "任务流转"],
                 "accepted": ["user_task", "team_input"],
@@ -475,6 +476,7 @@ def _agent_profiles(
             "team_manager": {
                 "agent_id": "team_manager",
                 "role": "AutoGenTeamManager",
+                "registry_scope": "system",
                 "summary": "AutoGen 组管理器，维护回合与参与者顺序",
                 "capabilities": ["回合管理", "参与者编排"],
                 "accepted": ["team_output", "handoff_message"],
@@ -482,6 +484,7 @@ def _agent_profiles(
             "runtime_bridge": {
                 "agent_id": "runtime_bridge",
                 "role": "AutoGenRuntimeBridge",
+                "registry_scope": "system",
                 "summary": "AutoGen Core 运行时桥接层，承接底层消息投递",
                 "capabilities": ["Core 桥接", "消息投递", "水合还原"],
                 "accepted": ["core_request", "core_response"],
@@ -489,6 +492,7 @@ def _agent_profiles(
             "autogen_driver": {
                 "agent_id": "autogen_driver",
                 "role": "AgentLiteDriver",
+                "registry_scope": "system",
                 "summary": "AgentLite 注入驱动，记录 hook、改写与 trace",
                 "capabilities": ["运行时注入", "trace 记录", "协议改写"],
                 "accepted": ["driver_event"],
@@ -506,6 +510,8 @@ def _agent_profiles(
                 str(agent_id): _monitor_capability_profile(profile)
                 for agent_id, profile in snapshot_profiles.items()
                 if isinstance(profile, dict)
+                and str(profile.get("registry_scope") or "business")
+                == "business"
             }
         )
     for event in trace_events or []:
@@ -522,7 +528,10 @@ def _agent_profiles(
             or (profile.get("agent_id") if isinstance(profile, dict) else "")
             or ""
         )
-        if agent_id and isinstance(profile, dict) and profile:
+        if (
+            agent_id and isinstance(profile, dict) and profile
+            and str(profile.get("registry_scope") or "business") == "business"
+        ):
             profiles[agent_id] = _monitor_capability_profile(profile)
     return profiles
 
@@ -613,6 +622,8 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "continuity_memory_injection_count": 0,
         "memory_source_view_tokens": 0,
         "minimal_role_view_tokens": 0,
+        "memory_role_view_candidate_tokens": 0,
+        "memory_no_expansion_fallback_count": 0,
         "role_view_saved_tokens": 0,
         "role_view_reduction_ratio": 0.0,
         "memory_field_fetch_count": 0,
@@ -620,6 +631,8 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "receiver_role_view_hydration_count": 0,
         "current_task_source_tokens": 0,
         "current_task_role_view_tokens": 0,
+        "current_task_role_view_candidate_tokens": 0,
+        "current_task_no_expansion_fallback_count": 0,
         "current_task_role_view_saved_tokens": 0,
         "current_task_role_view_reduction_ratio": 0.0,
         "final_delivery_assessed_count": 0,
@@ -629,6 +642,8 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "capability_profile_update_count": 0,
         "capability_profile_feedback_count": 0,
         "registered_capability_profile_count": 0,
+        "registered_system_profile_count": 0,
+        "registered_total_profile_count": 0,
         "capability_context_view_count": 0,
         "capability_action_counts": {},
         "memory_candidate_deduplicated_count": 0,
@@ -663,14 +678,19 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
     continuity_memory_injections = 0
     memory_source_view_tokens = 0
     minimal_role_view_tokens = 0
+    memory_role_view_candidate_tokens = 0
+    memory_no_expansion_fallback_count = 0
     memory_field_fetch_count = 0
     memory_field_fetch_tokens = 0
     receiver_role_view_hydrations = 0
     current_task_source_tokens = 0
     current_task_role_view_tokens = 0
+    current_task_role_view_candidate_tokens = 0
+    current_task_no_expansion_fallback_count = 0
     final_delivery_assessed = 0
     final_delivery_valid = 0
-    registered_profile_ids: set[str] = set()
+    registered_business_profile_ids: set[str] = set()
+    registered_system_profile_ids: set[str] = set()
     capability_action_counts: dict[str, int] = {}
     for event in trace_events:
         event_type = str(event.get("event_type", ""))
@@ -678,8 +698,17 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         if event_type == "capability_profile_updated":
             breakdown["capability_profile_update_count"] += 1
             agent_id = str(payload.get("agent_id") or "")
+            profile = payload.get("profile") if isinstance(payload.get("profile"), dict) else {}
+            registry_scope = str(
+                profile.get("registry_scope")
+                or payload.get("registry_scope")
+                or "business"
+            )
             if agent_id:
-                registered_profile_ids.add(agent_id)
+                if registry_scope == "system":
+                    registered_system_profile_ids.add(agent_id)
+                else:
+                    registered_business_profile_ids.add(agent_id)
             continue
         if event_type == "capability_profile_feedback":
             breakdown["capability_profile_feedback_count"] += 1
@@ -796,6 +825,12 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         memory_source_view_tokens += _int(
             payload.get("memory_source_view_tokens")
         )
+        memory_role_view_candidate_tokens += _int(
+            payload.get("memory_role_view_candidate_tokens")
+        )
+        memory_no_expansion_fallback_count += _int(
+            payload.get("memory_no_expansion_fallback_count")
+        )
         minimal_role_view_tokens += _int(
             payload.get("minimal_role_view_tokens")
         )
@@ -803,6 +838,12 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         memory_field_fetch_tokens += _int(payload.get("memory_field_fetch_tokens"))
         current_task_source_tokens += _int(
             payload.get("current_task_source_tokens")
+        )
+        current_task_role_view_candidate_tokens += _int(
+            payload.get("current_task_role_view_candidate_tokens")
+        )
+        current_task_no_expansion_fallback_count += _int(
+            payload.get("current_task_no_expansion_fallback_count")
         )
         current_task_role_view_tokens += _int(
             payload.get("current_task_role_view_tokens")
@@ -873,6 +914,10 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
     breakdown["continuity_memory_injection_count"] = continuity_memory_injections
     breakdown["memory_source_view_tokens"] = memory_source_view_tokens
     breakdown["minimal_role_view_tokens"] = minimal_role_view_tokens
+    breakdown["memory_role_view_candidate_tokens"] = memory_role_view_candidate_tokens
+    breakdown["memory_no_expansion_fallback_count"] = (
+        memory_no_expansion_fallback_count
+    )
     breakdown["role_view_saved_tokens"] = (
         memory_source_view_tokens - minimal_role_view_tokens
     )
@@ -890,6 +935,12 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
     breakdown["receiver_role_view_hydration_count"] = receiver_role_view_hydrations
     breakdown["current_task_source_tokens"] = current_task_source_tokens
     breakdown["current_task_role_view_tokens"] = current_task_role_view_tokens
+    breakdown["current_task_role_view_candidate_tokens"] = (
+        current_task_role_view_candidate_tokens
+    )
+    breakdown["current_task_no_expansion_fallback_count"] = (
+        current_task_no_expansion_fallback_count
+    )
     breakdown["current_task_role_view_saved_tokens"] = (
         current_task_source_tokens - current_task_role_view_tokens
     )
@@ -912,7 +963,15 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         if final_delivery_assessed
         else 0.0
     )
-    breakdown["registered_capability_profile_count"] = len(registered_profile_ids)
+    breakdown["registered_capability_profile_count"] = len(
+        registered_business_profile_ids
+    )
+    breakdown["registered_system_profile_count"] = len(
+        registered_system_profile_ids
+    )
+    breakdown["registered_total_profile_count"] = len(
+        registered_business_profile_ids | registered_system_profile_ids
+    )
     breakdown["capability_action_counts"] = dict(
         sorted(capability_action_counts.items())
     )

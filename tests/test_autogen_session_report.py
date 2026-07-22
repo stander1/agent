@@ -51,6 +51,26 @@ class AutoGenSessionReportTest(unittest.TestCase):
     def test_modern_trace_counts_injection_only_after_applied_rewrite(self) -> None:
         events = [
             {
+                "event_type": "capability_profile_updated",
+                "payload": {
+                    "agent_id": "DeliveryComposer",
+                    "profile": {
+                        "agent_id": "DeliveryComposer",
+                        "registry_scope": "business",
+                    },
+                },
+            },
+            {
+                "event_type": "capability_profile_updated",
+                "payload": {
+                    "agent_id": "SingleThreadedAgentRuntime",
+                    "profile": {
+                        "agent_id": "SingleThreadedAgentRuntime",
+                        "registry_scope": "system",
+                    },
+                },
+            },
+            {
                 "event_type": "autogen_memory_retrieval",
                 "payload": {
                     "memory_query_count": 1,
@@ -89,10 +109,14 @@ class AutoGenSessionReportTest(unittest.TestCase):
                     "memory_candidate_deduplicated_tokens": 40,
                     "memory_source_view_tokens": 80,
                     "minimal_role_view_tokens": 30,
+                    "memory_role_view_candidate_tokens": 90,
+                    "memory_no_expansion_fallback_count": 1,
                     "memory_field_fetch_count": 1,
                     "memory_field_fetch_tokens": 12,
                     "current_task_source_tokens": 100,
                     "current_task_role_view_tokens": 40,
+                    "current_task_role_view_candidate_tokens": 120,
+                    "current_task_no_expansion_fallback_count": 1,
                     "rewrite_safety": {
                         "team_receiver_role_view_hydration": True
                     },
@@ -138,6 +162,8 @@ class AutoGenSessionReportTest(unittest.TestCase):
         self.assertEqual(summary["memory_candidate_deduplicated_tokens"], 100)
         self.assertEqual(summary["memory_source_view_tokens"], 80)
         self.assertEqual(summary["minimal_role_view_tokens"], 30)
+        self.assertEqual(summary["memory_role_view_candidate_tokens"], 90)
+        self.assertEqual(summary["memory_no_expansion_fallback_count"], 1)
         self.assertEqual(summary["role_view_saved_tokens"], 50)
         self.assertEqual(summary["role_view_reduction_ratio"], 0.625)
         self.assertEqual(summary["memory_field_fetch_count"], 1)
@@ -145,12 +171,17 @@ class AutoGenSessionReportTest(unittest.TestCase):
         self.assertEqual(summary["receiver_role_view_hydration_count"], 1)
         self.assertEqual(summary["current_task_source_tokens"], 100)
         self.assertEqual(summary["current_task_role_view_tokens"], 40)
+        self.assertEqual(summary["current_task_role_view_candidate_tokens"], 120)
+        self.assertEqual(summary["current_task_no_expansion_fallback_count"], 1)
         self.assertEqual(summary["current_task_role_view_saved_tokens"], 60)
         self.assertEqual(summary["current_task_role_view_reduction_ratio"], 0.6)
         self.assertEqual(summary["final_delivery_assessed_count"], 1)
         self.assertEqual(summary["final_delivery_valid_count"], 1)
         self.assertEqual(summary["final_delivery_invalid_count"], 0)
         self.assertEqual(summary["final_delivery_valid_rate"], 1.0)
+        self.assertEqual(summary["registered_capability_profile_count"], 1)
+        self.assertEqual(summary["registered_system_profile_count"], 1)
+        self.assertEqual(summary["registered_total_profile_count"], 2)
 
     def test_builds_token_report_from_latest_session_trace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

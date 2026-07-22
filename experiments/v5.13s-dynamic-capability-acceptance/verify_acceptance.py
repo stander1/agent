@@ -107,6 +107,17 @@ def verify_acceptance(
         expected <= registered,
         f"expected={sorted(expected)}, registered={sorted(registered)}",
     )
+    business_profiles = {
+        agent_id
+        for agent_id, profile in profiles.items()
+        if str(profile.get("registry_scope") or "business") == "business"
+    }
+    _check(
+        checks,
+        "logical_business_agents_only",
+        business_profiles == expected,
+        f"expected={sorted(expected)}, business_profiles={sorted(business_profiles)}",
+    )
     forbidden = {
         agent_id
         for agent_id in registered
@@ -172,11 +183,49 @@ def verify_acceptance(
             f"{_int(token_summary.get('capability_profile_feedback_count'))}"
         ),
     )
+    profile_updates = _int(token_summary.get("capability_profile_update_count"))
+    registered_total = _int(token_summary.get("registered_total_profile_count"))
+    expected_update_ceiling = (registered_total or len(registered)) + len(expected)
+    _check(
+        checks,
+        "capability_profile_events_deduplicated",
+        profile_updates <= expected_update_ceiling,
+        (
+            f"updates={profile_updates}, registered_total="
+            f"{registered_total or len(registered)}, ceiling={expected_update_ceiling}"
+        ),
+    )
     _check(
         checks,
         "dynamic_capability_context_views_used",
         _int(token_summary.get("capability_context_view_count")) > 0,
         f"count={_int(token_summary.get('capability_context_view_count'))}",
+    )
+    memory_source_tokens = _int(token_summary.get("memory_source_view_tokens"))
+    memory_selected_tokens = _int(token_summary.get("minimal_role_view_tokens"))
+    _check(
+        checks,
+        "memory_role_views_do_not_expand",
+        memory_source_tokens > 0
+        and 0 <= memory_selected_tokens <= memory_source_tokens,
+        (
+            f"source={memory_source_tokens}, selected={memory_selected_tokens}, "
+            "fallbacks="
+            f"{_int(token_summary.get('memory_no_expansion_fallback_count'))}"
+        ),
+    )
+    task_source_tokens = _int(token_summary.get("current_task_source_tokens"))
+    task_selected_tokens = _int(token_summary.get("current_task_role_view_tokens"))
+    _check(
+        checks,
+        "current_task_role_views_do_not_expand",
+        task_source_tokens > 0
+        and 0 <= task_selected_tokens <= task_source_tokens,
+        (
+            f"source={task_source_tokens}, selected={task_selected_tokens}, "
+            "fallbacks="
+            f"{_int(token_summary.get('current_task_no_expansion_fallback_count'))}"
+        ),
     )
     action_counts = token_summary.get("capability_action_counts")
     action_counts = action_counts if isinstance(action_counts, dict) else {}

@@ -119,10 +119,13 @@ class CollaborationKernel:
         self.communication_gate = CommunicationGateLite()
         self.control_budget = ControlBudgetLite()
         self._sessions: dict[str, KernelSession] = {}
+        self._emitted_capability_profile_ids: set[str] = set()
         self._closed = False
 
     def register_agent(self, agent: AgentDescriptor) -> dict[str, object]:
         self._ensure_open()
+        existing = self.capability_profiles.get(agent.agent_id)
+        previous_version = existing.profile_version if existing is not None else 0
         profile = self.capability_profiles.register_or_update(
             agent_id=agent.agent_id,
             role=agent.role,
@@ -139,16 +142,29 @@ class CollaborationKernel:
             message_types=tuple(
                 agent.framework_metadata.get("message_types", ()) or ()
             ),
+            registry_scope=str(
+                agent.framework_metadata.get("registry_scope", "business")
+            ),
+            instance_aliases=tuple(
+                agent.framework_metadata.get("instance_aliases", ()) or ()
+            ),
+            alias_only=bool(agent.framework_metadata.get("profile_alias_only")),
         )
         payload = profile.to_dict() if profile is not None else {}
-        if payload:
+        profile_changed = profile is not None and (
+            profile.agent_id not in self._emitted_capability_profile_ids
+            or existing is None or profile.profile_version != previous_version
+        )
+        if payload and profile_changed:
             self.trace.write(
                 "capability_profile_updated",
                 {
-                    "agent_id": agent.agent_id,
+                    "agent_id": profile.agent_id,
+                    "registry_scope": profile.registry_scope,
                     "profile": payload,
                 },
             )
+            self._emitted_capability_profile_ids.add(profile.agent_id)
         return payload
 
     def record_agent_execution(
@@ -720,7 +736,9 @@ class CollaborationKernel:
         candidates = (
             tuple(dict.fromkeys(route_candidates))
             if route_candidates is not None
-            else tuple(self.capability_profiles.agent_ids())
+            else tuple(
+                self.capability_profiles.agent_ids(registry_scope="business")
+            )
         )
         memory_keys = tuple(ref.memory_id for ref in memory_refs)
         readiness_report = self.readiness_barrier.assess(

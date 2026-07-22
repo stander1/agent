@@ -17,7 +17,9 @@ from agent_runtime.drivers.autogen import (
     _continuity_requirement_reasons,
     _continuity_source_text,
     _memory_view_facts_covered,
+    _select_token_nonexpanding_view,
 )
+from agent_runtime.eval.token_counter import TokenCounter
 from agent_runtime.memory.memory_store import MemoryRef
 
 
@@ -45,6 +47,11 @@ class FakeAgent:
     name = "writer"
 
 
+class ChatAgentContainer:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
 class FakeTool:
     def __init__(self, name: str, description: str) -> None:
         self.name = name
@@ -67,6 +74,74 @@ class ProfiledTeam:
 
 
 class AutoGenSharedMemoryTest(unittest.TestCase):
+    def test_autogen_runtime_uuid_instance_maps_to_logical_business_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = AutoGenHookManager(self._context(root, "launch_aliases"))
+            business = ProfiledAgent(
+                "EvidenceScout",
+                "Research sources and rank evidence.",
+                "Retrieve reliable citations and verify claims.",
+            )
+            business_descriptor = manager.describe_agent(
+                business,
+                target_kind="agentchat_agent",
+            )
+            manager.kernel.register_agent(business_descriptor)
+            run_id = "12345678-1234-1234-1234-123456789abc"
+            wrapper = ChatAgentContainer(
+                f"EvidenceScout_{run_id}_{run_id}"
+            )
+
+            wrapper_descriptor = manager.describe_agent(
+                wrapper,
+                target_kind="core_agent",
+            )
+            manager.kernel.register_agent(wrapper_descriptor)
+            profile = manager.kernel.capability_profiles.get("EvidenceScout")
+
+            self.assertEqual(wrapper_descriptor.agent_id, "EvidenceScout")
+            self.assertTrue(
+                wrapper_descriptor.framework_metadata["profile_alias_only"]
+            )
+            self.assertEqual(profile.role, type(business).__name__)
+            self.assertIn(wrapper.name, profile.instance_aliases)
+            self.assertEqual(
+                manager.kernel.capability_profiles.agent_ids(
+                    registry_scope="business"
+                ),
+                ["EvidenceScout"],
+            )
+
+    def test_capability_view_never_expands_equivalent_source(self) -> None:
+        counter = TokenCounter(allow_estimate=True)
+        short_source = "预算已确认2000元。"
+        expanded_candidate = (
+            "[context_view:BudgetAgent;action=WRITE_OUTPUT;profile_version=3] "
+            "预算已确认2000元。"
+        )
+
+        fallback = _select_token_nonexpanding_view(
+            counter,
+            source_views=[short_source],
+            candidate_text=expanded_candidate,
+        )
+        minimized = _select_token_nonexpanding_view(
+            counter,
+            source_views=[
+                "目标：形成预算方案。预算已确认2000元。"
+                "重复说明：形成预算方案时必须遵守2000元预算。"
+            ],
+            candidate_text="预算已确认2000元。",
+        )
+
+        self.assertEqual(fallback.text, short_source)
+        self.assertEqual(fallback.selection_mode, "source_no_expansion")
+        self.assertTrue(fallback.no_expansion_fallback)
+        self.assertLessEqual(fallback.selected_tokens, fallback.source_tokens)
+        self.assertEqual(minimized.selection_mode, "capability_minimized")
+        self.assertLess(minimized.selected_tokens, minimized.source_tokens)
+
     def test_autogen_registers_arbitrary_agents_and_syncs_runtime_feedback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

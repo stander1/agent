@@ -13,6 +13,8 @@ from agent_runtime.state.state_pool import StateRef
 class CapabilityProfile:
     agent_id: str
     role: str
+    registry_scope: str = "business"
+    instance_aliases: set[str] = field(default_factory=set)
     profile_version: int = 1
     role_capabilities: dict[str, float] = field(default_factory=dict)
     tool_capabilities: dict[str, float] = field(default_factory=dict)
@@ -77,6 +79,8 @@ class CapabilityProfile:
         return {
             "agent_id": self.agent_id,
             "role": self.role,
+            "registry_scope": self.registry_scope,
+            "instance_aliases": sorted(self.instance_aliases),
             "profile_version": self.profile_version,
             "role_capabilities": _capability_rows(
                 self.role_capabilities,
@@ -342,18 +346,36 @@ class CapabilityProfileManagerLite:
         output_types: Iterable[str] = (),
         accepted_state_types: Iterable[str] = (),
         message_types: Iterable[str] = (),
+        registry_scope: str = "business",
+        instance_aliases: Iterable[str] = (),
+        alias_only: bool = False,
     ) -> CapabilityProfile | None:
         normalized_id = str(agent_id or "").strip()
         if not normalized_id:
             return None
         normalized_role = str(role or normalized_id).strip()
+        normalized_scope = _normalize_registry_scope(registry_scope)
+        normalized_aliases = {
+            str(item).strip()
+            for item in instance_aliases
+            if str(item).strip() and str(item).strip() != normalized_id
+        }
         existing = self._profiles.get(normalized_id)
+        if existing is not None and alias_only:
+            existing.instance_aliases.update(normalized_aliases)
+            if normalized_scope == "business":
+                existing.registry_scope = "business"
+            return existing
         profile = existing or CapabilityProfile(
             agent_id=normalized_id,
             role=normalized_role,
+            registry_scope=normalized_scope,
         )
         before = _profile_identity(profile)
         profile.role = normalized_role
+        if existing is None or normalized_scope == "business":
+            profile.registry_scope = normalized_scope
+        profile.instance_aliases.update(normalized_aliases)
 
         role_text = " ".join(
             part
@@ -567,8 +589,15 @@ class CapabilityProfileManagerLite:
     def snapshot(self) -> dict[str, object]:
         return {agent_id: profile.to_dict() for agent_id, profile in self._profiles.items()}
 
-    def agent_ids(self) -> list[str]:
-        return sorted(self._profiles)
+    def agent_ids(self, *, registry_scope: str | None = None) -> list[str]:
+        if registry_scope is None:
+            return sorted(self._profiles)
+        normalized_scope = _normalize_registry_scope(registry_scope)
+        return sorted(
+            agent_id
+            for agent_id, profile in self._profiles.items()
+            if profile.registry_scope == normalized_scope
+        )
 
 
 class CapabilityRouterLite:
@@ -1004,6 +1033,14 @@ def _normalize_tag(value: object) -> str:
 
 def _normalize_action(value: object) -> str:
     return _normalize_tag(value).upper()
+
+
+def _normalize_registry_scope(value: object) -> str:
+    return (
+        "system"
+        if str(value or "").strip().casefold() == "system"
+        else "business"
+    )
 
 
 def _infer_capabilities(text: str) -> set[str]:

@@ -74,6 +74,47 @@ class DynamicCapabilityProfileTest(unittest.TestCase):
         self.assertEqual(profile.tool_capability_sources, {})
         self.assertNotIn("RUN_CODE", profile.preferred_actions)
 
+    def test_runtime_instance_alias_does_not_replace_business_profile(self) -> None:
+        profiles = CapabilityProfileManagerLite([])
+        profile = profiles.register_or_update(
+            agent_id="DeliveryComposer",
+            role="SynthesisSpecialist",
+            role_description="Synthesize evidence and write the final deliverable.",
+            registry_scope="business",
+        )
+        initial_version = profile.profile_version
+
+        aliased = profiles.register_or_update(
+            agent_id="DeliveryComposer",
+            role="ChatAgentContainer",
+            declared_capabilities=["orchestration"],
+            registry_scope="business",
+            instance_aliases=[
+                "DeliveryComposer_12345678-1234-1234-1234-123456789abc_"
+                "12345678-1234-1234-1234-123456789abc"
+            ],
+            alias_only=True,
+        )
+        profiles.register_or_update(
+            agent_id="SingleThreadedAgentRuntime",
+            role="SingleThreadedAgentRuntime",
+            registry_scope="system",
+        )
+
+        self.assertIs(aliased, profile)
+        self.assertEqual(aliased.role, "SynthesisSpecialist")
+        self.assertEqual(aliased.profile_version, initial_version)
+        self.assertIn("synthesis", aliased.capabilities)
+        self.assertNotIn("orchestration", aliased.capabilities)
+        self.assertEqual(
+            profiles.agent_ids(registry_scope="business"),
+            ["DeliveryComposer"],
+        )
+        self.assertEqual(
+            profiles.agent_ids(registry_scope="system"),
+            ["SingleThreadedAgentRuntime"],
+        )
+
     def test_runtime_feedback_updates_reliability_cost_and_learned_action(self) -> None:
         profiles = CapabilityProfileManagerLite([])
         profile = profiles.register_or_update(

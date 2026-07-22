@@ -792,6 +792,7 @@
     (items || []).forEach((agent) => {
       const rawId = String(agent.agent_id || agent.id || "unknown");
       const id = canonicalAgentId(rawId);
+      if (["team", "team_manager", "runtime_bridge", "autogen_driver"].includes(id)) return;
       const profile = capabilityProfileFor(id);
       const row = grouped.get(id) || {
         id,
@@ -835,20 +836,29 @@
   }
 
   function canonicalAgentId(rawId) {
-    const value = String(rawId || "").toLowerCase();
-    if (value.includes("planner")) return "planner";
-    if (value.includes("retriever")) return "retriever";
-    if (value.includes("writer")) return "writer";
-    if (value.includes("reviewer")) return "reviewer";
-    if (value.includes("memory_manager") || value.includes("memorymanager")) return "memory_manager";
-    if (value.includes("roundrobingroupchatmanager")) return "team_manager";
-    if (value.includes("roundrobingroupchat")) return "team";
-    if (value.includes("singlethreadedagentruntime")) return "runtime_bridge";
-    if (value.includes("autogen")) return "autogen_driver";
-    return value
+    const value = String(rawId || "").toLowerCase()
       .replace(/_[0-9a-f-]{8,}.*/i, "")
       .replace(/[^\p{L}\p{N}_-]+/gu, "_")
-      .replace(/^_+|_+$/g, "") || "autogen_driver";
+      .replace(/^_+|_+$/g, "");
+    const compact = value.replace(/[_-]+/g, "");
+    const aliases = {
+      planner: "planner",
+      planneragent: "planner",
+      retriever: "retriever",
+      retrieveragent: "retriever",
+      writer: "writer",
+      writeragent: "writer",
+      reviewer: "reviewer",
+      revieweragent: "reviewer",
+      memorymanager: "memory_manager",
+      memorymanageragent: "memory_manager",
+      roundrobingroupchatmanager: "team_manager",
+      roundrobingroupchat: "team",
+      singlethreadedagentruntime: "runtime_bridge",
+      agentliteautogendriver: "autogen_driver",
+      autogendriver: "autogen_driver"
+    };
+    return aliases[compact] || value || "unknown_agent";
   }
 
   function capabilityProfileFor(agentId) {

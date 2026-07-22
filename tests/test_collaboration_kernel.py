@@ -95,6 +95,51 @@ class CollaborationKernelTest(unittest.TestCase):
                 any(item["event_type"] == "kernel_session_closed" for item in events)
             )
 
+    def test_capability_profile_update_event_is_emitted_only_on_real_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            kernel, _ = self._kernel(output_dir)
+            descriptor = AgentDescriptor(
+                agent_id="EvidenceScout",
+                role="ResearchSpecialist",
+                role_description="Retrieve evidence and verify sources.",
+            )
+
+            first = kernel.register_agent(descriptor)
+            second = kernel.register_agent(descriptor)
+            changed = kernel.register_agent(
+                AgentDescriptor(
+                    agent_id="EvidenceScout",
+                    role="ResearchSpecialist",
+                    role_description="Retrieve evidence and verify sources.",
+                    tools=(
+                        {
+                            "tool_id": "web_search",
+                            "description": "Search reliable sources",
+                            "capability_tags": ["retrieval"],
+                        },
+                    ),
+                )
+            )
+            kernel.close()
+
+            events = [
+                json.loads(line)
+                for line in (output_dir / "trace.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            updates = [
+                item
+                for item in events
+                if item["event_type"] == "capability_profile_updated"
+                and item["payload"].get("agent_id") == "EvidenceScout"
+            ]
+
+            self.assertEqual(first["profile_version"], second["profile_version"])
+            self.assertGreater(changed["profile_version"], second["profile_version"])
+            self.assertEqual(len(updates), 2)
+
     def test_receive_output_state_and_handoff_flow_without_runtime_scheduler(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)

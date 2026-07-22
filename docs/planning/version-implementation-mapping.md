@@ -3445,6 +3445,34 @@ v5.13r 用 Planner、Writer、Reviewer 和 General 验证了最小充分上下�
 
 本地全量测试 209 项全部通过。当前 AutoGen 集成保持框架原生调度权，AgentLite 的 Capability Router 在 AutoGen 路径中为 advisory；框架无关 Runtime 可使用 active 模式。旧固定角色函数仅保留归档和 API 兼容，生产 AutoGen 路径不再调用。
 
+## 57. v5.13t：能力身份归并与上下文不膨胀
+
+### 57.1 对 v5.13s 的校正
+
+openEuler 实验发现，能力画像事件会随 AutoGen 钩子重复写入，UUID 容器被误当作独立 Agent；部分短 MemoryView 和当前任务在加入视图头后反而增加 Token。这三个问题不改变动态能力画像方向，但会污染注册表、Trace 和成本指标。
+
+### 57.2 实现
+
+1. `capability_profile_updated` 只在首次观测或角色、工具、契约真正变化时写入；
+2. 运行反馈继续由 `capability_profile_feedback` 独立记录；
+3. `AgentName_<uuid>_<same-uuid>` 容器归并到逻辑 Agent，UUID 保存在 `instance_aliases`；
+4. 画像区分 `business` 与 `system`，默认能力路由只选择业务 Agent；
+5. Team、Manager、Runtime 不再混入业务 Agent 注册表；
+6. MemoryView 和当前任务视图均执行 Token 级不膨胀选择；
+7. 候选视图、实际视图、不膨胀回退次数和业务/系统画像数量进入 Trace 与报告。
+
+### 57.3 可靠性边界
+
+不膨胀回退只在候选视图与来源视图语义等价时发生，来源视图是候选信息的超集。Schema、消息类型保持、协作组隔离、记忆准入和必要记忆优先策略均未关闭。底层契约回退仍按安全消息类型逐项扩展，不以绕过守卫换取改写次数。
+
+### 57.4 验收标准
+
+1. 业务画像集合必须等于真实 Team 配置中的逻辑 Agent；
+2. 画像事件不得随重复钩子调用线性增长；
+3. `minimal_role_view_tokens <= memory_source_view_tokens`；
+4. `current_task_role_view_tokens <= current_task_source_tokens`；
+5. 质量、完整交付、通信、记忆、控制和重试成本继续按端到端口径联合判断。
+
 ## 42. v5.13p：AutoGen Studio 网页 Run 级绑定
 
 ### 42.1 解决的问题

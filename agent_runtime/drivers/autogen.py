@@ -78,7 +78,12 @@ MEMORY_SCOPE_ENV = "AGENTLITE_MEMORY_SCOPE"
 FINAL_DELIVERY_MARKER_ENV = "AGENTLITE_AUTOGEN_FINAL_MARKER"
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
 CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
-DRIVER_PHASE = "v5.13s"
+DRIVER_PHASE = "v5.13t"
+_AUTOGEN_REPEATED_INSTANCE_ID_RE = re.compile(
+    r"^(?P<logical>.+)_(?P<run>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+    r"[0-9a-f]{4}-[0-9a-f]{12})_(?P=run)$",
+    re.IGNORECASE,
+)
 CONTINUITY_COST_GATE_REASONS = frozenset(
     {"token_not_reduced", "team_task_token_not_reduced"}
 )
@@ -242,9 +247,30 @@ class _MemoryContextSelection:
     role_view_source_chars: int = 0
     role_view_selected_chars: int = 0
     role_view_reduction_ratio: float = 0.0
+    role_view_source_tokens: int = 0
+    role_view_selected_tokens: int = 0
     field_fetch_count: int = 0
     field_fetch_tokens: int = 0
     field_fetch_state_ids: list[str] = field(default_factory=list)
+    role_view_candidate_tokens: int = 0
+    role_view_selection_mode: str = "empty"
+    role_view_no_expansion_fallback: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _TokenBoundViewSelection:
+    text: str
+    source_tokens: int
+    candidate_tokens: int
+    selected_tokens: int
+    selection_mode: str
+    no_expansion_fallback: bool
+
+    @property
+    def reduction_ratio(self) -> float:
+        if self.source_tokens <= 0:
+            return 0.0
+        return round(1 - (self.selected_tokens / self.source_tokens), 6)
 
 
 class AutoGenHookManager:
@@ -3550,14 +3576,26 @@ class AutoGenHookManager:
                     else []
                 ),
                 "memory_source_view_tokens": (
-                    _count_tokens(
-                        self.token_counter,
-                        "\n".join(role_memory_selection.source_prompt_views),
-                    )
+                    role_memory_selection.role_view_source_tokens
                     if role_memory_selection
                     else 0
                 ),
                 "minimal_role_view_tokens": retrieved_memory_tokens,
+                "memory_role_view_candidate_tokens": (
+                    role_memory_selection.role_view_candidate_tokens
+                    if role_memory_selection
+                    else 0
+                ),
+                "memory_view_selection_mode": (
+                    role_memory_selection.role_view_selection_mode
+                    if role_memory_selection
+                    else "empty"
+                ),
+                "memory_no_expansion_fallback": (
+                    role_memory_selection.role_view_no_expansion_fallback
+                    if role_memory_selection
+                    else False
+                ),
                 "role_view_reduction_ratio": (
                     role_memory_selection.role_view_reduction_ratio
                     if role_memory_selection
@@ -3626,6 +3664,14 @@ class AutoGenHookManager:
             int(entry.get("minimal_role_view_tokens", 0) or 0)
             for entry in receiver_entries
         )
+        memory_role_view_candidate_tokens = sum(
+            int(entry.get("memory_role_view_candidate_tokens", 0) or 0)
+            for entry in receiver_entries
+        )
+        memory_no_expansion_fallback_count = sum(
+            int(bool(entry.get("memory_no_expansion_fallback")))
+            for entry in receiver_entries
+        )
         memory_field_fetch_count = sum(
             int(entry.get("memory_field_fetch_count", 0) or 0)
             for entry in receiver_entries
@@ -3640,6 +3686,14 @@ class AutoGenHookManager:
         )
         current_task_role_view_tokens = sum(
             int(entry.get("current_task_role_view_tokens", 0) or 0)
+            for entry in receiver_entries
+        )
+        current_task_role_view_candidate_tokens = sum(
+            int(entry.get("current_task_role_view_candidate_tokens", 0) or 0)
+            for entry in receiver_entries
+        )
+        current_task_no_expansion_fallback_count = sum(
+            int(bool(entry.get("current_task_no_expansion_fallback")))
             for entry in receiver_entries
         )
         memory_candidate_count = max(
@@ -3738,6 +3792,10 @@ class AutoGenHookManager:
                 "memory_view_mode": "capability_action_context_view_v1",
                 "memory_source_view_tokens": memory_source_view_tokens,
                 "minimal_role_view_tokens": minimal_role_view_tokens,
+                "memory_role_view_candidate_tokens": memory_role_view_candidate_tokens,
+                "memory_no_expansion_fallback_count": (
+                    memory_no_expansion_fallback_count
+                ),
                 "role_view_reduction_ratio": (
                     round(
                         1 - (minimal_role_view_tokens / memory_source_view_tokens),
@@ -3750,6 +3808,12 @@ class AutoGenHookManager:
                 "memory_field_fetch_tokens": memory_field_fetch_tokens,
                 "current_task_source_tokens": current_task_source_tokens,
                 "current_task_role_view_tokens": current_task_role_view_tokens,
+                "current_task_role_view_candidate_tokens": (
+                    current_task_role_view_candidate_tokens
+                ),
+                "current_task_no_expansion_fallback_count": (
+                    current_task_no_expansion_fallback_count
+                ),
                 "current_task_role_view_saved_tokens": (
                     current_task_source_tokens - current_task_role_view_tokens
                 ),
@@ -4092,6 +4156,11 @@ class AutoGenHookManager:
             consumer=consumer,
             action=memory_selection.semantic_action,
         )
+        current_task_selection = _select_token_nonexpanding_view(
+            self.token_counter,
+            source_views=[current_task],
+            candidate_text=current_task_view.text,
+        )
         envelope_json = self._safe_kernel_call(
             "autogen_build_broadcast_shadow_handoff",
             lambda: self.kernel.build_handoff(
@@ -4119,7 +4188,7 @@ class AutoGenHookManager:
             section
             for section in (
                 "CURRENT_TASK_VIEW:",
-                current_task_view.text,
+                current_task_selection.text,
                 _join_state_and_memory_views(
                     state_prompt_views,
                     memory_prompt_views,
@@ -4156,27 +4225,29 @@ class AutoGenHookManager:
             "requested_memory_fields": list(memory_selection.requested_fields),
             "covered_memory_fields": list(memory_selection.covered_fields),
             "missing_memory_fields": list(memory_selection.missing_fields),
-            "memory_source_view_tokens": _count_tokens(
-                self.token_counter,
-                "\n".join(memory_selection.source_prompt_views),
+            "memory_source_view_tokens": memory_selection.role_view_source_tokens,
+            "minimal_role_view_tokens": memory_selection.role_view_selected_tokens,
+            "memory_role_view_candidate_tokens": (
+                memory_selection.role_view_candidate_tokens
             ),
-            "minimal_role_view_tokens": _count_tokens(
-                self.token_counter,
-                "\n".join(memory_prompt_views),
+            "memory_view_selection_mode": memory_selection.role_view_selection_mode,
+            "memory_no_expansion_fallback": (
+                memory_selection.role_view_no_expansion_fallback
             ),
             "role_view_reduction_ratio": memory_selection.role_view_reduction_ratio,
             "memory_field_fetch_count": memory_selection.field_fetch_count,
             "memory_field_fetch_tokens": memory_selection.field_fetch_tokens,
             "memory_field_fetch_state_ids": memory_selection.field_fetch_state_ids,
-            "current_task_source_tokens": _count_tokens(
-                self.token_counter,
-                current_task,
+            "current_task_source_tokens": current_task_selection.source_tokens,
+            "current_task_role_view_tokens": current_task_selection.selected_tokens,
+            "current_task_role_view_candidate_tokens": (
+                current_task_selection.candidate_tokens
             ),
-            "current_task_role_view_tokens": _count_tokens(
-                self.token_counter,
-                current_task_view.text,
+            "current_task_view_selection_mode": current_task_selection.selection_mode,
+            "current_task_no_expansion_fallback": (
+                current_task_selection.no_expansion_fallback
             ),
-            "current_task_role_view_reduction_ratio": current_task_view.reduction_ratio,
+            "current_task_role_view_reduction_ratio": current_task_selection.reduction_ratio,
             "shadow_wire_envelope": wire_envelope,
             "schema_valid": schema_valid,
             "shadow_wire_tokens": _count_tokens(
@@ -4185,7 +4256,7 @@ class AutoGenHookManager:
             ),
             "prompt_view_tokens": _count_tokens(
                 self.token_counter,
-                "\n".join([current_task_view.text, *state_prompt_views]),
+                "\n".join([current_task_selection.text, *state_prompt_views]),
             ),
             "retrieved_memory_tokens": _count_tokens(
                 self.token_counter,
@@ -4287,20 +4358,32 @@ class AutoGenHookManager:
                         break
                 if len(fetched_views) >= 2:
                     break
+        source_prompt_views = [*base.prompt_views, *fetched_views]
         final_view = build_minimal_context_view(
             query=query,
-            prompt_views=[*base.prompt_views, *fetched_views],
+            prompt_views=source_prompt_views,
             consumer=consumer,
             action=semantic_action,
         )
-        base.prompt_views = [final_view.text] if final_view.text else []
+        selected_view = _select_token_nonexpanding_view(
+            self.token_counter,
+            source_views=source_prompt_views,
+            candidate_text=final_view.text,
+        )
+        base.source_prompt_views = source_prompt_views
+        base.prompt_views = [selected_view.text] if selected_view.text else []
         base.requested_fields = final_view.requested_fields
         base.covered_fields = final_view.covered_fields
         base.missing_fields = final_view.missing_fields
         base.information_fields = final_view.information_fields
-        base.role_view_source_chars = final_view.source_chars
-        base.role_view_selected_chars = final_view.selected_chars
-        base.role_view_reduction_ratio = final_view.reduction_ratio
+        base.role_view_source_chars = len("\n".join(source_prompt_views))
+        base.role_view_selected_chars = len(selected_view.text)
+        base.role_view_source_tokens = selected_view.source_tokens
+        base.role_view_candidate_tokens = selected_view.candidate_tokens
+        base.role_view_selected_tokens = selected_view.selected_tokens
+        base.role_view_selection_mode = selected_view.selection_mode
+        base.role_view_no_expansion_fallback = selected_view.no_expansion_fallback
+        base.role_view_reduction_ratio = selected_view.reduction_ratio
         base.field_fetch_count = len(fetched_views)
         base.field_fetch_tokens = _count_tokens(
             self.token_counter,
@@ -4444,8 +4527,19 @@ class AutoGenHookManager:
             or getattr(instance, "_id", None)
             or type(instance).__name__
         )
-        agent_id = _safe_identifier(str(raw_name))
-        role = "team" if target_kind == "agentchat_team" else type(instance).__name__
+        raw_agent_id = _safe_identifier(str(raw_name))
+        agent_id, profile_alias_only = _logical_autogen_agent_id(
+            raw_agent_id,
+            instance=instance,
+            target_kind=target_kind,
+        )
+        native_class_name = type(instance).__name__
+        registry_scope = _autogen_registry_scope(
+            target_kind=target_kind,
+            native_class_name=native_class_name,
+            profile_alias_only=profile_alias_only,
+        )
+        role = "team" if target_kind == "agentchat_team" else native_class_name
         metadata = _mapping_or_empty(
             getattr(instance, "metadata", None)
             or getattr(instance, "_metadata", None)
@@ -4489,13 +4583,20 @@ class AutoGenHookManager:
             ),
             framework_metadata={
                 "framework": "autogen",
-                "native_class": f"{type(instance).__module__}.{type(instance).__name__}",
+                "native_class": f"{type(instance).__module__}.{native_class_name}",
                 "target_kind": target_kind,
                 "accepted_state_types": _string_sequence(
                     metadata.get("accepted_state_types")
                 ),
                 "message_types": _string_sequence(metadata.get("message_types")),
                 "tool_count": len(tools),
+                "registry_scope": registry_scope,
+                "logical_agent_id": agent_id,
+                "framework_instance_id": raw_agent_id,
+                "instance_aliases": (
+                    [raw_agent_id] if raw_agent_id != agent_id else []
+                ),
+                "profile_alias_only": profile_alias_only,
             },
         )
 
@@ -4524,6 +4625,7 @@ class AutoGenHookManager:
                 framework_metadata={
                     "framework": "autogen",
                     "target_kind": "agentchat_agent",
+                    "registry_scope": "business",
                     "discovery_source": "participant_name_only",
                 },
             )
@@ -6477,6 +6579,15 @@ def _team_rewrite_receiver_audit(
                 "minimal_role_view_tokens": int(
                     entry.get("minimal_role_view_tokens", 0) or 0
                 ),
+                "memory_role_view_candidate_tokens": int(
+                    entry.get("memory_role_view_candidate_tokens", 0) or 0
+                ),
+                "memory_view_selection_mode": entry.get(
+                    "memory_view_selection_mode", ""
+                ),
+                "memory_no_expansion_fallback": bool(
+                    entry.get("memory_no_expansion_fallback")
+                ),
                 "role_view_reduction_ratio": float(
                     entry.get("role_view_reduction_ratio", 0.0) or 0.0
                 ),
@@ -6491,6 +6602,15 @@ def _team_rewrite_receiver_audit(
                 ),
                 "current_task_source_tokens": int(
                     entry.get("current_task_source_tokens", 0) or 0
+                ),
+                "current_task_role_view_candidate_tokens": int(
+                    entry.get("current_task_role_view_candidate_tokens", 0) or 0
+                ),
+                "current_task_view_selection_mode": entry.get(
+                    "current_task_view_selection_mode", ""
+                ),
+                "current_task_no_expansion_fallback": bool(
+                    entry.get("current_task_no_expansion_fallback")
                 ),
                 "current_task_role_view_tokens": int(
                     entry.get("current_task_role_view_tokens", 0) or 0
@@ -6725,6 +6845,42 @@ def _has_semantic_payload(decoded_messages: list[Any], text: str) -> bool:
     return False
 
 
+def _logical_autogen_agent_id(
+    raw_agent_id: str,
+    *,
+    instance: object,
+    target_kind: str,
+) -> tuple[str, bool]:
+    native_class_name = type(instance).__name__
+    if target_kind != "core_agent" or not native_class_name.endswith(
+        "ChatAgentContainer"
+    ):
+        return raw_agent_id, False
+    match = _AUTOGEN_REPEATED_INSTANCE_ID_RE.fullmatch(raw_agent_id)
+    if match is None:
+        return raw_agent_id, False
+    logical_id = _safe_identifier(match.group("logical"))
+    return logical_id, logical_id != raw_agent_id
+
+
+def _autogen_registry_scope(
+    *,
+    target_kind: str,
+    native_class_name: str,
+    profile_alias_only: bool,
+) -> str:
+    if profile_alias_only or target_kind == "agentchat_agent":
+        return "business"
+    if target_kind in {"agentchat_team", "core_runtime"}:
+        return "system"
+    if target_kind == "core_agent" and (
+        native_class_name.endswith("Manager")
+        or native_class_name.endswith("ChatAgentContainer")
+    ):
+        return "system"
+    return "business"
+
+
 def _safe_identifier(value: str) -> str:
     cleaned = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in value)
     return cleaned.strip("_") or "autogen_agent"
@@ -6763,6 +6919,49 @@ def _unique_strings(values: Iterable[str]) -> list[str]:
 
 def _preview(text: str, *, limit: int = 240) -> str:
     return " ".join(text.split())[:limit]
+
+
+def _select_token_nonexpanding_view(
+    token_counter: TokenCounter,
+    *,
+    source_views: Iterable[str],
+    candidate_text: str,
+) -> _TokenBoundViewSelection:
+    source_text = "\n".join(
+        str(view or "").strip()
+        for view in source_views
+        if str(view or "").strip()
+    ).strip()
+    candidate_text = str(candidate_text or "").strip()
+    source_tokens = _count_tokens(token_counter, source_text)
+    candidate_tokens = _count_tokens(token_counter, candidate_text)
+
+    if not source_text:
+        return _TokenBoundViewSelection(
+            text=candidate_text,
+            source_tokens=0,
+            candidate_tokens=candidate_tokens,
+            selected_tokens=candidate_tokens,
+            selection_mode="capability_minimized" if candidate_text else "empty",
+            no_expansion_fallback=False,
+        )
+    if candidate_text and candidate_tokens < source_tokens:
+        return _TokenBoundViewSelection(
+            text=candidate_text,
+            source_tokens=source_tokens,
+            candidate_tokens=candidate_tokens,
+            selected_tokens=candidate_tokens,
+            selection_mode="capability_minimized",
+            no_expansion_fallback=False,
+        )
+    return _TokenBoundViewSelection(
+        text=source_text,
+        source_tokens=source_tokens,
+        candidate_tokens=candidate_tokens,
+        selected_tokens=source_tokens,
+        selection_mode="source_no_expansion",
+        no_expansion_fallback=bool(candidate_text),
+    )
 
 
 def _count_tokens(token_counter: TokenCounter, text: str) -> int:

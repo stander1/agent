@@ -101,6 +101,7 @@ class DynamicCapabilityAcceptanceTest(unittest.TestCase):
                 profile = {
                     "agent_id": agent_id,
                     "profile_version": 2,
+                    "registry_scope": "business",
                     "role_capabilities": [
                         {"name": "analysis", "source": "role"}
                     ],
@@ -133,6 +134,16 @@ class DynamicCapabilityAcceptanceTest(unittest.TestCase):
                 "token_summary": {
                     "capability_profile_update_count": 4,
                     "capability_profile_feedback_count": 4,
+                    "registered_capability_profile_count": 4,
+                    "registered_system_profile_count": 0,
+                    "registered_total_profile_count": 4,
+                    "memory_source_view_tokens": 100,
+                    "minimal_role_view_tokens": 100,
+                    "memory_role_view_candidate_tokens": 120,
+                    "memory_no_expansion_fallback_count": 1,
+                    "current_task_source_tokens": 200,
+                    "current_task_role_view_tokens": 180,
+                    "current_task_no_expansion_fallback_count": 1,
                     "capability_context_view_count": 2,
                     "capability_action_counts": {
                         "PLAN_TASK": 2,

@@ -128,6 +128,7 @@ def build_autogen_session_report(request: SessionReportRequest) -> dict[str, Any
             "unique_retrieved_memory_tokens 统计检索候选，fanout_retrieved_memory_tokens 只统计实际注入；成本门禁拒绝候选时，后者可以更小。",
             "rewrite_audit_event_count 是全部改写决策；rewrite_applied_event_count 是真正修改消息的次数；rewrite_fallback_event_count 是保留原生消息的次数。",
             "memory_candidate_deduplicated_* 统计规则在候选阶段移除的上下文重复记忆，不等同于已注入或有效记忆。",
+            "角色视图候选不比语义等价来源更短时，实际注入来源视图；候选 Token 与不膨胀回退次数单独记录。",
         ],
     }
 
@@ -386,6 +387,12 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
     minimal_role_view_tokens = _int(
         token_summary.get("minimal_role_view_tokens")
     )
+    memory_role_view_candidate_tokens = _int(
+        token_summary.get("memory_role_view_candidate_tokens")
+    )
+    memory_no_expansion_fallback_count = _int(
+        token_summary.get("memory_no_expansion_fallback_count")
+    )
     role_view_saved_tokens = _int(token_summary.get("role_view_saved_tokens"))
     role_view_reduction_ratio = float(
         token_summary.get("role_view_reduction_ratio", 0.0) or 0.0
@@ -404,6 +411,12 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
     )
     current_task_role_view_tokens = _int(
         token_summary.get("current_task_role_view_tokens")
+    )
+    current_task_role_view_candidate_tokens = _int(
+        token_summary.get("current_task_role_view_candidate_tokens")
+    )
+    current_task_no_expansion_fallback_count = _int(
+        token_summary.get("current_task_no_expansion_fallback_count")
     )
     current_task_role_view_saved_tokens = _int(
         token_summary.get("current_task_role_view_saved_tokens")
@@ -432,6 +445,12 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
     registered_capability_profile_count = _int(
         token_summary.get("registered_capability_profile_count")
     )
+    registered_system_profile_count = _int(
+        token_summary.get("registered_system_profile_count")
+    )
+    registered_total_profile_count = _int(
+        token_summary.get("registered_total_profile_count")
+    )
     capability_context_view_count = _int(
         token_summary.get("capability_context_view_count")
     )
@@ -455,6 +474,16 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
             "registered_capability_profile_count",
             registered_capability_profile_count,
             "本次运行实际注册的 Agent 能力画像数量",
+        ),
+        _row(
+            "registered_system_profile_count",
+            registered_system_profile_count,
+            "AutoGen Team、Manager、Runtime 等系统实体画像数量",
+        ),
+        _row(
+            "registered_total_profile_count",
+            registered_total_profile_count,
+            "业务 Agent 与框架系统实体的画像总数",
         ),
         _row(
             "capability_profile_update_count",
@@ -508,6 +537,16 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
             "实际为各接收者生成的最小充分角色视图 Token",
         ),
         _row(
+            "memory_role_view_candidate_tokens",
+            memory_role_view_candidate_tokens,
+            "角色视图候选在不膨胀选择前的 Token",
+        ),
+        _row(
+            "memory_no_expansion_fallback_count",
+            memory_no_expansion_fallback_count,
+            "角色视图候选未变短，改用语义等价来源视图的次数",
+        ),
+        _row(
             "role_view_saved_tokens",
             role_view_saved_tokens,
             "角色视图相对公共 MemoryView 减少的 Token",
@@ -546,6 +585,16 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
             "current_task_role_view_saved_tokens",
             current_task_role_view_saved_tokens,
             "当前任务角色视图相对完整广播减少的 Token",
+        ),
+        _row(
+            "current_task_role_view_candidate_tokens",
+            current_task_role_view_candidate_tokens,
+            "当前任务角色视图候选在不膨胀选择前的 Token",
+        ),
+        _row(
+            "current_task_no_expansion_fallback_count",
+            current_task_no_expansion_fallback_count,
+            "当前任务角色视图候选未变短，改用原任务文本的次数",
         ),
         _row(
             "current_task_role_view_reduction_ratio",
