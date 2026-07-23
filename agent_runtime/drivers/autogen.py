@@ -78,7 +78,7 @@ MEMORY_SCOPE_ENV = "AGENTLITE_MEMORY_SCOPE"
 FINAL_DELIVERY_MARKER_ENV = "AGENTLITE_AUTOGEN_FINAL_MARKER"
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
 CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
-DRIVER_PHASE = "v5.13v"
+DRIVER_PHASE = "v5.13w"
 _AUTOGEN_REPEATED_INSTANCE_ID_RE = re.compile(
     r"^(?P<logical>.+)_(?P<run>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
     r"[0-9a-f]{4}-[0-9a-f]{12})_(?P=run)$",
@@ -286,6 +286,7 @@ class _InjectedMemoryRecord:
     current_task_text: str
     current_task_source: str
     injected_prompt_view: str
+    revision_guard: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -564,6 +565,7 @@ class AutoGenHookManager:
                 "memory_injected_count": 0,
                 "useful_memory_hit_count": 0,
                 "wrong_memory_hit_count": 0,
+                "mixed_memory_hit_count": 0,
                 "unassessed_memory_hit_count": 0,
                 "memory_use_status": "retrieved_pending_cost_gate",
                 "retrieved_memory_tokens": _count_tokens(
@@ -612,6 +614,7 @@ class AutoGenHookManager:
                         ref,
                         budget_chars=4000,
                     )
+                    revision_guard = self.kernel.memory_store.revision_guard(ref)
                 except (KeyError, ValueError):
                     continue
                 records.append(
@@ -621,6 +624,7 @@ class AutoGenHookManager:
                         current_task_text=current_task,
                         current_task_source=current_task_source,
                         injected_prompt_view=injected_prompt_view,
+                        revision_guard=revision_guard,
                     )
                 )
             if records:
@@ -638,6 +642,8 @@ class AutoGenHookManager:
             return
 
         useful_records: list[_InjectedMemoryRecord] = []
+        wrong_records: list[_InjectedMemoryRecord] = []
+        mixed_records: list[_InjectedMemoryRecord] = []
         evidence_rows: list[dict[str, Any]] = []
         for record in records:
             evidence = _memory_adoption_evidence(
@@ -647,9 +653,14 @@ class AutoGenHookManager:
                 output_text=output_text,
                 memory_id=record.ref.memory_id,
                 memory_view_id=record.ref.memory_view_id,
+                revision_guard=record.revision_guard,
             )
-            if evidence["adopted"]:
+            if evidence["status"] == "useful":
                 useful_records.append(record)
+            elif evidence["status"] == "wrong":
+                wrong_records.append(record)
+            elif evidence["status"] == "mixed":
+                mixed_records.append(record)
             evidence_rows.append(
                 {
                     "memory_ref": _memory_ref_payload(record.ref),
@@ -658,6 +669,8 @@ class AutoGenHookManager:
             )
 
         useful_refs = [record.ref for record in useful_records]
+        wrong_refs = [record.ref for record in wrong_records]
+        mixed_refs = [record.ref for record in mixed_records]
         feedback = self._safe_kernel_call(
             "record_autogen_memory_use_feedback",
             lambda: self.kernel.record_memory_use_feedback(
@@ -665,8 +678,9 @@ class AutoGenHookManager:
                 round_id=1,
                 mode="runtime_lite",
                 useful_refs=useful_refs,
-                wrong_refs=[],
-                supported_output=bool(useful_refs),
+                wrong_refs=wrong_refs,
+                mixed_refs=mixed_refs,
+                supported_output=bool(useful_refs or mixed_refs),
             ),
         )
         unique_injected = {
@@ -674,6 +688,12 @@ class AutoGenHookManager:
         }
         unique_useful = {
             (record.ref.memory_id, record.ref.version_id) for record in useful_records
+        }
+        unique_wrong = {
+            (record.ref.memory_id, record.ref.version_id) for record in wrong_records
+        }
+        unique_mixed = {
+            (record.ref.memory_id, record.ref.version_id) for record in mixed_records
         }
         self.trace.write(
             "autogen_memory_adoption",
@@ -687,13 +707,19 @@ class AutoGenHookManager:
                 "method": context.method_name,
                 "memory_injected_count": len(unique_injected),
                 "useful_memory_hit_count": len(unique_useful),
-                "wrong_memory_hit_count": 0,
+                "wrong_memory_hit_count": len(unique_wrong),
+                "mixed_memory_hit_count": len(unique_mixed),
                 "unassessed_memory_hit_count": max(
                     0,
-                    len(unique_injected) - len(unique_useful),
+                    len(unique_injected)
+                    - len(unique_useful)
+                    - len(unique_wrong)
+                    - len(unique_mixed),
                 ),
-                "memory_supported_output_count": int(bool(unique_useful)),
-                "attribution_mode": "distinctive_fact_overlap_rules_v2",
+                "memory_supported_output_count": int(
+                    bool(unique_useful or unique_mixed)
+                ),
+                "attribution_mode": "active_and_historical_fact_rules_v3",
                 "current_task_source": records[0].current_task_source,
                 "current_task_fingerprint": _text_fingerprint(
                     records[0].current_task_text
@@ -6360,8 +6386,17 @@ def _memory_view_body(prompt_view: str) -> str:
     body = re.sub(r"^\[memory_view:[^\]]+\]\s*", "", prompt_view.strip())
     body = re.sub(r"^slot=[^;]*;\s*", "", body)
     body = re.sub(r"^claim=[^;]*;\s*", "", body)
-    body = re.sub(r"[;；]\s*tags=\[[^\]]*\]\s*$", "", body)
+    body = re.sub(r"[;；]\s*tags=\[[^\]]*\](?=\s*(?:\n|$))", "", body)
     return body.strip()
+
+
+def _active_memory_view_body(prompt_view: str) -> str:
+    body = _memory_view_body(prompt_view)
+    return "\n".join(
+        line
+        for line in body.splitlines()
+        if not line.strip().startswith("[revision_guard")
+    ).strip()
 
 
 def _memory_adoption_evidence(
@@ -6372,8 +6407,9 @@ def _memory_adoption_evidence(
     output_text: str,
     memory_id: str,
     memory_view_id: str,
+    revision_guard: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build conservative, rules-first evidence that output reused injected memory."""
+    """Classify active-memory adoption and superseded-fact contamination."""
     adoption_threshold = 0.68
     current_task_overlap_threshold = adoption_threshold
     normalized_output = _normalize_fact_text(output_text)
@@ -6381,7 +6417,8 @@ def _memory_adoption_evidence(
         identifier and _normalize_fact_text(identifier) in normalized_output
         for identifier in (memory_id, memory_view_id)
     )
-    source_units = _adoption_fact_units(_memory_view_body(memory_prompt_view))
+    active_body = _active_memory_view_body(memory_prompt_view)
+    source_units = _adoption_fact_units(active_body)
     candidate_units = [
         unit
         for unit in source_units
@@ -6399,9 +6436,27 @@ def _memory_adoption_evidence(
             matched.append((unit, output_score, baseline_score))
 
     adopted = explicit_reference or bool(matched)
+    conflict_evidence = _revision_conflict_evidence(
+        active_text=active_body,
+        historical_claims=(
+            revision_guard.get("historical_claims", [])
+            if isinstance(revision_guard, Mapping)
+            else []
+        ),
+        output_text=output_text,
+    )
+    historical_conflict = bool(conflict_evidence["matched_historical_fact_count"])
+    if matched and historical_conflict:
+        status = "mixed"
+    elif historical_conflict:
+        status = "wrong"
+    elif adopted:
+        status = "useful"
+    else:
+        status = "unassessed"
     return {
         "adopted": adopted,
-        "status": "useful" if adopted else "unassessed",
+        "status": status,
         "explicit_reference": explicit_reference,
         "attribution_threshold": adoption_threshold,
         "current_task_overlap_threshold": current_task_overlap_threshold,
@@ -6438,7 +6493,144 @@ def _memory_adoption_evidence(
             round(output_score - baseline_score, 6)
             for _, output_score, baseline_score in matched[:5]
         ],
+        **conflict_evidence,
     }
+
+
+def _revision_conflict_evidence(
+    *,
+    active_text: str,
+    historical_claims: Any,
+    output_text: str,
+) -> dict[str, Any]:
+    active_units = _adoption_fact_units(active_text)
+    historical_units: list[str] = []
+    historical_claim_ids: list[str] = []
+    if isinstance(historical_claims, list):
+        for claim in historical_claims:
+            if not isinstance(claim, Mapping):
+                continue
+            claim_id = str(claim.get("claim_id", "") or "")
+            if claim_id:
+                historical_claim_ids.append(claim_id)
+            summary = str(claim.get("summary", "") or claim.get("value", "") or "")
+            historical_units.extend(_adoption_fact_units(summary))
+
+    matched: list[tuple[str, str, float]] = []
+    for historical_unit in dict.fromkeys(historical_units):
+        if any(
+            _fact_support_score(historical_unit, active_unit) >= 0.92
+            for active_unit in active_units
+        ):
+            continue
+        conflicting_active = next(
+            (
+                active_unit
+                for active_unit in active_units
+                if _facts_have_revision_conflict(historical_unit, active_unit)
+            ),
+            "",
+        )
+        if not conflicting_active:
+            continue
+        output_score = _fact_support_score(historical_unit, output_text)
+        if output_score < 0.68:
+            continue
+        if _historical_fact_is_negated(historical_unit, output_text):
+            continue
+        matched.append((historical_unit, conflicting_active, output_score))
+
+    return {
+        "revision_guard_present": bool(historical_claim_ids),
+        "historical_claim_count": len(historical_claim_ids),
+        "historical_claim_fingerprints": [
+            hashlib.sha256(claim_id.encode("utf-8")).hexdigest()[:16]
+            for claim_id in historical_claim_ids[:5]
+        ],
+        "historical_fact_count": len(dict.fromkeys(historical_units)),
+        "matched_historical_fact_count": len(matched),
+        "matched_historical_fact_fingerprints": [
+            hashlib.sha256(unit.encode("utf-8")).hexdigest()[:16]
+            for unit, _, _ in matched[:5]
+        ],
+        "matched_historical_fact_previews": [
+            _preview(unit, limit=120) for unit, _, _ in matched[:3]
+        ],
+        "conflicting_active_fact_fingerprints": [
+            hashlib.sha256(unit.encode("utf-8")).hexdigest()[:16]
+            for _, unit, _ in matched[:5]
+        ],
+        "historical_output_match_scores": [
+            round(score, 6) for _, _, score in matched[:5]
+        ],
+    }
+
+
+def _facts_have_revision_conflict(historical: str, active: str) -> bool:
+    historical_numbers = set(_number_signature(historical))
+    active_numbers = set(_number_signature(active))
+    if historical_numbers and active_numbers and historical_numbers != active_numbers:
+        return _revision_concept_similarity(historical, active) >= 0.42
+
+    historical_assignments = _assignment_signature(historical)
+    active_assignments = _assignment_signature(active)
+    for key in historical_assignments.keys() & active_assignments.keys():
+        if historical_assignments[key] != active_assignments[key]:
+            return True
+    return False
+
+
+def _revision_concept_similarity(left: str, right: str) -> float:
+    left_concept = re.sub(r"\d+(?:\.\d+)?", "#", _normalize_fact_text(left))
+    right_concept = re.sub(r"\d+(?:\.\d+)?", "#", _normalize_fact_text(right))
+    left_grams = _character_ngrams(left_concept, size=2)
+    right_grams = _character_ngrams(right_concept, size=2)
+    if not left_grams or not right_grams:
+        return 0.0
+    intersection = len(left_grams & right_grams)
+    return intersection / min(len(left_grams), len(right_grams))
+
+
+def _assignment_signature(text: str) -> dict[str, str]:
+    pattern = re.compile(
+        r"([a-z_][a-z0-9_.-]{1,48})\s*"
+        r"(?:=|:|：|is\s+|to\s+|设置为|改为|调整为)\s*"
+        r"[\"']?([a-z0-9_.-]{1,48})",
+        re.IGNORECASE,
+    )
+    return {
+        _normalize_fact_text(key): _normalize_fact_text(value)
+        for key, value in pattern.findall(text)
+    }
+
+
+def _historical_fact_is_negated(historical: str, output_text: str) -> bool:
+    scalars = list(_number_signature(historical))
+    scalars.extend(_assignment_signature(historical).values())
+    if not scalars:
+        return False
+    lowered = output_text.casefold()
+    negation_cues = (
+        "不是",
+        "并非",
+        "而非",
+        "不再",
+        "旧值",
+        "过期",
+        "已废弃",
+        "not ",
+        "instead of",
+        "obsolete",
+        "superseded",
+    )
+    matched_occurrence = False
+    for scalar in dict.fromkeys(scalars):
+        for match in re.finditer(re.escape(str(scalar).casefold()), lowered):
+            matched_occurrence = True
+            prefix = lowered[max(0, match.start() - 18) : match.start()]
+            if not any(cue in prefix for cue in negation_cues):
+                return False
+    return matched_occurrence
 
 
 def _text_fingerprint(text: str) -> str:

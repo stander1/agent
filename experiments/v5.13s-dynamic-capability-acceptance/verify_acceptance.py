@@ -266,23 +266,33 @@ def verify_acceptance(
             f"continuity_memory_injection={continuity_injected}"
         ),
     )
-    if report_version in {"v5.13u", "v5.13v"}:
+    if report_version in {"v5.13u", "v5.13v", "v5.13w"}:
         _append_v513u_evidence_checks(
             checks,
             token_summary=token_summary,
             events=events,
             expected_attribution_mode=(
-                "distinctive_fact_overlap_rules_v2"
-                if report_version == "v5.13v"
-                else "distinctive_fact_overlap_rules_v1"
+                "active_and_historical_fact_rules_v3"
+                if report_version == "v5.13w"
+                else (
+                    "distinctive_fact_overlap_rules_v2"
+                    if report_version == "v5.13v"
+                    else "distinctive_fact_overlap_rules_v1"
+                )
             ),
         )
-    if report_version == "v5.13v":
+    if report_version in {"v5.13v", "v5.13w"}:
         _append_v513v_evidence_checks(
             checks,
             events=events,
             quality=quality,
             comparison=comparison,
+        )
+    if report_version == "v5.13w":
+        _append_v513w_evidence_checks(
+            checks,
+            token_summary=token_summary,
+            events=events,
         )
 
     for group, run in runs.items():
@@ -558,6 +568,7 @@ def _append_v513u_evidence_checks(
     injected = _int(token_summary.get("memory_injected_count"))
     useful = _int(token_summary.get("useful_memory_hit_count"))
     wrong = _int(token_summary.get("wrong_memory_hit_count"))
+    mixed = _int(token_summary.get("mixed_memory_hit_count"))
     unassessed = _int(token_summary.get("unassessed_memory_hit_count"))
     supported_outputs = _int(token_summary.get("memory_supported_output_count"))
     adoption_events = [
@@ -577,10 +588,10 @@ def _append_v513u_evidence_checks(
     _check(
         checks,
         "memory_use_accounting_complete",
-        injected > 0 and useful + wrong + unassessed == injected,
+        injected > 0 and useful + wrong + mixed + unassessed == injected,
         (
             f"injected={injected}, useful={useful}, wrong={wrong}, "
-            f"unassessed={unassessed}"
+            f"mixed={mixed}, unassessed={unassessed}"
         ),
     )
     malformed = []
@@ -760,6 +771,65 @@ def _append_v513v_evidence_checks(
             f"available={normalized.get('available')!r}, "
             f"common_calls={normalized.get('common_call_count')}, "
             f"groups={sorted(normalized_groups)}"
+        ),
+    )
+
+
+def _append_v513w_evidence_checks(
+    checks: list[Check],
+    *,
+    token_summary: dict[str, Any],
+    events: list[dict[str, Any]],
+) -> None:
+    adoption_payloads = [
+        event.get("payload")
+        for event in events
+        if event.get("event_type") == "autogen_memory_adoption"
+        and isinstance(event.get("payload"), dict)
+    ]
+    revision_rows = []
+    malformed = []
+    for payload in adoption_payloads:
+        call_id = str(payload.get("call_id") or "unknown")
+        evidence = payload.get("evidence")
+        if not isinstance(evidence, list):
+            malformed.append(call_id)
+            continue
+        for row in evidence:
+            if not isinstance(row, dict):
+                malformed.append(call_id)
+                continue
+            if not bool(row.get("revision_guard_present")):
+                continue
+            revision_rows.append(row)
+            if (
+                _int(row.get("historical_claim_count")) <= 0
+                or row.get("status")
+                not in {"useful", "wrong", "mixed", "unassessed"}
+            ):
+                malformed.append(call_id)
+    _check(
+        checks,
+        "revision_guard_evidence_observed",
+        bool(revision_rows) and not malformed,
+        (
+            f"revision_rows={len(revision_rows)}, "
+            f"malformed_calls={sorted(set(malformed))}"
+        ),
+    )
+
+    injected = _int(token_summary.get("memory_injected_count"))
+    useful = _int(token_summary.get("useful_memory_hit_count"))
+    wrong = _int(token_summary.get("wrong_memory_hit_count"))
+    mixed = _int(token_summary.get("mixed_memory_hit_count"))
+    unassessed = _int(token_summary.get("unassessed_memory_hit_count"))
+    _check(
+        checks,
+        "four_way_memory_accounting_complete",
+        injected > 0 and useful + wrong + mixed + unassessed == injected,
+        (
+            f"injected={injected}, useful={useful}, wrong={wrong}, "
+            f"mixed={mixed}, unassessed={unassessed}"
         ),
     )
 

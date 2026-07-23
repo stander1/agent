@@ -426,6 +426,7 @@ class _ViewUnit:
     claim_id: str
     text: str
     fields: tuple[str, ...]
+    mandatory: bool = False
 
 
 def infer_collaboration_role(*parts: str) -> str:
@@ -589,6 +590,16 @@ def build_minimal_context_view(
     selected_keys: set[tuple[int, int]] = set()
     selected_texts: set[str] = set()
 
+    for unit in units:
+        if not unit.mandatory:
+            continue
+        key = (unit.source_index, unit.source_order)
+        normalized_text = _normalize_unit(unit.text)
+        if key not in selected_keys and normalized_text not in selected_texts:
+            selected.append(unit)
+            selected_keys.add(key)
+            selected_texts.add(normalized_text)
+
     for field_name in requested_fields:
         candidates = [item for item in scored if field_name in item[1].fields]
         if not candidates:
@@ -612,7 +623,7 @@ def build_minimal_context_view(
         if key in selected_keys or normalized_text in selected_texts or score <= 0:
             continue
         projected = current_chars + len(unit.text) + 3
-        if selected and projected > target_budget:
+        if selected and projected > target_budget and not unit.mandatory:
             continue
         selected.append(unit)
         selected_keys.add(key)
@@ -700,6 +711,9 @@ def _collect_units(prompt_views: list[str]) -> list[_ViewUnit]:
                 for field_name, cues in FIELD_CUES.items()
                 if any(cue.casefold() in text.casefold() for cue in cues)
             )
+            mandatory = text.startswith("[revision_guard")
+            if mandatory and "revisions" not in fields:
+                fields = (*fields, "revisions")
             units.append(
                 _ViewUnit(
                     source_index=source_index,
@@ -709,6 +723,7 @@ def _collect_units(prompt_views: list[str]) -> list[_ViewUnit]:
                     claim_id=claim_id,
                     text=text,
                     fields=fields,
+                    mandatory=mandatory,
                 )
             )
             source_order += 1
@@ -719,7 +734,7 @@ def _memory_view_body(view: str) -> str:
     body = _VIEW_ID_RE.sub("", view, count=1).strip()
     body = re.sub(r"^slot=[^;]*;\s*", "", body)
     body = re.sub(r"^claim=[^;]*;\s*", "", body)
-    body = re.sub(r";\s*tags=\[[^\]]*\]\s*$", "", body)
+    body = re.sub(r";\s*tags=\[[^\]]*\](?=\s*(?:\n|$))", "", body)
     return body.strip()
 
 

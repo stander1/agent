@@ -20,6 +20,45 @@ from web_monitor.parser import _autogen_token_summary
 
 
 class AutoGenSessionReportTest(unittest.TestCase):
+    def test_mixed_memory_adoption_is_exclusive_and_reported(self) -> None:
+        events = [
+            {
+                "event_type": "autogen_agent_input_real_rewrite",
+                "payload": {
+                    "rewrite_applied": True,
+                    "native_input_tokens": 100,
+                    "rewritten_input_tokens": 40,
+                    "memory_injected_count": 1,
+                },
+            },
+            {
+                "event_type": "autogen_memory_adoption",
+                "payload": {
+                    "memory_injected_count": 1,
+                    "useful_memory_hit_count": 0,
+                    "wrong_memory_hit_count": 0,
+                    "mixed_memory_hit_count": 1,
+                    "unassessed_memory_hit_count": 0,
+                    "memory_supported_output_count": 1,
+                    "evidence": [
+                        {
+                            "status": "mixed",
+                            "matched_fact_count": 1,
+                            "matched_historical_fact_count": 1,
+                        }
+                    ],
+                },
+            },
+        ]
+
+        summary = _autogen_token_summary(events)
+
+        self.assertEqual(summary["memory_injected_count"], 1)
+        self.assertEqual(summary["useful_memory_hit_count"], 0)
+        self.assertEqual(summary["wrong_memory_hit_count"], 0)
+        self.assertEqual(summary["mixed_memory_hit_count"], 1)
+        self.assertEqual(summary["unassessed_memory_hit_count"], 0)
+
     def test_agent_rewrite_cost_components_are_mutually_exclusive(self) -> None:
         events = [
             {
@@ -78,6 +117,7 @@ class AutoGenSessionReportTest(unittest.TestCase):
                     "memory_injected_count": 0,
                     "useful_memory_hit_count": 0,
                     "wrong_memory_hit_count": 0,
+                    "mixed_memory_hit_count": 0,
                     "unassessed_memory_hit_count": 0,
                     "retrieved_memory_tokens": 12,
                 },
@@ -135,6 +175,7 @@ class AutoGenSessionReportTest(unittest.TestCase):
                     "memory_injected_count": 1,
                     "useful_memory_hit_count": 1,
                     "wrong_memory_hit_count": 0,
+                    "mixed_memory_hit_count": 0,
                     "unassessed_memory_hit_count": 0,
                     "memory_supported_output_count": 1,
                     "evidence": [
@@ -162,6 +203,7 @@ class AutoGenSessionReportTest(unittest.TestCase):
         self.assertEqual(summary["memory_hit_count"], 1)
         self.assertEqual(summary["memory_injected_count"], 1)
         self.assertEqual(summary["useful_memory_hit_count"], 1)
+        self.assertEqual(summary["mixed_memory_hit_count"], 0)
         self.assertEqual(summary["unassessed_memory_hit_count"], 0)
         self.assertEqual(summary["memory_adoption_event_count"], 1)
         self.assertEqual(summary["memory_current_task_duplicate_fact_count"], 2)

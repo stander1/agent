@@ -228,7 +228,7 @@ class ManagedProcessLauncher:
                 ),
                 "AGENTLITE_BOOTSTRAP_METADATA": json.dumps(
                     {
-                        "launcher_version": "v5.13v",
+                        "launcher_version": "v5.13w",
                         "parent_pid": os.getpid(),
                     },
                     ensure_ascii=False,

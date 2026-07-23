@@ -167,6 +167,83 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
 
         self.assertLess(score, 0.68)
 
+    def test_memory_adoption_classifies_active_historical_and_mixed_outputs(self) -> None:
+        revision_guard = {
+            "historical_claims": [
+                {
+                    "claim_id": "claim_old",
+                    "summary": "database busy_timeout=5000 ms",
+                    "status": "superseded",
+                }
+            ]
+        }
+        prompt_view = (
+            "[memory_view:view_db] slot=slot.runtime.config; "
+            "claim=claim_new; database busy_timeout=2000 ms; tags=[runtime]\n"
+            "[revision_guard policy=use_active_claims_only] "
+            "Use active claim values as authoritative."
+        )
+        common = {
+            "memory_prompt_view": prompt_view,
+            "injected_prompt_view": prompt_view,
+            "current_task_text": "Provide the final database configuration.",
+            "memory_id": "mem_db",
+            "memory_view_id": "view_db",
+            "revision_guard": revision_guard,
+        }
+
+        useful = _memory_adoption_evidence(
+            output_text="Use database busy_timeout=2000 ms.",
+            **common,
+        )
+        wrong = _memory_adoption_evidence(
+            output_text="Use database busy_timeout=5000 ms.",
+            **common,
+        )
+        mixed = _memory_adoption_evidence(
+            output_text=(
+                "Use database busy_timeout=2000 ms, while the fallback keeps "
+                "busy_timeout=5000 ms."
+            ),
+            **common,
+        )
+
+        self.assertEqual(useful["status"], "useful")
+        self.assertEqual(wrong["status"], "wrong")
+        self.assertEqual(mixed["status"], "mixed")
+        self.assertEqual(wrong["matched_historical_fact_count"], 1)
+        self.assertEqual(mixed["matched_historical_fact_count"], 1)
+
+    def test_negated_historical_value_is_not_counted_as_contamination(self) -> None:
+        evidence = _memory_adoption_evidence(
+            memory_prompt_view=(
+                "[memory_view:view_db] slot=slot.runtime.config; "
+                "claim=claim_new; database busy_timeout=2000 ms; tags=[runtime]\n"
+                "[revision_guard policy=use_active_claims_only]"
+            ),
+            injected_prompt_view=(
+                "database busy_timeout=2000 ms\n"
+                "[revision_guard policy=use_active_claims_only]"
+            ),
+            current_task_text="Provide the final database configuration.",
+            output_text=(
+                "Use database busy_timeout=2000 ms, not the old 5000 ms value."
+            ),
+            memory_id="mem_db",
+            memory_view_id="view_db",
+            revision_guard={
+                "historical_claims": [
+                    {
+                        "claim_id": "claim_old",
+                        "summary": "database busy_timeout=5000 ms",
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(evidence["status"], "useful")
+        self.assertEqual(evidence["matched_historical_fact_count"], 0)
+
     def test_arbitrary_agent_output_persists_evidence_backed_memory_use(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

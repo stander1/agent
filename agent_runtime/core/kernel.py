@@ -342,19 +342,25 @@ class CollaborationKernel:
         mode: Mode,
         useful_refs: list[MemoryRef],
         wrong_refs: list[MemoryRef] | None = None,
+        mixed_refs: list[MemoryRef] | None = None,
         supported_output: bool = False,
     ) -> dict[str, int]:
         """Apply evidence-backed memory feedback after a downstream output exists."""
         wrong_refs = list(wrong_refs or [])
+        mixed_refs = list(mixed_refs or [])
         useful_ids = list(dict.fromkeys(ref.memory_id for ref in useful_refs))
         wrong_ids = list(dict.fromkeys(ref.memory_id for ref in wrong_refs))
+        mixed_ids = list(dict.fromkeys(ref.memory_id for ref in mixed_refs))
         persisted_useful = self.memory_store.record_useful_hits(useful_ids)
+        persisted_wrong = self.memory_store.record_wrong_hits(wrong_ids)
+        persisted_mixed = self.memory_store.record_mixed_hits(mixed_ids)
         self.metrics.record_memory_use_feedback(
             task_id=task.task_id,
             round_id=round_id,
             mode=mode,
             useful_hit_count=len(useful_ids),
             wrong_hit_count=len(wrong_ids),
+            mixed_hit_count=len(mixed_ids),
         )
         if supported_output:
             self.metrics.record_memory_supported_output(
@@ -366,7 +372,10 @@ class CollaborationKernel:
         return {
             "useful_hit_count": len(useful_ids),
             "wrong_hit_count": len(wrong_ids),
+            "mixed_hit_count": len(mixed_ids),
             "persisted_useful_hit_count": persisted_useful,
+            "persisted_wrong_hit_count": persisted_wrong,
+            "persisted_mixed_hit_count": persisted_mixed,
             "memory_supported_output_count": int(supported_output),
         }
 

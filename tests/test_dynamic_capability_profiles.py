@@ -149,6 +149,39 @@ class DynamicCapabilityProfileTest(unittest.TestCase):
         self.assertIn("ANALYZE_DATA", profile.runtime_preferred_actions)
         self.assertGreater(profile.profile_version, initial_version)
 
+    def test_revision_guard_is_retained_for_arbitrary_consumer_profile(self) -> None:
+        profiles = CapabilityProfileManagerLite([])
+        profile = profiles.register_or_update(
+            agent_id="ReleaseSafetyInspector",
+            role="Configuration safety specialist",
+            role_description="Validate current runtime settings before release.",
+        )
+        consumer = consumer_context_from_profile(
+            profile,
+            consumer_id="ReleaseSafetyInspector",
+        )
+        source = (
+            "[memory_view:view_runtime] slot=slot.runtime.config; "
+            "claim=claim_current; database busy_timeout=2000 ms; tags=[runtime]\n"
+            "[revision_guard policy=use_active_claims_only; "
+            "active_claims=claim_current; superseded_claim_count=1] "
+            "Use active claim values as authoritative."
+        )
+
+        view = build_minimal_context_view(
+            query="List release readiness evidence only.",
+            prompt_views=[source],
+            consumer=consumer,
+            action="REVIEW_OUTPUT",
+            budget_chars=160,
+        )
+
+        self.assertEqual(view.consumer_id, "ReleaseSafetyInspector")
+        self.assertIn("[revision_guard", view.text)
+        self.assertNotIn("planner", view.text.casefold())
+        self.assertNotIn("writer", view.text.casefold())
+        self.assertNotIn("reviewer", view.text.casefold())
+
     def test_execution_load_and_memory_locality_drive_equivalent_tie_break(self) -> None:
         profiles = CapabilityProfileManagerLite([])
         for agent_id in ("ComposerEast", "ComposerWest"):

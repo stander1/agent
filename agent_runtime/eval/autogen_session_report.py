@@ -356,6 +356,7 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
         token_summary.get("useful_memory_hit_count")
     )
     wrong_memory_hit_count = _int(token_summary.get("wrong_memory_hit_count"))
+    mixed_memory_hit_count = _int(token_summary.get("mixed_memory_hit_count"))
     unassessed_memory_hit_count = _int(
         token_summary.get("unassessed_memory_hit_count")
     )
@@ -702,6 +703,11 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
             "agentlite_wrong_memory_hit_count",
             wrong_memory_hit_count,
             "被判定为错误或过期的记忆命中条数",
+        ),
+        _row(
+            "agentlite_mixed_memory_hit_count",
+            mixed_memory_hit_count,
+            "同时采用当前有效事实与冲突旧事实的记忆条数",
         ),
         _row(
             "agentlite_unassessed_memory_hit_count",

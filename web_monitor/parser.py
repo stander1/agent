@@ -602,6 +602,7 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "memory_injected_count": 0,
         "useful_memory_hit_count": 0,
         "wrong_memory_hit_count": 0,
+        "mixed_memory_hit_count": 0,
         "unassessed_memory_hit_count": 0,
         "memory_adoption_event_count": 0,
         "memory_current_task_duplicate_fact_count": 0,
@@ -664,7 +665,7 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "shadow_potential_savings_ratio": 0.0,
         "shadow_event_count": 0,
         "event_count": 0,
-        "source": "autogen_trace_memory_adoption_v7",
+        "source": "autogen_trace_memory_adoption_v8",
     }
     actual_event_types = {
         "autogen_agent_input_real_rewrite",
@@ -745,6 +746,9 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
                 breakdown["useful_memory_hit_count"] += _int(
                     payload.get("useful_memory_hit_count")
                 )
+                breakdown["mixed_memory_hit_count"] += _int(
+                    payload.get("mixed_memory_hit_count")
+                )
                 breakdown["unassessed_memory_hit_count"] += _int(
                     payload.get("unassessed_memory_hit_count")
                 )
@@ -767,6 +771,9 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
             )
             breakdown["wrong_memory_hit_count"] += _int(
                 payload.get("wrong_memory_hit_count")
+            )
+            breakdown["mixed_memory_hit_count"] += _int(
+                payload.get("mixed_memory_hit_count")
             )
             breakdown["memory_supported_output_count"] += _int(
                 payload.get("memory_supported_output_count")
@@ -984,7 +991,8 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         0,
         breakdown["memory_injected_count"]
         - breakdown["useful_memory_hit_count"]
-        - breakdown["wrong_memory_hit_count"],
+        - breakdown["wrong_memory_hit_count"]
+        - breakdown["mixed_memory_hit_count"],
     )
     breakdown["actual_rewrite_event_count"] = rewrite_applied_events
     breakdown["continuity_required_event_count"] = continuity_required_events

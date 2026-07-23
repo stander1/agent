@@ -4519,3 +4519,28 @@ v5.13v 不改变 AgentLite 的业务行为，重点修正 v5.13u 实验中暴露
 本阶段仍保持通用边界：核心运行时不认识 Question A/D，不固定 Agent 角色名，技术盲评只属于实验评测，不进入运行时，也不计入协作 Token。
 
 详细说明：`docs/experiments/v5.13v-conservative-attribution-technical-quality.md`。
+
+## 60. v5.13w：版本冲突感知记忆与污染归因
+
+v5.13w 修复跨层历史污染：MemoryStore 已将旧 Claim 标为 `superseded`，但 AutoGen Agent 的原生消息历史仍可能保留旧值。该阶段不删除框架历史，而是向所有动态能力角色提供最小修订守卫，并在输出后同时校验当前事实采用与过期事实污染。
+
+实现映射：
+
+- `agent_runtime/memory/memory_store.py`：为存在历史 Claim 的 MemoryView 生成 `revision_guard`；Prompt 只携带当前有效值和版本策略，旧值仅供本地审计；持久化 useful、wrong、mixed 三类反馈计数；
+- `agent_runtime/memory/context_views.py`：把修订守卫标为动态最小上下文的必选控制单元，不依赖固定角色名；
+- `agent_runtime/drivers/autogen.py`：采用归因升级为 `active_and_historical_fact_rules_v3`，互斥输出 useful、wrong、mixed、unassessed；
+- `agent_runtime/core/kernel.py` 与 `agent_runtime/eval/metrics.py`：写回和汇总四分类反馈；
+- `web_monitor/parser.py` 与 `agent_runtime/eval/autogen_session_report.py`：展示 mixed 指标，并验证四类总数与实际注入数守恒；
+- `experiments/v5.13w-conflict-aware-memory/`：提供不调用 LLM 的确定性门禁和 openEuler 真实 LLM 完整验收入口。
+
+通用边界：
+
+```text
+agent_runtime 不认识 Question A/D；
+修订守卫不依赖 Planner、Writer、Reviewer；
+旧 Claim 原文不会重新注入 Agent Prompt；
+只有共享概念锚点且结构化标量冲突时才执行负向污染判定；
+明确否定旧值不会计为错误采用。
+```
+
+详细说明：`docs/experiments/v5.13w-conflict-aware-memory.md`。

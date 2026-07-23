@@ -65,6 +65,43 @@ class MemoryGovernanceTest(unittest.TestCase):
         self.assertEqual(second.superseded_claim_count, 1)
         self.assertEqual(second.conflict_resolved_count, 1)
 
+    def test_superseded_claim_generates_prompt_safe_revision_guard(self) -> None:
+        store = MemoryStoreLite()
+        first = store.write_memory_with_report(
+            task_id="T1",
+            source_agent="ConfigAuthor",
+            task_topic="database runtime",
+            summary="database busy_timeout=5000 ms",
+            tags=["runtime"],
+            slot_hint="reuse_strategy",
+            confidence=0.7,
+        )
+        second = store.write_memory_with_report(
+            task_id="T2",
+            source_agent="ConfigVerifier",
+            task_topic="database runtime",
+            summary="database busy_timeout=2000 ms",
+            tags=["runtime"],
+            slot_hint="reuse_strategy",
+            confidence=0.9,
+        )
+
+        prompt_view = store.render_prompt_view(
+            second.memory_ref,
+            budget_chars=1200,
+        )
+        guard = store.revision_guard(second.memory_ref)
+
+        self.assertIn("busy_timeout=2000", prompt_view)
+        self.assertNotIn("busy_timeout=5000", prompt_view)
+        self.assertIn("[revision_guard", prompt_view)
+        self.assertIn("use_active_claims_only", prompt_view)
+        self.assertTrue(guard["required"])
+        self.assertEqual(
+            guard["historical_claims"][0]["claim_id"],
+            store._memories[first.memory_ref.memory_id].claim_id,
+        )
+
     def test_batch_compaction_updates_memory_view_summary_and_log(self) -> None:
         store = MemoryStoreLite()
         store.write_memory_with_report(

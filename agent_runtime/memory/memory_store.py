@@ -130,6 +130,8 @@ class MemoryObject:
     status: str = "active"
     hit_count: int = 0
     useful_hit_count: int = 0
+    wrong_hit_count: int = 0
+    mixed_hit_count: int = 0
     last_accessed_at: str | None = None
     status_updated_at: str | None = None
 
@@ -851,11 +853,54 @@ class MemoryStoreLite:
         view = self._views[memory.memory_view_id]
         claim = self._claims[memory.claim_id]
         tag_text = ", ".join(memory.tags[:5])
-        rendered = (
+        prefix = (
             f"[memory_view:{view.memory_view_id}] slot={view.slot_id}; "
-            f"claim={claim.claim_id}; {view.prompt_summary}; tags=[{tag_text}]"
+            f"claim={claim.claim_id}; "
         )
+        suffix = f"; tags=[{tag_text}]"
+        guard = self._render_revision_guard(view)
+        reserved = len(prefix) + len(suffix) + len(guard)
+        summary_budget = max(0, budget_chars - reserved)
+        summary = view.prompt_summary[:summary_budget]
+        rendered = f"{prefix}{summary}{suffix}{guard}"
         return rendered[:budget_chars]
+
+    def revision_guard(self, memory_ref: MemoryRef) -> dict[str, Any]:
+        """Return prompt-safe policy plus audit-only claim data for validation."""
+        memory = self._memories[memory_ref.memory_id]
+        view = self._views[memory.memory_view_id]
+        active_claims = [
+            self._claims[claim_id]
+            for claim_id in view.active_claim_ids
+            if claim_id in self._claims
+        ]
+        historical_claims = [
+            self._claims[claim_id]
+            for claim_id in view.historical_claim_ids
+            if claim_id in self._claims
+        ]
+        return {
+            "required": bool(historical_claims or view.conflicting_claim_ids),
+            "memory_view_id": view.memory_view_id,
+            "slot_id": view.slot_id,
+            "resolution_status": view.resolution_status,
+            "downstream_policy": view.downstream_policy,
+            "active_claim_ids": [claim.claim_id for claim in active_claims],
+            "active_source_task_ids": [
+                claim.source_task_id for claim in active_claims
+            ],
+            "historical_claims": [
+                {
+                    "claim_id": claim.claim_id,
+                    "source_task_id": claim.source_task_id,
+                    "summary": claim.summary,
+                    "value": claim.value,
+                    "status": claim.status,
+                }
+                for claim in historical_claims
+            ],
+            "conflicting_claim_ids": list(view.conflicting_claim_ids),
+        }
 
     def resolve_ref(self, memory_id: str) -> MemoryRef | None:
         """Return the current reference for a memory without changing hit counters."""
@@ -864,16 +909,15 @@ class MemoryStoreLite:
 
     def record_useful_hits(self, memory_ids: list[str]) -> int:
         """Persist evidence-backed downstream adoption for unique memories."""
-        updated = 0
-        for memory_id in dict.fromkeys(item for item in memory_ids if item):
-            memory = self._memories.get(memory_id)
-            if memory is None:
-                continue
-            memory.useful_hit_count += 1
-            updated += 1
-        if updated:
-            self._persist_snapshot()
-        return updated
+        return self._record_feedback_hits(memory_ids, "useful_hit_count")
+
+    def record_wrong_hits(self, memory_ids: list[str]) -> int:
+        """Persist evidence that an output adopted an outdated or conflicting fact."""
+        return self._record_feedback_hits(memory_ids, "wrong_hit_count")
+
+    def record_mixed_hits(self, memory_ids: list[str]) -> int:
+        """Persist outputs containing both active and outdated memory evidence."""
+        return self._record_feedback_hits(memory_ids, "mixed_hit_count")
 
     def render_audit_view(self, memory_ref: MemoryRef, budget_chars: int = 1800) -> str:
         memory = self._memories[memory_ref.memory_id]
@@ -1525,6 +1569,36 @@ class MemoryStoreLite:
     def _compact_claims(self, claim_ids: list[str]) -> str:
         summaries = [self._claims[item].summary for item in claim_ids[-4:]]
         return "；".join(summaries)
+
+    def _render_revision_guard(self, view: MemoryView) -> str:
+        if not view.historical_claim_ids and not view.conflicting_claim_ids:
+            return ""
+        active_claims = ",".join(view.active_claim_ids)
+        return (
+            "\n[revision_guard "
+            f"policy={view.downstream_policy}; "
+            f"resolution={view.resolution_status}; "
+            f"active_claims={active_claims}; "
+            f"superseded_claim_count={len(view.historical_claim_ids)}] "
+            "Use active claim values as authoritative. Ignore contradictory values "
+            "from native message history; historical claims are audit-only."
+        )
+
+    def _record_feedback_hits(
+        self,
+        memory_ids: list[str],
+        field_name: str,
+    ) -> int:
+        updated = 0
+        for memory_id in dict.fromkeys(item for item in memory_ids if item):
+            memory = self._memories.get(memory_id)
+            if memory is None:
+                continue
+            setattr(memory, field_name, int(getattr(memory, field_name)) + 1)
+            updated += 1
+        if updated:
+            self._persist_snapshot()
+        return updated
 
     def _capture_claim_candidates(
         self,

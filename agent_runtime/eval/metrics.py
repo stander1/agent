@@ -42,6 +42,7 @@ class TaskMetricRow:
     useful_memory_hit_count: int = 0
     useful_memory_hit_rate: float = 0.0
     wrong_memory_hit_count: int = 0
+    mixed_memory_hit_count: int = 0
     memory_supported_output_count: int = 0
     memory_write_count: int = 0
     memory_candidate_count: int = 0
@@ -266,11 +267,13 @@ class MetricsCollector:
         mode: Mode,
         useful_hit_count: int = 0,
         wrong_hit_count: int = 0,
+        mixed_hit_count: int = 0,
     ) -> None:
         """Record post-output memory evidence without counting another retrieval."""
         row = self._row(task_id, round_id, mode)
         row.useful_memory_hit_count += useful_hit_count
         row.wrong_memory_hit_count += wrong_hit_count
+        row.mixed_memory_hit_count += mixed_hit_count
 
     def record_memory_write(
         self,
@@ -705,6 +708,7 @@ class MetricsCollector:
                 "memory_query_hit_count": 0,
                 "useful_memory_hit_count": 0,
                 "wrong_memory_hit_count": 0,
+                "mixed_memory_hit_count": 0,
                 "memory_supported_output_count": 0,
                 "memory_write_count": 0,
                 "memory_candidate_count": 0,
@@ -804,6 +808,7 @@ class MetricsCollector:
             bucket["memory_query_hit_count"] += row.memory_query_hit_count
             bucket["useful_memory_hit_count"] += row.useful_memory_hit_count
             bucket["wrong_memory_hit_count"] += row.wrong_memory_hit_count
+            bucket["mixed_memory_hit_count"] += row.mixed_memory_hit_count
             bucket["memory_supported_output_count"] += row.memory_supported_output_count
             bucket["memory_write_count"] += row.memory_write_count
             bucket["memory_candidate_count"] += row.memory_candidate_count
