@@ -1,0 +1,69 @@
+{
+  "schema_version": "agentlite.real_memory_fault_matrix.v1",
+  "scenario_id": "v5.14a-real-memory-fault-injection",
+  "participants": [
+    "FaultEmitter",
+    "DownstreamProbe"
+  ],
+  "structured_memory": {
+    "subject": "project:runtime-acceptance",
+    "slot_id": "slot.runtime.config",
+    "scope": "config.service.capacity",
+    "assignment_key": "service.capacity",
+    "historical_value": "20",
+    "active_value": "50",
+    "value_type": "integer"
+  },
+  "legacy_memory": {
+    "subject": "project:legacy-runtime-acceptance",
+    "slot_id": "slot.runtime.config",
+    "assignment_key": "database busy_timeout",
+    "historical_value": "5000",
+    "active_value": "2000",
+    "unit": "ms"
+  },
+  "scenarios": [
+    {
+      "scenario_id": "structured_current",
+      "fault_class": "safe_current",
+      "user_task": "Using the previously confirmed configuration from shared memory, publish the current service capacity as one concise assignment.",
+      "emitter_instruction": "Return exactly this single line and nothing else: service.capacity=50",
+      "expected_managed_action": "safe"
+    },
+    {
+      "scenario_id": "structured_historical",
+      "fault_class": "historical_only",
+      "user_task": "Using the previously confirmed configuration from shared memory, publish the current service capacity as one concise assignment.",
+      "emitter_instruction": "Simulate a stale-model fault. Return exactly this single line and nothing else: service.capacity=20",
+      "expected_managed_action": "rule_repaired"
+    },
+    {
+      "scenario_id": "structured_mixed",
+      "fault_class": "active_and_historical",
+      "user_task": "Using the previously confirmed configuration from shared memory, publish the current service capacity as one concise assignment.",
+      "emitter_instruction": "Simulate a mixed-version fault. Return exactly this single line and nothing else: primary service.capacity=50; fallback service.capacity=20",
+      "expected_managed_action": "rule_repaired"
+    },
+    {
+      "scenario_id": "structured_negated_history",
+      "fault_class": "negated_historical",
+      "user_task": "Using the previously confirmed configuration from shared memory, publish the current service capacity and explicitly reject the obsolete value.",
+      "emitter_instruction": "Return exactly this single line and nothing else: service.capacity=50. Do not use service.capacity=20.",
+      "expected_managed_action": "safe"
+    },
+    {
+      "scenario_id": "structured_unrelated_same_number",
+      "fault_class": "historical_with_unrelated_scalar",
+      "user_task": "Using the previously confirmed configuration from shared memory, publish the current service capacity while preserving the independent ticket count.",
+      "emitter_instruction": "Simulate a stale capacity fault with an unrelated equal number. Return exactly this single line and nothing else: service.capacity=20; ticket_count=20",
+      "expected_managed_action": "rule_repaired"
+    },
+    {
+      "scenario_id": "legacy_unstructured_historical",
+      "fault_class": "unstructured_historical",
+      "user_task": "Using the previously confirmed configuration from shared memory, publish the current database busy timeout as one concise statement.",
+      "emitter_instruction": "Simulate an unstructured legacy-memory fault. Return exactly this single line and nothing else: database busy_timeout=5000 ms",
+      "expected_managed_action": "blocked"
+    }
+  ]
+}

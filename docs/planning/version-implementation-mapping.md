@@ -4656,3 +4656,37 @@ v5.13z 解决 v5.13y 暴露的实际缺口：运行时已经能够识别 Agent �
 详细说明：`docs/experiments/v5.13z-memory-adoption-repair.md`。
 
 工程验收：`experiments/v5.13z-memory-adoption-repair/README.md`。
+
+## 64. v5.14a：真实 AutoGen 记忆事实故障注入
+
+v5.14a 不新增业务领域规则，也不修改生产运行时的角色识别。该阶段把 v5.13z 已实现的
+错误记忆采用守卫放入真实 AutoGen GroupChat 和真实 Provider 输出链中，验证修复或阻断
+是否发生在下游 Agent 接收之前。
+
+实现映射：
+
+- `experiments/v5.14a-real-memory-fault-injection/fault_matrix.json`：定义正确当前值、
+  仅旧值、新旧混合、明确否定旧值、无关字段同值和旧版非结构化冲突六类通用场景；
+- `seed_fault_memory.py`：按真实 Team 参与者计算严格协作组 ID，在隔离 scope 中写入
+  CCF v2 与 CCF v1-lite 的活动/历史值，并重载校验持久化结果；
+- `fault_injection_app.py`：使用真实 AutoGen `RoundRobinGroupChat`，由 `FaultEmitter`
+  调用真实 LLM，`DownstreamProbe` 确定性记录框架实际传播的消息；
+- `verify_fault_injection.py`：把 Provider 原文指纹与
+  `autogen_memory_adoption_guard` trace 对齐，统计故障注入率、Native/Managed 下游逃逸率、
+  安全场景误报率、补偿事件和无关字段保留情况；
+- `run_openeuler.sh`：运行确定性前置门禁、Native 控制、隔离记忆预置、Managed 接管、
+  逐行验收、全量单元测试、编译检查和不可变证据打包。
+
+公平边界：
+
+```text
+Native 与 Managed 使用相同模型、温度、故障矩阵和重复次数；
+Provider 未实际产生目标故障时，验收失败，不能冒充守卫成功；
+DownstreamProbe 不调用 LLM，只记录 AutoGen 实际传播内容；
+短故障输出的 Token 只用于审计，不用于宣称通信成本下降；
+生产 agent_runtime 不识别 v5.14a 场景，也不依赖固定 Agent 角色名称。
+```
+
+详细说明：`docs/experiments/v5.14a-real-memory-fault-injection.md`。
+
+工程验收：`experiments/v5.14a-real-memory-fault-injection/README.md`。
