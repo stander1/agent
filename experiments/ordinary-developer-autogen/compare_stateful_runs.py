@@ -78,6 +78,9 @@ def compare_runs(
     normalized_common_calls = _normalized_common_call_summary(run_dirs)
     summary = {
         "scenario_id": runs["native"]["summary"]["scenario_id"],
+        "run_parameters": dict(
+            runs["native"]["summary"].get("run_parameters") or {}
+        ),
         "groups": group_summaries,
         "managed_vs_native": _token_delta(managed_total, native_total),
         "observed_vs_native": _token_delta(observed_total, native_total),
@@ -134,6 +137,9 @@ def _read_json(path: Path) -> dict[str, Any]:
 def _validate_runs(runs: dict[str, dict[str, Any]]) -> None:
     native_scenario = runs["native"]["summary"].get("scenario_id")
     native_agent_configs = runs["native"].get("agent_configs")
+    native_run_parameters = dict(
+        runs["native"]["summary"].get("run_parameters") or {}
+    )
     native_tasks = [
         (task["task_id"], task["question"]) for task in runs["native"]["tasks"]
     ]
@@ -152,6 +158,8 @@ def _validate_runs(runs: dict[str, dict[str, Any]]) -> None:
             raise ValueError(f"{group} did not report one shared team instance")
         if runs[group].get("agent_configs") != native_agent_configs:
             raise ValueError(f"{group} agent configuration differs from native")
+        if dict(summary.get("run_parameters") or {}) != native_run_parameters:
+            raise ValueError(f"{group} run parameters differ from native")
         group_tasks = [
             (task["task_id"], task["question"]) for task in runs[group]["tasks"]
         ]

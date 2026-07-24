@@ -12,6 +12,7 @@ from agent_runtime.eval.experiment_archive import (
 )
 from agent_runtime.eval.autogen_session_report import (
     SessionReportRequest,
+    _state_summary,
     build_autogen_session_report,
     render_autogen_session_report,
     write_autogen_session_report,
@@ -20,6 +21,39 @@ from web_monitor.parser import _autogen_token_summary
 
 
 class AutoGenSessionReportTest(unittest.TestCase):
+    def test_state_summary_counts_only_real_state_pool_rows(self) -> None:
+        summary = _state_summary(
+            {
+                "modes": {
+                    "runtime_lite": {
+                        "state_pool": [
+                            {
+                                "state_type": "artifact_state",
+                                "payload_kind": "structured_non_text",
+                                "contains_embedding_refs": False,
+                                "size_bytes": 120,
+                            },
+                            {
+                                "state_type": "retrieval_state",
+                                "payload_kind": "structured_non_text",
+                                "contains_embedding_refs": True,
+                                "size_bytes": 80,
+                            },
+                        ]
+                    }
+                }
+            }
+        )
+
+        self.assertEqual(summary["state_count"], 2)
+        self.assertEqual(
+            summary["state_type_counts"],
+            {"artifact_state": 1, "retrieval_state": 1},
+        )
+        self.assertEqual(summary["structured_non_text_count"], 2)
+        self.assertEqual(summary["contains_embedding_refs_count"], 1)
+        self.assertEqual(summary["total_size_bytes"], 200)
+
     def test_mixed_memory_adoption_is_exclusive_and_reported(self) -> None:
         events = [
             {
@@ -443,6 +477,7 @@ class AutoGenSessionReportTest(unittest.TestCase):
             self.assertIn("# AutoGen Session Token 报告", text)
             self.assertIn("`llm_total_tokens` | 30", text)
             self.assertIn("`actual_native_transport_tokens` | 1200", text)
+            self.assertIn("## 状态池证据", text)
 
     @staticmethod
     def _write_session(data_dir: Path, session_id: str) -> None:

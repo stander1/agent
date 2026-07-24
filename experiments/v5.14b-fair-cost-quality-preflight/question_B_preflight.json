@@ -1,0 +1,18 @@
+{
+  "scenario_id": "B-preflight",
+  "description": "本地合成安全审计连续任务 B1-B3 预检；所有资料均为防御性合成数据。",
+  "tasks": [
+    {
+      "task_id": "B1",
+      "question": "审计系统捕获了一条合成高危告警：边缘节点 Node_71 在凌晨 2:15 出现异常大额数据打包上传，目标指针为 proxy_token_PX42。\n请先抽取该告警的初始硬约束、核心线索和后续追踪键，作为链式审计的起点。\n\n本轮本地资料快照：\n- alert_id=alert_071\n- source_node=Node_71\n- timestamp=2026-06-15T02:15:00Z\n- event_type=bulk_upload_anomaly\n- target_pointer=proxy_token_PX42\n- severity=high\n\n本任务只处理本地合成数据，不涉及真实攻击目标或利用步骤。"
+    },
+    {
+      "task_id": "B2",
+      "question": "基于 B1 锁定的 proxy_token_PX42，请分析下面的本地 network_observations.csv 合成检索结果，确定设备标识、关联账户、证据行和下一跳审计依据。\n\n本轮本地资料快照：\n- network_row_8402: proxy_token=proxy_token_PX42; resolved_device=device_shadow_17; touched_accounts=[wallet_demo_902,wallet_demo_911]; confidence=0.86\n- network_row_11904: proxy_token=proxy_token_PX42; resolved_device=device_shadow_17; touched_accounts=[wallet_demo_911]; confidence=0.79\n\n请给出可追溯的 retrieval_state 摘要，不要虚构资料快照之外的证据。"
+    },
+    {
+      "task_id": "B3",
+      "question": "基于 B2 已确认的 wallet_demo_911，请读取下面的本地 payload_notes.json 合成映射，解析备注指向的下一跳实体标记，并给出 artifact_state 摘要。\n\n本轮本地资料快照：\n- wallet_id=wallet_demo_911\n- decoded_marker=ROUTE_VIA_ENTITY_085\n- mapping_source=synthetic_payload_notes\n- next_lookup_key=ENTITY_085\n\n这里只做本地合成资料映射，不生成真实解密代码，不得丢失 B1-B2 的证据血缘。"
+    }
+  ]
+}

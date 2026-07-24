@@ -84,6 +84,7 @@ def build_autogen_session_report(request: SessionReportRequest) -> dict[str, Any
             llm_usage_source = "external_provider_usage_file"
     summary = snapshot.get("summary", {})
     rows = _metric_rows(token_summary)
+    state_summary = _state_summary(snapshot)
     native = _int(token_summary.get("native_baseline_tokens"))
     runtime = _int(token_summary.get("end_to_end_collaboration_tokens"))
     savings = native - runtime if native else 0
@@ -119,6 +120,7 @@ def build_autogen_session_report(request: SessionReportRequest) -> dict[str, Any
             "agentlite_token_savings": savings,
             "agentlite_token_savings_ratio": round(ratio, 6),
         },
+        "state_summary": state_summary,
         "metric_rows": rows,
         "notes": [
             "actual_* 仅汇总真实改写审计事件；改写回退时按原生传输成本计入，不能记作节省。",
@@ -169,6 +171,7 @@ def build_autogen_run_report(request: RunReportRequest) -> dict[str, Any]:
         }
     )
     summary = snapshot.get("summary", {})
+    state_summary = _state_summary(snapshot)
     return {
         "session_id": resolved_session_id,
         "framework_run_id": run_id,
@@ -190,6 +193,7 @@ def build_autogen_run_report(request: RunReportRequest) -> dict[str, Any]:
             else "unavailable"
         ),
         "token_summary": token_summary,
+        "state_summary": state_summary,
         "metric_rows": _metric_rows(token_summary),
         "notes": [
             "本报告只汇总 framework_run_id 对应的 Trace 事件，不包含同一 Studio 进程中的其他网页 Run。",
@@ -242,6 +246,7 @@ def render_autogen_run_report(
     ]
     for row in report["metric_rows"]:
         lines.append(f"| `{row['metric']}` | {row['value']} | {row['meaning']} |")
+    _append_state_summary_markdown(lines, report.get("state_summary"))
     lines.extend(["", "## Trace 事件计数", "", "| 事件 | 次数 |", "|---|---:|"])
     for event_name, count in sorted((report.get("event_counts") or {}).items()):
         lines.append(f"| `{event_name}` | {count} |")
@@ -885,6 +890,76 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _state_summary(snapshot: dict[str, Any]) -> dict[str, Any]:
+    modes = snapshot.get("modes")
+    modes = modes if isinstance(modes, dict) else {}
+    runtime = modes.get("runtime_lite")
+    runtime = runtime if isinstance(runtime, dict) else {}
+    states = runtime.get("state_pool")
+    states = states if isinstance(states, list) else []
+    state_types: dict[str, int] = {}
+    payload_kinds: dict[str, int] = {}
+    structured_non_text_count = 0
+    contains_embedding_refs_count = 0
+    total_size_bytes = 0
+    for item in states:
+        if not isinstance(item, dict):
+            continue
+        state_type = str(item.get("state_type") or "unknown")
+        payload_kind = str(item.get("payload_kind") or "unknown")
+        state_types[state_type] = state_types.get(state_type, 0) + 1
+        payload_kinds[payload_kind] = payload_kinds.get(payload_kind, 0) + 1
+        structured_non_text_count += int(
+            payload_kind == "structured_non_text"
+        )
+        contains_embedding_refs_count += int(
+            bool(item.get("contains_embedding_refs"))
+        )
+        total_size_bytes += _int(item.get("size_bytes"))
+    return {
+        "state_count": sum(state_types.values()),
+        "state_type_counts": dict(sorted(state_types.items())),
+        "payload_kind_counts": dict(sorted(payload_kinds.items())),
+        "structured_non_text_count": structured_non_text_count,
+        "contains_embedding_refs_count": contains_embedding_refs_count,
+        "total_size_bytes": total_size_bytes,
+    }
+
+
+def _append_state_summary_markdown(
+    lines: list[str],
+    raw_summary: Any,
+) -> None:
+    summary = raw_summary if isinstance(raw_summary, dict) else {}
+    lines.extend(
+        [
+            "",
+            "## 状态池证据",
+            "",
+            f"- state_count: `{_int(summary.get('state_count'))}`",
+            (
+                "- structured_non_text_count: "
+                f"`{_int(summary.get('structured_non_text_count'))}`"
+            ),
+            (
+                "- contains_embedding_refs_count: "
+                f"`{_int(summary.get('contains_embedding_refs_count'))}`"
+            ),
+            f"- total_size_bytes: `{_int(summary.get('total_size_bytes'))}`",
+            "",
+            "| 状态类型 | 数量 |",
+            "|---|---:|",
+        ]
+    )
+    state_types = summary.get("state_type_counts")
+    state_types = state_types if isinstance(state_types, dict) else {}
+    if state_types:
+        for state_type, count in sorted(state_types.items()):
+            lines.append(f"| `{state_type}` | {_int(count)} |")
+    else:
+        lines.append("| `unavailable` | 0 |")
+
+
 def _row(metric: str, value: int | float, meaning: str) -> dict[str, Any]:
     return {"metric": metric, "value": value, "meaning": meaning}
 
@@ -976,6 +1051,7 @@ def _render_markdown(report: dict[str, Any]) -> str:
     ]
     for row in report["metric_rows"]:
         lines.append(f"| `{row['metric']}` | {row['value']} | {row['meaning']} |")
+    _append_state_summary_markdown(lines, report.get("state_summary"))
     lines.extend(["", "## Trace 事件计数", ""])
     event_counts = report.get("event_counts") or {}
     if event_counts:

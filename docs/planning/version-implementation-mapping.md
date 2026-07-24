@@ -4694,3 +4694,40 @@ DownstreamProbe 不调用 LLM，只记录 AutoGen 实际传播内容；
 详细说明：`docs/experiments/v5.14a-real-memory-fault-injection.md`。
 
 工程验收：`experiments/v5.14a-real-memory-fault-injection/README.md`。
+
+## 65. v5.14b：真实 AutoGen 公平成本-质量预检
+
+v5.14b 不继续增加生产守卫，而是执行 v5.13x 已明确要求的真实
+Native/Observed/Managed 联合验收。该阶段首先用 A1-A3 与 B1-B3 校验完整证据链，避免
+直接运行双领域十轮正式实验后才发现成本或质量口径缺失。
+
+新增：
+
+- `experiments/v5.14b-fair-cost-quality-preflight/preregistration.json`：在 Provider
+  调用前冻结成本、质量、交付和 fallback 阈值；
+- `question_A_preflight.json`：旅行规划三轮连续任务；
+- `question_B_preflight.json`：自包含本地资料快照的合成安全审计三轮连续任务；
+- `agent_config_B.json`：只属于实验的合成安全审计专业 Agent 配置；
+- `run_openeuler.sh`：依次运行 Native、Observed、Managed，导出绑定报告，完成双重匿名
+  质量评分并打包证据；
+- `verify_preflight.py`：联合校验 Provider 实际 Token、端到端协作 Token、匿名质量、
+  完整交付、真实消息改写、共享记忆注入、真实非文本状态和错误 fallback；
+- AutoGen session/run 报告新增 `state_summary`，直接统计 StatePool 中的状态类型、
+  载荷类型、embedding 引用和实际字节数，不从任务文本推断状态是否存在。
+
+公平性边界：
+
+```text
+三组使用相同任务、Agent、模型、temperature=0 和 max_turns=9；
+不限制 completion Token；
+A/B Managed 使用不同记忆作用域；
+评审模型 Token 单独记录，不进入运行时协作成本；
+Provider 实际 Token 与传输协作 Token 必须同时报告；
+非文本状态必须来自 StatePool 快照；未真实生成的 retrieval/embedding 类型保持为 0；
+领域提示词和资料快照只在 experiments 中，agent_runtime 不识别 Question A/B；
+预检阈值不能在看到结果后修改并重新解释同一证据。
+```
+
+阶段说明：`docs/experiments/v5.14b-fair-cost-quality-preflight.md`。
+
+运行说明：`experiments/v5.14b-fair-cost-quality-preflight/README.md`。

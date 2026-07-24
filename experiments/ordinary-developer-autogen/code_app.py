@@ -598,6 +598,12 @@ async def _run_tasks(
         "scenario_id": scenario_id,
         "sequence_run_id": sequence_run_id,
         "experiment_mode": experiment_mode,
+        "run_parameters": {
+            "temperature": temperature,
+            "max_turns": max_turns,
+            "provider_model": llm.model,
+            "provider_base_url": str(getattr(llm, "base_url", "")),
+        },
         "same_team_instance": True,
         "task_count": len(task_payloads),
         "valid_delivery_count": sum(
