@@ -52,6 +52,9 @@ from agent_runtime.memory.context_views import (
     infer_semantic_action,
 )
 from agent_runtime.reliability.final_delivery_guard import assess_final_delivery
+from agent_runtime.reliability.memory_adoption_guard import (
+    guard_memory_adoption_output,
+)
 from agent_runtime.state.state_pool import StatePoolLite, StateRef
 
 if TYPE_CHECKING:
@@ -82,7 +85,7 @@ MEMORY_SCOPE_ENV = "AGENTLITE_MEMORY_SCOPE"
 FINAL_DELIVERY_MARKER_ENV = "AGENTLITE_AUTOGEN_FINAL_MARKER"
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
 CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
-DRIVER_PHASE = "v5.13x"
+DRIVER_PHASE = "v5.13z"
 _AUTOGEN_REPEATED_INSTANCE_ID_RE = re.compile(
     r"^(?P<logical>.+)_(?P<run>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
     r"[0-9a-f]{4}-[0-9a-f]{12})_(?P=run)$",
@@ -252,6 +255,11 @@ class HookCallContext:
     display_restore_enabled: bool = False
     display_original_text: str = ""
     display_original_source: str = "user"
+    memory_adoption_audit_texts: list[str] = field(default_factory=list)
+    memory_adoption_guard: dict[str, Any] = field(default_factory=dict)
+    memory_adoption_guard_cache: dict[str, tuple[str, dict[str, Any]]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(slots=True)
@@ -633,6 +641,159 @@ class AutoGenHookManager:
                 )
             if records:
                 self._memory_injections_by_call[context.call_id] = records
+
+    def guard_call_result_if_needed(
+        self,
+        context: HookCallContext,
+        result: Any,
+    ) -> Any:
+        """Prevent superseded memory facts from leaving an Agent call."""
+
+        if context.target_kind != "agentchat_agent":
+            return result
+        if context.method_name not in {"on_messages", "on_messages_stream"}:
+            return result
+        output_text = _memory_guard_result_text(result)
+        if not output_text.strip():
+            return result
+        with self._memory_lock:
+            records = list(
+                self._memory_injections_by_call.get(context.call_id, ())
+            )
+        if not records:
+            return result
+
+        output_fingerprint = _text_fingerprint(output_text)
+        cached = context.memory_adoption_guard_cache.get(output_fingerprint)
+        if cached is not None:
+            guarded_text, guard_payload = cached
+            context.memory_adoption_guard = dict(guard_payload)
+            cloned = _clone_memory_guard_result(result, guarded_text)
+            if cloned is None:
+                raise RuntimeError(
+                    "AgentLite could not reapply a cached memory-adoption "
+                    "guard while preserving the native AutoGen result type."
+                )
+            return cloned
+
+        evidence_rows = [
+            {
+                "memory_ref": _memory_ref_payload(record.ref),
+                **_memory_adoption_evidence(
+                    memory_prompt_view=record.prompt_view,
+                    injected_prompt_view=record.injected_prompt_view,
+                    current_task_text=record.current_task_text,
+                    output_text=output_text,
+                    memory_id=record.ref.memory_id,
+                    memory_view_id=record.ref.memory_view_id,
+                    revision_guard=record.revision_guard,
+                ),
+            }
+            for record in records
+        ]
+        decision = guard_memory_adoption_output(
+            output_text=output_text,
+            evidence_rows=evidence_rows,
+        )
+        if not decision.changed:
+            return result
+
+        guarded_result = _clone_memory_guard_result(
+            result,
+            decision.output_text,
+        )
+        guard_payload = {
+            **decision.to_dict(),
+            "original_output_fingerprint": output_fingerprint,
+            "guarded_output_fingerprint": _text_fingerprint(
+                decision.output_text
+            ),
+            "compensation_event_count": 0,
+            "compensation_event_ids": [],
+        }
+        if guarded_result is None:
+            guard_payload.update(
+                {
+                    "status": "enforcement_failed",
+                    "blocked": True,
+                    "safe_to_continue": False,
+                    "allowed_next_step": "review_or_retry_only",
+                    "reasons": [
+                        *guard_payload.get("reasons", []),
+                        "native_result_clone_failed",
+                    ],
+                }
+            )
+            self.trace.write(
+                "autogen_memory_adoption_guard",
+                {
+                    "call_id": context.call_id,
+                    "task_id": context.task.task_id,
+                    "group_id": context.task.group_id,
+                    "agent_id": context.agent.agent_id,
+                    "role": context.agent.role,
+                    "target_kind": context.target_kind,
+                    "method": context.method_name,
+                    **guard_payload,
+                },
+            )
+            raise RuntimeError(
+                "AgentLite blocked an unsafe memory-derived output but could "
+                "not preserve the native AutoGen result type."
+            )
+
+        compensation_event_ids: list[str] = []
+        for record, evidence in zip(records, evidence_rows):
+            if str(evidence.get("status") or "") not in {"wrong", "mixed"}:
+                continue
+            resolved_ref = self.kernel.memory_store.resolve_ref(
+                record.ref.memory_id
+            )
+            if resolved_ref is None:
+                continue
+            event = self._safe_kernel_call(
+                "record_autogen_memory_downstream_compensation",
+                lambda ref=resolved_ref: (
+                    self.kernel.memory_store.record_downstream_compensation(
+                        ref,
+                        reason=(
+                            f"task={context.task.task_id};"
+                            f"call={context.call_id};"
+                            f"guard={decision.status};"
+                            f"output={output_fingerprint}"
+                        ),
+                        created_by="AgentLiteMemoryAdoptionGuard",
+                    )
+                ),
+            )
+            event_id = str(getattr(event, "event_id", "") or "")
+            if event_id:
+                compensation_event_ids.append(event_id)
+        guard_payload["compensation_event_count"] = len(
+            compensation_event_ids
+        )
+        guard_payload["compensation_event_ids"] = compensation_event_ids
+
+        context.memory_adoption_audit_texts.append(output_text)
+        context.memory_adoption_guard = guard_payload
+        context.memory_adoption_guard_cache[output_fingerprint] = (
+            decision.output_text,
+            dict(guard_payload),
+        )
+        self.trace.write(
+            "autogen_memory_adoption_guard",
+            {
+                "call_id": context.call_id,
+                "task_id": context.task.task_id,
+                "group_id": context.task.group_id,
+                "agent_id": context.agent.agent_id,
+                "role": context.agent.role,
+                "target_kind": context.target_kind,
+                "method": context.method_name,
+                **guard_payload,
+            },
+        )
+        return guarded_result
 
     def _record_memory_adoption_feedback(
         self,
@@ -1167,10 +1328,18 @@ class AutoGenHookManager:
     def record_call_end(self, context: HookCallContext, result: Any) -> None:
         decoded_messages = self.codec.decode_many(result)
         text = self.codec.render_text(decoded_messages) or _extract_text(result)
+        adoption_audit_text = "\n".join(
+            dict.fromkeys(context.memory_adoption_audit_texts)
+        )
         self._record_memory_adoption_feedback(
             context=context,
-            output_text=text,
+            output_text=adoption_audit_text or text,
         )
+        guard_metadata = dict(context.memory_adoption_guard)
+        guard_blocked = guard_metadata.get("status") in {
+            "blocked",
+            "enforcement_failed",
+        }
         state_refs: list[Any] = []
         if _has_semantic_payload(decoded_messages, text):
             written_state_refs = self._safe_kernel_call(
@@ -1188,6 +1357,8 @@ class AutoGenHookManager:
                             "target_kind": context.target_kind,
                             "method": context.method_name,
                             "native_result_type": type(result).__name__,
+                            "memory_adoption_guard": guard_metadata,
+                            "memory_adoption_original_text": adoption_audit_text,
                             "autogen_decoded_messages": [
                                 message.to_dict() for message in decoded_messages
                             ],
@@ -1204,12 +1375,14 @@ class AutoGenHookManager:
             )
             if isinstance(ref_payload, dict):
                 state_ref_payload.append(ref_payload)
-        admission_report = self._promote_autogen_output_to_memory(
-            context=context,
-            decoded_messages=decoded_messages,
-            text=text,
-            state_refs=list(state_refs),
-        )
+        admission_report = None
+        if not guard_blocked:
+            admission_report = self._promote_autogen_output_to_memory(
+                context=context,
+                decoded_messages=decoded_messages,
+                text=text,
+                state_refs=list(state_refs),
+            )
         admitted_refs = _admission_memory_refs(admission_report)
         admitted_memory_refs = [
             _memory_ref_payload(ref) for ref in admitted_refs
@@ -1231,6 +1404,7 @@ class AutoGenHookManager:
                     "admission_status",
                     "",
                 ),
+                "memory_adoption_guard": guard_metadata,
                 "decoded_messages": [
                     message.to_dict() for message in decoded_messages
                 ],
@@ -1257,7 +1431,10 @@ class AutoGenHookManager:
                 "record_autogen_capability_feedback",
                 lambda: self.kernel.record_agent_execution(
                     agent_id=context.agent.agent_id,
-                    success=_has_semantic_payload(decoded_messages, text),
+                    success=(
+                        _has_semantic_payload(decoded_messages, text)
+                        and not guard_blocked
+                    ),
                     schema_valid=bool(text.strip() or decoded_messages),
                     action=context.semantic_action,
                     cost_tokens=(
@@ -4958,9 +5135,16 @@ class AutoGenHookManager:
                         kwargs,
                     )
                     async for item in original(instance, *args, **kwargs):
-                        last_item = item
-                        self.record_stream_item(context, item)
-                        yield self.restore_call_result_for_display(context, item)
+                        guarded_item = self.guard_call_result_if_needed(
+                            context,
+                            item,
+                        )
+                        last_item = guarded_item
+                        self.record_stream_item(context, guarded_item)
+                        yield self.restore_call_result_for_display(
+                            context,
+                            guarded_item,
+                        )
                     self.record_call_end(context, last_item)
                 except Exception as exc:
                     self.record_call_error(context, exc)
@@ -5015,6 +5199,7 @@ class AutoGenHookManager:
                         )
                         send_message_entered = False
                     result = self.rewrite_call_result_if_safe(context, result)
+                    result = self.guard_call_result_if_needed(context, result)
                     self.record_call_end(context, result)
                     return self.restore_call_result_for_display(context, result)
                 except Exception as exc:
@@ -5053,9 +5238,16 @@ class AutoGenHookManager:
                         kwargs,
                     )
                     for item in original(instance, *args, **kwargs):
-                        last_item = item
-                        self.record_stream_item(context, item)
-                        yield self.restore_call_result_for_display(context, item)
+                        guarded_item = self.guard_call_result_if_needed(
+                            context,
+                            item,
+                        )
+                        last_item = guarded_item
+                        self.record_stream_item(context, guarded_item)
+                        yield self.restore_call_result_for_display(
+                            context,
+                            guarded_item,
+                        )
                     self.record_call_end(context, last_item)
                 except Exception as exc:
                     self.record_call_error(context, exc)
@@ -5086,6 +5278,8 @@ class AutoGenHookManager:
                     kwargs,
                 )
                 result = original(instance, *args, **kwargs)
+                result = self.rewrite_call_result_if_safe(context, result)
+                result = self.guard_call_result_if_needed(context, result)
                 self.record_call_end(context, result)
                 return self.restore_call_result_for_display(context, result)
             except Exception as exc:
@@ -5968,7 +6162,8 @@ def _is_simple_text_message(message: Any) -> bool:
             message.get("content"),
             str,
         )
-    if type(message).__name__ != "TextMessage":
+    message_type = str(getattr(message, "type", "") or type(message).__name__)
+    if message_type != "TextMessage":
         return False
     return isinstance(getattr(message, "content", None), str)
 
@@ -5981,6 +6176,45 @@ def _text_message_content(message: Any) -> str:
 
 def _clone_text_message_with_content(message: Any, content: str) -> Any | None:
     return _clone_message_with_content(message, content)
+
+
+def _memory_guard_result_text(result: Any) -> str:
+    if result is None:
+        return ""
+    result_type = str(
+        _field_value(result, "type") or type(result).__name__
+    )
+    if any(
+        marker in result_type.casefold()
+        for marker in ("chunk", "delta", "streaming")
+    ):
+        return ""
+    if isinstance(result, str):
+        return result
+    if _is_simple_text_message(result):
+        return _text_message_content(result)
+    chat_message = _field_value(result, "chat_message")
+    if _is_simple_text_message(chat_message):
+        return _text_message_content(chat_message)
+    return ""
+
+
+def _clone_memory_guard_result(result: Any, content: str) -> Any | None:
+    if isinstance(result, str):
+        return content
+    if _is_simple_text_message(result):
+        return _clone_text_message_with_content(result, content)
+    chat_message = _field_value(result, "chat_message")
+    if not _is_simple_text_message(chat_message):
+        return None
+    cloned_message = _clone_text_message_with_content(chat_message, content)
+    if cloned_message is None:
+        return None
+    return _clone_message_with_text_field(
+        result,
+        field_name="chat_message",
+        content=cloned_message,
+    )
 
 
 def _clone_message_with_content(message: Any, content: str) -> Any | None:
@@ -6725,6 +6959,14 @@ def _structured_memory_adoption_evidence(
         "matched_output_spans": [
             str(match.get("raw_text") or match.get("summary") or "")
             for _, match in [*matched_active, *matched_historical][:5]
+        ],
+        "matched_active_output_spans": [
+            str(match.get("raw_text") or match.get("summary") or "")
+            for _, match in matched_active[:5]
+        ],
+        "matched_historical_output_spans": [
+            str(match.get("raw_text") or match.get("summary") or "")
+            for _, match in matched_historical[:5]
         ],
         "classification_reason": (
             "structured_active_and_historical_values"

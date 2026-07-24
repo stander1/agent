@@ -266,14 +266,21 @@ def verify_acceptance(
             f"continuity_memory_injection={continuity_injected}"
         ),
     )
-    if report_version in {"v5.13u", "v5.13v", "v5.13w", "v5.13x", "v5.13y"}:
+    if report_version in {
+        "v5.13u",
+        "v5.13v",
+        "v5.13w",
+        "v5.13x",
+        "v5.13y",
+        "v5.13z",
+    }:
         _append_v513u_evidence_checks(
             checks,
             token_summary=token_summary,
             events=events,
             expected_attribution_mode=(
                 "ccf_v2_semantic_key_value_rules"
-                if report_version in {"v5.13x", "v5.13y"}
+                if report_version in {"v5.13x", "v5.13y", "v5.13z"}
                 else (
                     "active_and_historical_fact_rules_v3"
                     if report_version == "v5.13w"
@@ -285,21 +292,28 @@ def verify_acceptance(
                 )
             ),
         )
-    if report_version in {"v5.13v", "v5.13w", "v5.13x", "v5.13y"}:
+    if report_version in {
+        "v5.13v",
+        "v5.13w",
+        "v5.13x",
+        "v5.13y",
+        "v5.13z",
+    }:
         _append_v513v_evidence_checks(
             checks,
             events=events,
             quality=quality,
             comparison=comparison,
-            structured_attribution=report_version in {"v5.13x", "v5.13y"},
+            structured_attribution=report_version
+            in {"v5.13x", "v5.13y", "v5.13z"},
         )
-    if report_version in {"v5.13w", "v5.13x", "v5.13y"}:
+    if report_version in {"v5.13w", "v5.13x", "v5.13y", "v5.13z"}:
         _append_v513w_evidence_checks(
             checks,
             token_summary=token_summary,
             events=events,
         )
-    if report_version in {"v5.13x", "v5.13y"}:
+    if report_version in {"v5.13x", "v5.13y", "v5.13z"}:
         _append_v513x_fact_memory_checks(
             checks,
             token_summary=token_summary,
@@ -699,8 +713,41 @@ def _append_v513v_evidence_checks(
                     for value in row.get("attribution_margins") or []
                 ]
                 attributed_fact_count += len(fingerprints)
-                if not fingerprints or len(margins) != len(fingerprints) or any(
-                    margin <= 0.0 for margin in margins
+                if structured_attribution:
+                    historical_fingerprints = list(
+                        row.get("matched_historical_fact_fingerprints") or []
+                    )
+                    historical_scores = [
+                        float(value)
+                        for value in row.get(
+                            "historical_output_match_scores"
+                        )
+                        or []
+                    ]
+                    status = str(row.get("status") or "")
+                    active_valid = bool(fingerprints) and (
+                        len(margins) == len(fingerprints)
+                        and all(margin > 0.0 for margin in margins)
+                    )
+                    historical_valid = bool(historical_fingerprints) and (
+                        len(historical_scores)
+                        == len(historical_fingerprints)
+                        and all(score > 0.0 for score in historical_scores)
+                    )
+                    if (
+                        (status == "useful" and not active_valid)
+                        or (status == "wrong" and not historical_valid)
+                        or (
+                            status == "mixed"
+                            and not (active_valid and historical_valid)
+                        )
+                        or status not in {"useful", "wrong", "mixed"}
+                    ):
+                        malformed_calls.append(call_id)
+                elif (
+                    not fingerprints
+                    or len(margins) != len(fingerprints)
+                    or any(margin <= 0.0 for margin in margins)
                 ):
                     malformed_calls.append(call_id)
     _check(

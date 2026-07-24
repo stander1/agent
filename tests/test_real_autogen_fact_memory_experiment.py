@@ -170,6 +170,7 @@ class RealAutoGenFactMemoryExperimentTest(unittest.TestCase):
                     "evidence": [
                         {
                             "adopted": True,
+                            "status": "useful",
                             "explicit_reference": False,
                             "attribution_threshold": 1.0,
                             "current_task_overlap_threshold": 1.0,
@@ -177,6 +178,90 @@ class RealAutoGenFactMemoryExperimentTest(unittest.TestCase):
                             "matched_fact_fingerprints": ["fact123"],
                             "attribution_margins": [1.0],
                         }
+                    ],
+                },
+            }
+        ]
+        quality = {
+            "technical_review_applied": True,
+            "evaluation_judge_usage": {
+                "primary": {"total_tokens": 100},
+                "technical": {"total_tokens": 100},
+                "included_in_runtime_collaboration_cost": False,
+            },
+            "by_group": {
+                group: {
+                    "technical_review_applied": True,
+                    "technical_mean_score": 8.0,
+                }
+                for group in ("native", "observed", "managed")
+            },
+        }
+        comparison = {
+            "summary": {
+                "normalized_common_calls": {
+                    "available": True,
+                    "common_call_count": 4,
+                    "groups": {
+                        group: {"matched_call_count": 4}
+                        for group in ("native", "observed", "managed")
+                    },
+                    "managed_vs_native": {
+                        "total": {"token_delta": -10}
+                    },
+                }
+            }
+        }
+
+        verifier._append_v513v_evidence_checks(
+            checks,
+            events=events,
+            quality=quality,
+            comparison=comparison,
+            structured_attribution=True,
+        )
+
+        self.assertEqual(len(checks), 4)
+        self.assertTrue(all(check.passed for check in checks))
+
+    def test_v513y_quality_gate_accepts_detected_historical_value(self) -> None:
+        verifier = load_module(
+            BASE_EXPERIMENT / "verify_acceptance.py",
+            "v513y_historical_quality_verify",
+        )
+        checks = []
+        events = [
+            {
+                "event_type": "autogen_memory_adoption",
+                "payload": {
+                    "call_id": "call_wrong",
+                    "current_task_source": "team_task_by_group",
+                    "current_task_fingerprint": "task123",
+                    "evidence": [
+                        {
+                            "adopted": True,
+                            "status": "wrong",
+                            "explicit_reference": False,
+                            "attribution_threshold": 1.0,
+                            "current_task_overlap_threshold": 1.0,
+                            "current_task_duplicate_fact_count": 1,
+                            "matched_fact_fingerprints": [],
+                            "attribution_margins": [],
+                            "matched_historical_fact_fingerprints": [
+                                "old_fact"
+                            ],
+                            "historical_output_match_scores": [1.0],
+                        },
+                        {
+                            "adopted": True,
+                            "status": "useful",
+                            "explicit_reference": False,
+                            "attribution_threshold": 1.0,
+                            "current_task_overlap_threshold": 1.0,
+                            "current_task_duplicate_fact_count": 0,
+                            "matched_fact_fingerprints": ["active_fact"],
+                            "attribution_margins": [1.0],
+                        },
                     ],
                 },
             }

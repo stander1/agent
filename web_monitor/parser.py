@@ -605,6 +605,11 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "mixed_memory_hit_count": 0,
         "unassessed_memory_hit_count": 0,
         "memory_adoption_event_count": 0,
+        "memory_adoption_guard_event_count": 0,
+        "memory_adoption_rule_repair_count": 0,
+        "memory_adoption_blocked_count": 0,
+        "memory_adoption_enforcement_failure_count": 0,
+        "memory_adoption_repaired_fact_count": 0,
         "memory_current_task_duplicate_fact_count": 0,
         "memory_attributed_fact_count": 0,
         "memory_supported_output_count": 0,
@@ -675,7 +680,7 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "shadow_potential_savings_ratio": 0.0,
         "shadow_event_count": 0,
         "event_count": 0,
-        "source": "autogen_trace_fact_memory_v9",
+        "source": "autogen_trace_fact_memory_v10",
     }
     actual_event_types = {
         "autogen_agent_input_real_rewrite",
@@ -799,6 +804,19 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
                     breakdown["memory_attributed_fact_count"] += _int(
                         row.get("matched_fact_count")
                     )
+            continue
+        if event_type == "autogen_memory_adoption_guard":
+            breakdown["memory_adoption_guard_event_count"] += 1
+            status = str(payload.get("status") or "")
+            if status == "rule_repaired":
+                breakdown["memory_adoption_rule_repair_count"] += 1
+            elif status == "blocked":
+                breakdown["memory_adoption_blocked_count"] += 1
+            elif status == "enforcement_failed":
+                breakdown["memory_adoption_enforcement_failure_count"] += 1
+            breakdown["memory_adoption_repaired_fact_count"] += _int(
+                payload.get("repaired_fact_count")
+            )
             continue
         if event_type == "autogen_memory_candidate":
             assessment = (

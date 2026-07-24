@@ -1178,6 +1178,26 @@ class MemoryStoreLite:
             if event.target_memory_id == memory_id
         ]
 
+    def record_downstream_compensation(
+        self,
+        memory_ref: MemoryRef,
+        *,
+        reason: str,
+        created_by: str = "MemoryAdoptionGuard",
+    ) -> CompensatingEvent:
+        """Audit a corrected downstream use without deprecating active memory."""
+
+        memory = self._memories[memory_ref.memory_id]
+        event = self._record_compensating_event(
+            event_type="downstream_fact_correction",
+            target_memory=memory,
+            reason=reason,
+            replacement_memory_id=None,
+            created_by=created_by,
+        )
+        self._persist_snapshot()
+        return event
+
     def memory_references(
         self, memory_ref: MemoryRef, ref_type: str | None = None
     ) -> list[MemoryReferenceRecord]:

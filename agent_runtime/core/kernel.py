@@ -590,6 +590,51 @@ class CollaborationKernel:
                 )
             ]
 
+        memory_adoption_guard = output.metadata.get(
+            "memory_adoption_guard",
+            {},
+        )
+        if memory_adoption_guard.get("status") in {
+            "blocked",
+            "enforcement_failed",
+        }:
+            return [
+                commit_state(
+                    state_type="failure_state",
+                    payload={
+                        "error_type": "memory_adoption_conflict",
+                        "contract_status": "degraded_fallback",
+                        "semantic_keys": memory_adoption_guard.get(
+                            "semantic_keys",
+                            [],
+                        ),
+                        "active_facts": memory_adoption_guard.get(
+                            "active_facts",
+                            [],
+                        ),
+                        "reasons": memory_adoption_guard.get("reasons", []),
+                        "allowed_next_step": "review_or_retry_only",
+                        "safe_to_continue": False,
+                    },
+                    summary=(
+                        f"{agent.agent_id} output adopted a superseded memory "
+                        "fact and requires refresh or review."
+                    ),
+                    usage_hint="review_or_retry_only",
+                    contains_embedding_refs=False,
+                    tier="hot",
+                    access_policy="prompt_view_only",
+                    audit_payload={
+                        "guarded_content": output.content,
+                        "original_content": output.metadata.get(
+                            "memory_adoption_original_text",
+                            "",
+                        ),
+                        "memory_adoption_guard": memory_adoption_guard,
+                    },
+                )
+            ]
+
         if agent.agent_id == "retriever":
             embedding_payload = build_embedding_state_payload(task)
             embedding_ref = commit_state(
@@ -665,6 +710,11 @@ class CollaborationKernel:
                     "sha256": sha256,
                     "content": output.content,
                     "content_chars": len(output.content),
+                    "memory_adoption_guard": memory_adoption_guard,
+                    "original_content": output.metadata.get(
+                        "memory_adoption_original_text",
+                        "",
+                    ),
                 },
             )
         ]

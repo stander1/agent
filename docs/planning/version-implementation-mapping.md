@@ -4625,3 +4625,34 @@ Provider 实际 Token；
 详细说明：`docs/experiments/v5.13y-real-autogen-fact-memory.md`。
 
 运行入口：`experiments/v5.13y-real-autogen-fact-memory/run_openeuler.sh`。
+
+## 63. v5.13z：错误记忆采用修复闭环
+
+v5.13z 解决 v5.13y 暴露的实际缺口：运行时已经能够识别 Agent 输出采用了
+过期事实，但原先只在输出传播后记录 `wrong/mixed`，不能阻止旧事实进入下游。
+
+实现映射：
+
+- `agent_runtime/reliability/memory_adoption_guard.py`：新增规则优先的通用采用后
+  守卫；只在结构化证据定位到历史标量和输出片段时精确替换；
+- `agent_runtime/drivers/autogen.py`：在 `on_messages` 和
+  `on_messages_stream` 的完整消息离开 Agent 前执行守卫，同时保留修复前正文
+  供采用审计；
+- `agent_runtime/core/kernel.py`：无法安全修复时写入 `failure_state`，
+  `allowed_next_step=review_or_retry_only`，并禁止该结果进入记忆候选流程；
+- `agent_runtime/memory/memory_store.py`：发布
+  `downstream_fact_correction` 补偿事件；当前 MemoryView 正确时不错误执行
+  `soft_deprecate`；
+- `web_monitor/parser.py` 与
+  `agent_runtime/eval/autogen_session_report.py`：单独展示规则修复、阻断、执行
+  失败和已修复事实数量；
+- `experiments/v5.13z-memory-adoption-repair/`：提供领域无关、角色名无关的
+  确定性门禁和 openEuler 证据打包入口。
+
+该实现遵守最终创新方案的边界：规则优先；不确定冲突交给 Reviewer 或有限重试；
+不硬回滚已经发生的下游执行；不删除历史证据；业务 Agent 不直接面对未裁决的新旧
+事实；修复事件与原始错误采用均可审计。
+
+详细说明：`docs/experiments/v5.13z-memory-adoption-repair.md`。
+
+工程验收：`experiments/v5.13z-memory-adoption-repair/README.md`。

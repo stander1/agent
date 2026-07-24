@@ -364,6 +364,21 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
     memory_adoption_event_count = _int(
         token_summary.get("memory_adoption_event_count")
     )
+    memory_adoption_guard_event_count = _int(
+        token_summary.get("memory_adoption_guard_event_count")
+    )
+    memory_adoption_rule_repair_count = _int(
+        token_summary.get("memory_adoption_rule_repair_count")
+    )
+    memory_adoption_blocked_count = _int(
+        token_summary.get("memory_adoption_blocked_count")
+    )
+    memory_adoption_enforcement_failure_count = _int(
+        token_summary.get("memory_adoption_enforcement_failure_count")
+    )
+    memory_adoption_repaired_fact_count = _int(
+        token_summary.get("memory_adoption_repaired_fact_count")
+    )
     memory_current_task_duplicate_fact_count = _int(
         token_summary.get("memory_current_task_duplicate_fact_count")
     )
@@ -747,6 +762,31 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
             "agentlite_memory_adoption_event_count",
             memory_adoption_event_count,
             "下游输出完成后执行记忆采用归因的次数",
+        ),
+        _row(
+            "agentlite_memory_adoption_guard_event_count",
+            memory_adoption_guard_event_count,
+            "Superseded-memory output guard decisions.",
+        ),
+        _row(
+            "agentlite_memory_adoption_rule_repair_count",
+            memory_adoption_rule_repair_count,
+            "Outputs repaired by deterministic active-value replacement.",
+        ),
+        _row(
+            "agentlite_memory_adoption_blocked_count",
+            memory_adoption_blocked_count,
+            "Unsafe outputs replaced by a conflict alert.",
+        ),
+        _row(
+            "agentlite_memory_adoption_enforcement_failure_count",
+            memory_adoption_enforcement_failure_count,
+            "Unsafe outputs that could not preserve the native result type.",
+        ),
+        _row(
+            "agentlite_memory_adoption_repaired_fact_count",
+            memory_adoption_repaired_fact_count,
+            "Superseded fact occurrences repaired before propagation.",
         ),
         _row(
             "agentlite_memory_current_task_duplicate_fact_count",
