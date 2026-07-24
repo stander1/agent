@@ -664,6 +664,10 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "capability_action_counts": {},
         "memory_candidate_deduplicated_count": 0,
         "memory_candidate_deduplicated_tokens": 0,
+        "memory_admission_deduplicated_claim_count": 0,
+        "memory_admission_deduplicated_memory_count": 0,
+        "memory_evidence_reference_merge_count": 0,
+        "model_visible_protocol_marker_count": 0,
         "state_memory_bridge_event_count": 0,
         "raw_claim_count": 0,
         "provisional_claim_count": 0,
@@ -854,6 +858,15 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
             breakdown["active_memory_value_selection_count"] += _int(
                 payload.get("active_value_selection_count")
             )
+            breakdown["memory_admission_deduplicated_claim_count"] += _int(
+                payload.get("deduplicated_claim_count")
+            )
+            breakdown["memory_admission_deduplicated_memory_count"] += _int(
+                payload.get("deduplicated_memory_count")
+            )
+            breakdown["memory_evidence_reference_merge_count"] += _int(
+                payload.get("evidence_reference_merge_count")
+            )
             continue
         if event_type == "autogen_model_client_usage":
             usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
@@ -894,6 +907,10 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         ) > 0
         if applied:
             rewrite_applied_events += 1
+            if event_type == "autogen_agent_input_real_rewrite":
+                breakdown["model_visible_protocol_marker_count"] += _int(
+                    payload.get("model_visible_protocol_marker_count")
+                )
             if (
                 event_type == "autogen_agent_input_real_rewrite"
                 and continuity_required

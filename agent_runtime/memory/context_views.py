@@ -761,20 +761,9 @@ def _render_context_view(
 ) -> str:
     if not units:
         return ""
-    lines = [
-        "[minimal_context_view "
-        f"consumer={consumer.consumer_id} "
-        f"action={action} "
-        f"profile_version={consumer.profile_version}]"
-    ]
-    active_source: tuple[int, str] | None = None
+    del consumer, action
+    lines = ["CURRENT_TASK_CONTEXT:"]
     for unit in units:
-        source = (unit.source_index, unit.view_id)
-        if source != active_source:
-            lines.append(
-                f"source_view={unit.view_id}; slot={unit.slot_id}; claim={unit.claim_id}"
-            )
-            active_source = source
         lines.append(f"- {unit.text}")
     return "\n".join(lines)
 

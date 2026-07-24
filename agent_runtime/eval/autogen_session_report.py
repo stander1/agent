@@ -514,6 +514,18 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
     memory_deduplicated_tokens = _int(
         token_summary.get("memory_candidate_deduplicated_tokens")
     )
+    memory_admission_deduplicated_claim_count = _int(
+        token_summary.get("memory_admission_deduplicated_claim_count")
+    )
+    memory_admission_deduplicated_memory_count = _int(
+        token_summary.get("memory_admission_deduplicated_memory_count")
+    )
+    memory_evidence_reference_merge_count = _int(
+        token_summary.get("memory_evidence_reference_merge_count")
+    )
+    model_visible_protocol_marker_count = _int(
+        token_summary.get("model_visible_protocol_marker_count")
+    )
     state_memory_bridge_event_count = _int(
         token_summary.get("state_memory_bridge_event_count")
     )
@@ -829,6 +841,26 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
             "被内容去重规则从候选 Prompt View 中移除的记忆 Token",
         ),
         _row(
+            "agentlite_memory_admission_deduplicated_claim_count",
+            memory_admission_deduplicated_claim_count,
+            "跨候选发现等价事实后复用已有 ClaimCard 的次数",
+        ),
+        _row(
+            "agentlite_memory_admission_deduplicated_memory_count",
+            memory_admission_deduplicated_memory_count,
+            "语义准入去重避免重复创建 MemoryObject 的次数",
+        ),
+        _row(
+            "agentlite_memory_evidence_reference_merge_count",
+            memory_evidence_reference_merge_count,
+            "新证据谱系合并到已有记忆对象的次数",
+        ),
+        _row(
+            "agentlite_model_visible_protocol_marker_count",
+            model_visible_protocol_marker_count,
+            "改写后的 Agent 模型输入中残留的 AgentLite 传输协议标记数",
+        ),
+        _row(
             "agentlite_state_memory_bridge_event_count",
             state_memory_bridge_event_count,
             "状态候选进入 TLC-Memory 准入与事实压缩链路的次数",
@@ -902,6 +934,9 @@ def _state_summary(snapshot: dict[str, Any]) -> dict[str, Any]:
     structured_non_text_count = 0
     contains_embedding_refs_count = 0
     total_size_bytes = 0
+    semantic_identity_hashes: set[str] = set()
+    state_dedup_reuse_count = 0
+    routing_metadata_state_count = 0
     for item in states:
         if not isinstance(item, dict):
             continue
@@ -916,8 +951,28 @@ def _state_summary(snapshot: dict[str, Any]) -> dict[str, Any]:
             bool(item.get("contains_embedding_refs"))
         )
         total_size_bytes += _int(item.get("size_bytes"))
+        semantic_identity_hash = str(
+            item.get("semantic_identity_hash") or ""
+        ).strip()
+        if semantic_identity_hash:
+            semantic_identity_hashes.add(semantic_identity_hash)
+        state_dedup_reuse_count += _int(item.get("dedup_reuse_count"))
+        summary = str(item.get("summary") or "")
+        routing_metadata_state_count += int(
+            state_type == "artifact_state"
+            and (
+                "DefaultTopicId(" in summary
+                or "AgentId(" in summary
+            )
+        )
     return {
         "state_count": sum(state_types.values()),
+        "logical_state_write_count": (
+            sum(state_types.values()) + state_dedup_reuse_count
+        ),
+        "unique_semantic_identity_count": len(semantic_identity_hashes),
+        "state_dedup_reuse_count": state_dedup_reuse_count,
+        "routing_metadata_state_count": routing_metadata_state_count,
         "state_type_counts": dict(sorted(state_types.items())),
         "payload_kind_counts": dict(sorted(payload_kinds.items())),
         "structured_non_text_count": structured_non_text_count,
@@ -946,6 +1001,18 @@ def _append_state_summary_markdown(
                 f"`{_int(summary.get('contains_embedding_refs_count'))}`"
             ),
             f"- total_size_bytes: `{_int(summary.get('total_size_bytes'))}`",
+            (
+                "- logical_state_write_count: "
+                f"`{_int(summary.get('logical_state_write_count'))}`"
+            ),
+            (
+                "- state_dedup_reuse_count: "
+                f"`{_int(summary.get('state_dedup_reuse_count'))}`"
+            ),
+            (
+                "- routing_metadata_state_count: "
+                f"`{_int(summary.get('routing_metadata_state_count'))}`"
+            ),
             "",
             "| 状态类型 | 数量 |",
             "|---|---:|",

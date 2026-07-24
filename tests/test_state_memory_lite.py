@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from agent_runtime.core.deliverable_schema import schema_coverage, schema_for_task
@@ -9,6 +10,73 @@ from agent_runtime.state.state_pool import StatePoolLite
 
 
 class StatePoolLiteTest(unittest.TestCase):
+    def test_concurrent_semantic_dedup_reports_one_physical_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = StatePoolLite(Path(tmp))
+
+            def write(index: int) -> tuple[str, bool]:
+                state_ref, _, reused = pool.write_state_with_report(
+                    task_id=f"T{index}",
+                    source_agent=f"worker_{index}",
+                    state_type="artifact_state",
+                    payload={
+                        "artifact_id": f"artifact_{index}",
+                        "sha256": "same",
+                        "summary": "shared prompt-safe view",
+                    },
+                    summary=f"worker_{index} artifact",
+                    usage_hint="artifact_summary",
+                    tier="cold",
+                    audit_payload={"content": "same concurrent payload"},
+                )
+                return state_ref.state_id, reused
+
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                results = list(executor.map(write, range(8)))
+
+            self.assertEqual(len({state_id for state_id, _ in results}), 1)
+            self.assertEqual(sum(int(reused) for _, reused in results), 7)
+            state = pool.snapshot()["states"][0]
+            self.assertEqual(state["dedup_reuse_count"], 7)
+
+    def test_semantically_identical_artifacts_reuse_one_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = StatePoolLite(Path(tmp))
+            first_ref, _ = pool.write_state(
+                task_id="T1",
+                source_agent="runtime_a",
+                state_type="artifact_state",
+                payload={
+                    "artifact_id": "artifact_T1_runtime_a",
+                    "sha256": "same",
+                    "summary": "same prompt-safe view",
+                },
+                summary="runtime_a artifact",
+                usage_hint="artifact_summary",
+                tier="cold",
+                audit_payload={"content": "same complete business payload"},
+            )
+            second_ref, second = pool.write_state(
+                task_id="T2",
+                source_agent="runtime_b",
+                state_type="artifact_state",
+                payload={
+                    "artifact_id": "artifact_T2_runtime_b",
+                    "sha256": "same",
+                    "summary": "same prompt-safe view",
+                },
+                summary="runtime_b artifact",
+                usage_hint="artifact_summary",
+                tier="cold",
+                audit_payload={"content": "same complete business payload"},
+            )
+
+            self.assertEqual(second_ref.state_id, first_ref.state_id)
+            self.assertEqual(second.dedup_reuse_count, 1)
+            self.assertEqual(second.reuse_task_ids, ["T2"])
+            self.assertEqual(second.reuse_source_agents, ["runtime_b"])
+            self.assertEqual(len(pool.snapshot()["states"]), 1)
+
     def test_write_and_render_retrieval_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             pool = StatePoolLite(Path(tmp))
@@ -127,6 +195,54 @@ class StatePoolLiteTest(unittest.TestCase):
 
 
 class MemoryStoreLiteTest(unittest.TestCase):
+    def test_equivalent_claim_across_candidates_reuses_memory(self) -> None:
+        store = MemoryStoreLite()
+        kwargs = {
+            "source_agent": "analyst",
+            "task_topic": "release readiness",
+            "memory_card": {
+                "summary": "The timeout is 30 seconds.",
+                "tags": ["runtime"],
+                "reuse_scope": ["release"],
+                "confidence": 0.9,
+                "importance_hint": 0.8,
+                "coverage_score": 0.8,
+            },
+            "claim_cards": [
+                {
+                    "subject": "runtime",
+                    "predicate": "timeout",
+                    "object": "30",
+                    "scope": "request_timeout_seconds",
+                    "confidence": 0.9,
+                }
+            ],
+            "tags": ["runtime", "release"],
+            "slot_hint": "runtime_config",
+        }
+        first = store.write_memory_candidate_with_report(
+            task_id="T1",
+            source_state_ids=["state_1"],
+            evidence_refs=["state_1"],
+            **kwargs,
+        )
+        second = store.write_memory_candidate_with_report(
+            task_id="T2",
+            source_state_ids=["state_2"],
+            evidence_refs=["state_2"],
+            **kwargs,
+        )
+
+        self.assertEqual(first.memory_write_count, 1)
+        self.assertEqual(second.memory_write_count, 0)
+        self.assertEqual(second.deduplicated_claim_count, 1)
+        self.assertEqual(second.deduplicated_memory_count, 1)
+        self.assertEqual(second.memory_ref.memory_id, first.memory_ref.memory_id)
+        snapshot = store.snapshot()
+        self.assertEqual(len(snapshot["memories"]), 1)
+        self.assertEqual(len(snapshot["claim_cards"]), 1)
+        self.assertEqual(len(snapshot["memory_views"]), 1)
+
     def test_write_search_and_render_memory(self) -> None:
         store = MemoryStoreLite()
         ref = store.write_memory(

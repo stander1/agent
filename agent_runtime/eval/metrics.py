@@ -55,6 +55,9 @@ class TaskMetricRow:
     memory_rejected_count: int = 0
     memory_pending_count: int = 0
     memory_audit_only_count: int = 0
+    memory_deduplicated_claim_count: int = 0
+    memory_deduplicated_memory_count: int = 0
+    memory_evidence_reference_merge_count: int = 0
     admission_unresolved_slot_count: int = 0
     claim_to_memoryview_count: int = 0
     memory_conflict_detected_count: int = 0
@@ -327,6 +330,9 @@ class MetricsCollector:
         memory_unresolved_conflict_count: int = 0,
         active_memory_value_selection_count: int = 0,
         unresolved_scope_count: int = 0,
+        memory_deduplicated_claim_count: int = 0,
+        memory_deduplicated_memory_count: int = 0,
+        memory_evidence_reference_merge_count: int = 0,
     ) -> None:
         row = self._row(task_id, round_id, mode)
         row.memory_candidate_count += memory_candidate_count
@@ -349,6 +355,11 @@ class MetricsCollector:
             active_memory_value_selection_count
         )
         row.unresolved_scope_count += unresolved_scope_count
+        row.memory_deduplicated_claim_count += memory_deduplicated_claim_count
+        row.memory_deduplicated_memory_count += memory_deduplicated_memory_count
+        row.memory_evidence_reference_merge_count += (
+            memory_evidence_reference_merge_count
+        )
 
     def record_memory_search_backend(
         self,

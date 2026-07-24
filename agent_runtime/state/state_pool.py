@@ -5,7 +5,7 @@ import json
 import os
 import threading
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -145,6 +145,10 @@ class StateObject:
     last_accessed_at: str | None = None
     status_updated_at: str | None = None
     outdated_reason: str = ""
+    semantic_identity_hash: str = ""
+    dedup_reuse_count: int = 0
+    reuse_task_ids: list[str] = field(default_factory=list)
+    reuse_source_agents: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -433,6 +437,8 @@ class StatePoolLite:
         )
         self._ensure_storage_dirs()
         self._states: dict[str, StateObject] = {}
+        self._semantic_state_index: dict[str, str] = {}
+        self._write_lock = threading.RLock()
         self._hot_payloads: dict[str, dict[str, Any]] = {}
         self._tombstones: dict[str, dict[str, Any]] = {}
         self._lineage_state_ids: set[str] = set()
@@ -475,8 +481,139 @@ class StatePoolLite:
         confidence: float | None = None,
         novelty: float | None = None,
     ) -> tuple[StateRef, StateObject]:
+        state_ref, state, _ = self.write_state_with_report(
+            task_id=task_id,
+            source_agent=source_agent,
+            state_type=state_type,
+            payload=payload,
+            summary=summary,
+            usage_hint=usage_hint,
+            payload_kind=payload_kind,
+            contains_embedding_refs=contains_embedding_refs,
+            tier=tier,
+            lifecycle=lifecycle,
+            access_policy=access_policy,
+            audit_payload=audit_payload,
+            dependency_ref_count=dependency_ref_count,
+            retry_ref_count=retry_ref_count,
+            gc_policy=gc_policy,
+            downstream_need=downstream_need,
+            confidence=confidence,
+            novelty=novelty,
+        )
+        return state_ref, state
+
+    def write_state_with_report(
+        self,
+        *,
+        task_id: str,
+        source_agent: str,
+        state_type: str,
+        payload: dict[str, Any],
+        summary: str,
+        usage_hint: str,
+        payload_kind: str = "structured_non_text",
+        contains_embedding_refs: bool = False,
+        tier: StateTier | None = None,
+        lifecycle: str = "active",
+        access_policy: str = "prompt_view_only",
+        audit_payload: dict[str, Any] | None = None,
+        dependency_ref_count: int = 0,
+        retry_ref_count: int = 0,
+        gc_policy: str = "quota_or_lifecycle",
+        downstream_need: float | None = None,
+        confidence: float | None = None,
+        novelty: float | None = None,
+    ) -> tuple[StateRef, StateObject, bool]:
+        with self._write_lock:
+            return self._write_state_locked(
+                task_id=task_id,
+                source_agent=source_agent,
+                state_type=state_type,
+                payload=payload,
+                summary=summary,
+                usage_hint=usage_hint,
+                payload_kind=payload_kind,
+                contains_embedding_refs=contains_embedding_refs,
+                tier=tier,
+                lifecycle=lifecycle,
+                access_policy=access_policy,
+                audit_payload=audit_payload,
+                dependency_ref_count=dependency_ref_count,
+                retry_ref_count=retry_ref_count,
+                gc_policy=gc_policy,
+                downstream_need=downstream_need,
+                confidence=confidence,
+                novelty=novelty,
+            )
+
+    def _write_state_locked(
+        self,
+        *,
+        task_id: str,
+        source_agent: str,
+        state_type: str,
+        payload: dict[str, Any],
+        summary: str,
+        usage_hint: str,
+        payload_kind: str = "structured_non_text",
+        contains_embedding_refs: bool = False,
+        tier: StateTier | None = None,
+        lifecycle: str = "active",
+        access_policy: str = "prompt_view_only",
+        audit_payload: dict[str, Any] | None = None,
+        dependency_ref_count: int = 0,
+        retry_ref_count: int = 0,
+        gc_policy: str = "quota_or_lifecycle",
+        downstream_need: float | None = None,
+        confidence: float | None = None,
+        novelty: float | None = None,
+    ) -> tuple[StateRef, StateObject, bool]:
         if lifecycle not in STATE_LIFECYCLE_STATES:
             raise ValueError(f"Unknown state lifecycle: {lifecycle}")
+        semantic_identity_hash = self._semantic_identity_hash(
+            state_type=state_type,
+            payload=payload,
+            summary=summary,
+            payload_kind=payload_kind,
+            contains_embedding_refs=contains_embedding_refs,
+            access_policy=access_policy,
+            audit_payload=audit_payload,
+        )
+        existing_state_id = self._semantic_state_index.get(semantic_identity_hash)
+        existing = (
+            self._states.get(existing_state_id)
+            if existing_state_id is not None
+            else None
+        )
+        if existing is not None and existing.lifecycle not in {
+            "deleted",
+            "evicted",
+            "tombstoned",
+        }:
+            existing.dedup_reuse_count += 1
+            if task_id != existing.task_id and task_id not in existing.reuse_task_ids:
+                existing.reuse_task_ids.append(task_id)
+            if (
+                source_agent != existing.source_agent
+                and source_agent not in existing.reuse_source_agents
+            ):
+                existing.reuse_source_agents.append(source_agent)
+            existing.dependency_ref_count += max(0, dependency_ref_count)
+            existing.retry_ref_count += max(0, retry_ref_count)
+            return (
+                StateRef(
+                    state_id=existing.state_id,
+                    state_type=existing.state_type,
+                    version=existing.version,
+                    payload_kind=existing.payload_kind,
+                    contains_embedding_refs=existing.contains_embedding_refs,
+                    usage_hint=usage_hint,
+                    tier=existing.tier,
+                ),
+                existing,
+                True,
+            )
         state_id = self._next_state_id(task_id, source_agent, state_type, payload)
         requested_tier = tier
         payload_to_store = dict(payload)
@@ -555,8 +692,10 @@ class StatePoolLite:
             admission_score=admission.score,
             admission_status=admission.status,
             status_updated_at=datetime.now(timezone.utc).isoformat(),
+            semantic_identity_hash=semantic_identity_hash,
         )
         self._states[state_id] = state
+        self._semantic_state_index[semantic_identity_hash] = state_id
         if tier == "hot":
             self._hot_payloads[state_id] = dict(payload_to_store)
         state_ref = StateRef(
@@ -573,6 +712,7 @@ class StatePoolLite:
         return (
             state_ref,
             state,
+            False,
         )
 
     def assess_state_admission(
@@ -1073,6 +1213,12 @@ class StatePoolLite:
             self._raw_chunk_index.pop(state.state_id, None)
             self._lineage_state_ids.discard(state.state_id)
             self._states.pop(state.state_id, None)
+            if (
+                state.semantic_identity_hash
+                and self._semantic_state_index.get(state.semantic_identity_hash)
+                == state.state_id
+            ):
+                self._semantic_state_index.pop(state.semantic_identity_hash, None)
             report.physical_delete_count += 1
             report.lifecycle_transition_count += int(old != state.lifecycle)
         return report
@@ -1291,6 +1437,10 @@ class StatePoolLite:
                     "evicted_at": state.evicted_at,
                     "active_readers": self.leases.active_readers(state.state_id),
                     "lineage_protected": state.state_id in self._lineage_state_ids,
+                    "semantic_identity_hash": state.semantic_identity_hash,
+                    "dedup_reuse_count": state.dedup_reuse_count,
+                    "reuse_task_ids": list(state.reuse_task_ids),
+                    "reuse_source_agents": list(state.reuse_source_agents),
                 }
             )
         return {
@@ -1574,3 +1724,54 @@ class StatePoolLite:
         )
         digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12]
         return f"state_{digest}"
+
+    @staticmethod
+    def _semantic_identity_hash(
+        *,
+        state_type: str,
+        payload: dict[str, Any],
+        summary: str,
+        payload_kind: str,
+        contains_embedding_refs: bool,
+        access_policy: str,
+        audit_payload: dict[str, Any] | None,
+    ) -> str:
+        semantic_payload = {
+            key: value
+            for key, value in payload.items()
+            if key
+            not in {
+                "artifact_id",
+                "code_artifact_id",
+                "audit_payload_ref",
+                "audit_payload_hash",
+                "file_path",
+            }
+        }
+        audit_content = ""
+        if audit_payload:
+            for key in ("content", "guarded_content", "original_content"):
+                candidate = audit_payload.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    audit_content = candidate
+                    break
+        identity = {
+            "state_type": state_type,
+            "payload_kind": payload_kind,
+            "contains_embedding_refs": contains_embedding_refs,
+            "access_policy": access_policy,
+            "summary": str(payload.get("summary") or summary),
+            "semantic_payload": semantic_payload,
+            "audit_content_hash": (
+                hashlib.sha256(audit_content.encode("utf-8")).hexdigest()
+                if audit_content
+                else ""
+            ),
+        }
+        encoded = json.dumps(
+            identity,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()

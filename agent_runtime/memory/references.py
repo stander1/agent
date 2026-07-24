@@ -45,6 +45,15 @@ class MemoryReferenceManagerLite:
     ) -> MemoryReferenceRecord:
         if ref_type not in self.VALID_TYPES:
             raise ValueError(f"Unknown memory reference type: {ref_type}")
+        for record in self._records.values():
+            if (
+                record.memory_id == memory_id
+                and record.target_kind == target_kind
+                and record.target_id == target_id
+                and record.ref_type == ref_type
+                and record.status == "active"
+            ):
+                return record
         ref_id = f"mref_{len(self._records) + 1:06d}"
         record = MemoryReferenceRecord(
             ref_id=ref_id,

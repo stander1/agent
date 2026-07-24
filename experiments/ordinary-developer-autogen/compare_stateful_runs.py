@@ -327,10 +327,19 @@ def _normalized_common_call_summary(
 
 
 def _usage_int(row: dict[str, Any], key: str) -> int:
-    try:
-        return int(row.get(key) or 0)
-    except (TypeError, ValueError):
-        return 0
+    aliases = {
+        "llm_prompt_tokens": ("prompt_tokens", "input_tokens"),
+        "llm_completion_tokens": ("completion_tokens", "output_tokens"),
+        "llm_total_tokens": ("total_tokens",),
+    }
+    for candidate in (key, *aliases.get(key, ())):
+        if candidate not in row:
+            continue
+        try:
+            return int(row.get(candidate) or 0)
+        except (TypeError, ValueError):
+            continue
+    return 0
 
 
 def _task_comparison(runs: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:

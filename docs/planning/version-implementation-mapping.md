@@ -4731,3 +4731,38 @@ Provider 实际 Token 与传输协作 Token 必须同时报告；
 阶段说明：`docs/experiments/v5.14b-fair-cost-quality-preflight.md`。
 
 运行说明：`experiments/v5.14b-fair-cost-quality-preflight/README.md`。
+
+## 66. v5.14c：语义去重、最小能力视图与协议隔离
+
+v5.14c 针对 v5.14b 真实预检暴露的 Provider Prompt 膨胀和证据重复问题进行通用修复。
+该阶段不增加 Question A/B 业务规则，不固定 Agent 角色，不限制 completion 长度，也
+不通过减少 AutoGen 协作轮次制造成本优势。
+
+实现映射：
+
+- `agent_runtime/state/state_pool.py`：新增稳定语义身份、并发原子去重、复用来源谱系和
+  物理/逻辑状态计数；
+- `agent_runtime/drivers/autogen.py`：过滤纯 AutoGen 路由元数据；按动态能力画像压缩
+  chronology；SHP wire 只进入 trace，不进入 Agent 模型正文；以内容指纹避免重复改写；
+- `agent_runtime/memory/memory_store.py`：按 CCF v2 语义键、规范值、极性和时效范围执行
+  跨候选事实去重，并把新证据合并到已有记忆；
+- `agent_runtime/memory/context_views.py`：Prompt View 不再暴露 consumer、profile、
+  state 和 claim 等内部标识，只保留当前任务所需事实；
+- `agent_runtime/eval/metrics.py`、`web_monitor/parser.py` 和
+  `agent_runtime/eval/autogen_session_report.py`：新增状态复用、记忆准入去重、证据
+  合并、路由误入池和模型可见协议标记指标。
+
+通用边界：
+
+```text
+完整原文仍保存在冷层审计载荷；
+最小视图由 CapabilityProfile 和语义动作生成，不由 Agent 名称生成；
+短期事实不跨任务合并，跨任务/持久事实才可复用；
+SHP StateRef/MemoryRef 仍存在于真实运行时和 trace；
+模型正文及最终交付不得出现 AgentLite wire 协议字段。
+```
+
+本地回归共 102 项相关测试通过，`compileall` 与 `git diff --check` 通过。真实 Provider
+成本目标尚未重跑，不据本地机制测试宣称 15% 目标已经达成。
+
+详细说明：`docs/experiments/v5.14c-semantic-dedup-context-hygiene.md`。

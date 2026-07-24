@@ -326,9 +326,9 @@ class OrdinaryDeveloperExperimentTests(unittest.TestCase):
                         {
                             "task_id": task_id,
                             "agent": agent,
-                            "llm_prompt_tokens": prompt_tokens,
-                            "llm_completion_tokens": 3,
-                            "llm_total_tokens": prompt_tokens + 3,
+                            "prompt_tokens": prompt_tokens,
+                            "completion_tokens": 3,
+                            "total_tokens": prompt_tokens + 3,
                         }
                     )
             sequence = {
@@ -406,6 +406,14 @@ class OrdinaryDeveloperExperimentTests(unittest.TestCase):
         self.assertLess(
             normalized["groups"]["managed"]["llm_prompt_tokens"],
             normalized["groups"]["native"]["llm_prompt_tokens"],
+        )
+        self.assertEqual(
+            normalized["groups"]["managed"]["llm_prompt_tokens"],
+            81,
+        )
+        self.assertEqual(
+            normalized["groups"]["managed"]["llm_total_tokens"],
+            99,
         )
         self.assertEqual(len(blind_batch["tasks"][0]["candidates"]), 3)
         self.assertNotIn("group", blind_batch["tasks"][0]["candidates"][0])

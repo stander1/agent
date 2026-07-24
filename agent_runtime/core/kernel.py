@@ -529,7 +529,7 @@ class CollaborationKernel:
             access_policy: str,
             audit_payload: dict[str, Any] | None = None,
         ) -> StateRef:
-            state_ref, state = self.state_pool.write_state(
+            state_ref, state, state_reused = self.state_pool.write_state_with_report(
                 task_id=task.task_id,
                 source_agent=agent.agent_id,
                 state_type=state_type,
@@ -541,20 +541,23 @@ class CollaborationKernel:
                 access_policy=access_policy,
                 audit_payload=audit_payload,
             )
-            self.metrics.record_state_write(
-                task_id=task.task_id,
-                round_id=round_id,
-                mode=mode,
-                state_type=state_type,
-                payload_bytes=state.size_bytes,
-                tier=state.tier,
-            )
+            if not state_reused:
+                self.metrics.record_state_write(
+                    task_id=task.task_id,
+                    round_id=round_id,
+                    mode=mode,
+                    state_type=state_type,
+                    payload_bytes=state.size_bytes,
+                    tier=state.tier,
+                )
             self.trace.write(
-                "state_written",
+                "state_reused" if state_reused else "state_written",
                 {
                     "task_id": task.task_id,
                     "round_id": round_id,
                     "mode": mode,
+                    "state_reused": state_reused,
+                    "state_dedup_reuse_count": state.dedup_reuse_count,
                     "state": asdict(state),
                 },
             )
@@ -796,6 +799,15 @@ class CollaborationKernel:
                 admission_report.active_value_selection_count
             ),
             unresolved_scope_count=admission_report.unresolved_scope_count,
+            memory_deduplicated_claim_count=(
+                admission_report.deduplicated_claim_count
+            ),
+            memory_deduplicated_memory_count=(
+                admission_report.deduplicated_memory_count
+            ),
+            memory_evidence_reference_merge_count=(
+                admission_report.evidence_reference_merge_count
+            ),
         )
         self.metrics.record_memory_write(
             task_id=task.task_id,
@@ -820,6 +832,15 @@ class CollaborationKernel:
                 "validation_reasons": validation.reasons,
                 "admission_status": admission_report.admission_status,
                 "admission_reasons": admission_report.admission_reasons,
+                "deduplicated_claim_count": (
+                    admission_report.deduplicated_claim_count
+                ),
+                "deduplicated_memory_count": (
+                    admission_report.deduplicated_memory_count
+                ),
+                "evidence_reference_merge_count": (
+                    admission_report.evidence_reference_merge_count
+                ),
                 "candidate_id": admission_report.candidate_id,
                 "memory_ref": (
                     admission_report.memory_ref.memory_id

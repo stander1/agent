@@ -864,6 +864,15 @@ class V0Runtime:
                 unresolved_scope_count=(
                     admission_report.unresolved_scope_count
                 ),
+                memory_deduplicated_claim_count=(
+                    admission_report.deduplicated_claim_count
+                ),
+                memory_deduplicated_memory_count=(
+                    admission_report.deduplicated_memory_count
+                ),
+                memory_evidence_reference_merge_count=(
+                    admission_report.evidence_reference_merge_count
+                ),
             )
             self.metrics.record_memory_write(
                 task_id=result.task_id,

@@ -17,8 +17,10 @@ from agent_runtime.drivers.autogen import (
     _continuity_requirement_reasons,
     _continuity_source_text,
     _fact_support_score,
+    _has_semantic_payload,
     _memory_adoption_evidence,
     _memory_view_facts_covered,
+    _sanitize_model_visible_content,
     _select_token_nonexpanding_view,
 )
 from agent_runtime.eval.token_counter import TokenCounter
@@ -76,6 +78,37 @@ class ProfiledTeam:
 
 
 class AutoGenSharedMemoryTest(unittest.TestCase):
+    def test_autogen_routing_metadata_is_not_business_state(self) -> None:
+        routing = (
+            "082e0b93-0bc3-4863-a8b1-3e4c7cf51d50: "
+            "DefaultTopicId(type='planner_082e0b93-0bc3-4863-a8b1-3e4c7cf51d50', "
+            "source='082e0b93-0bc3-4863-a8b1-3e4c7cf51d50')"
+        )
+
+        self.assertFalse(_has_semantic_payload([], routing))
+        self.assertTrue(
+            _has_semantic_payload(
+                [],
+                f"{routing}\nUser confirmed the timeout is 30 seconds.",
+            )
+        )
+
+    def test_legacy_rewrite_metadata_is_removed_from_model_visible_content(self) -> None:
+        content = (
+            "AGENTLITE_REAL_REWRITE v1\n"
+            "native_payload_moved_to_state_pool=true\n"
+            'shp_wire={"state_refs":[{"state_id":"state_1"}]}\n'
+            "prompt_view:\n"
+            "CURRENT_USER_TASK:\n"
+            "Review the release plan."
+        )
+
+        visible = _sanitize_model_visible_content(content)
+
+        self.assertIn("Review the release plan.", visible)
+        self.assertNotIn("AGENTLITE_", visible)
+        self.assertNotIn("shp_wire", visible)
+
     def test_memory_adoption_requires_output_evidence_beyond_current_task(self) -> None:
         evidence = _memory_adoption_evidence(
             memory_prompt_view=(
@@ -594,12 +627,17 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                 rewritten = rewritten_args[0][0]["content"]
                 self.assertEqual(rewritten.count("CURRENT_USER_TASK"), 1)
                 self.assertIn(current_task, rewritten)
-                self.assertIn("GROUNDING_RULE", rewritten)
+                self.assertIn(
+                    "Only USER_REQUEST_HISTORY can establish what the user explicitly confirmed.",
+                    rewritten,
+                )
                 self.assertIn(prior_task, rewritten)
                 self.assertIn("LATEST_WRITER_ARTIFACT_BEGIN", rewritten)
                 self.assertIn("LATEST_WRITER_ARTIFACT_END", rewritten)
                 self.assertNotIn("SHOULD_NOT_DOMINATE_CURRENT_VIEW", rewritten)
                 self.assertNotIn("FINAL_ANSWER_READY", rewritten)
+                self.assertNotIn("AGENTLITE_", rewritten)
+                self.assertNotIn("shp_wire=", rewritten)
 
                 events = self._events(manager.output_dir / "trace.jsonl")
                 rewrite = next(
@@ -609,6 +647,10 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                     and item.get("payload", {}).get("call_id") == context.call_id
                 )
                 self.assertTrue(rewrite["payload"]["rewrite_applied"])
+                self.assertEqual(
+                    rewrite["payload"]["model_visible_protocol_marker_count"],
+                    0,
+                )
                 self.assertGreater(
                     rewrite["payload"]["native_input_tokens"],
                     rewrite["payload"]["rewritten_input_tokens"],
@@ -1162,7 +1204,7 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                     direct_rewrite["payload"]["memory_injected_count"],
                     1,
                 )
-                self.assertTrue(
+                self.assertFalse(
                     direct_rewrite["payload"]["continuity_cost_override"]
                 )
                 self.assertEqual(direct_rewrite["payload"]["fallback_reasons"], [])

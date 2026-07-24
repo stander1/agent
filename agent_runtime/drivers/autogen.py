@@ -176,7 +176,7 @@ CORE_REAL_REWRITE_DISABLED_REASON = (
 CORE_REWRITE_FIELDS = ("content", "body", "text")
 CORE_REWRITE_MARKER = "AGENTLITE_CORE_CONTENT_REWRITE v1"
 CORE_PROMPT_VIEW_MARKER = "AGENTLITE_CORE_PROMPT_VIEW v1"
-SHARED_MEMORY_MARKER = "AGENTLITE_SHARED_MEMORY v1"
+SHARED_MEMORY_MARKER = "SHARED_CONTEXT:"
 FALLBACK_REASON_BUCKETS = {
     "missing_messages_argument": "input_contract_missing",
     "messages_not_sequence": "input_contract_invalid",
@@ -395,6 +395,7 @@ class AutoGenHookManager:
         self._lock = threading.Lock()
         self._memory_lock = threading.RLock()
         self._promoted_memory_fingerprints: set[str] = set()
+        self._rewritten_prompt_fingerprints: set[str] = set()
         self._collaboration_group_by_agent: dict[str, str] = {}
         self._current_team_task_by_group: dict[str, str] = {}
         self._user_task_history_by_group: dict[str, list[str]] = {}
@@ -413,6 +414,27 @@ class AutoGenHookManager:
     @property
     def patched_modules(self) -> list[str]:
         return sorted(self._patched_modules)
+
+    def _is_known_rewritten_prompt(self, decoded_messages: list[Any]) -> bool:
+        with self._memory_lock:
+            known = set(self._rewritten_prompt_fingerprints)
+        return any(
+            _content_fingerprint(
+                str(getattr(message, "content_text", "") or "").strip()
+            )
+            in known
+            for message in decoded_messages
+            if str(getattr(message, "content_text", "") or "").strip()
+        )
+
+    def _remember_rewritten_prompt(self, content: str) -> None:
+        fingerprint = _content_fingerprint(content)
+        if not fingerprint:
+            return
+        with self._memory_lock:
+            if len(self._rewritten_prompt_fingerprints) >= 8192:
+                self._rewritten_prompt_fingerprints.clear()
+            self._rewritten_prompt_fingerprints.add(fingerprint)
 
     def _trace_run_context(self) -> dict[str, Any]:
         binding = current_run_binding()
@@ -3005,6 +3027,14 @@ class AutoGenHookManager:
                 native_text=native_text,
             )
             return None
+        if self._is_known_rewritten_prompt(decoded_messages):
+            self._record_agent_rewrite_audit(
+                context=context,
+                applied=False,
+                fallback_reasons=["already_agentlite_rewritten"],
+                native_text=native_text,
+            )
+            return None
         with self._memory_lock:
             current_team_task = self._current_team_task_by_group.get(
                 context.task.group_id,
@@ -3018,6 +3048,33 @@ class AutoGenHookManager:
             current_task=current_team_task,
             user_task_history=user_task_history,
             final_delivery_marker=self.final_delivery_marker,
+        )
+        receiver_profile = self.kernel.capability_profiles.get(
+            context.agent.agent_id
+        )
+        receiver_consumer = consumer_context_from_profile(
+            receiver_profile,
+            consumer_id=context.agent.agent_id,
+        )
+        receiver_action = context.semantic_action or infer_semantic_action(
+            current_team_task or context.task.prompt,
+            preferred_actions=receiver_consumer.preferred_actions,
+            method_name=context.method_name,
+            target_kind=context.target_kind,
+        )
+        minimal_chronology = build_minimal_context_view(
+            query=current_team_task or context.task.prompt,
+            prompt_views=[chronology_view],
+            consumer=receiver_consumer,
+            action=receiver_action,
+        )
+        chronology_selection = _select_token_nonexpanding_view(
+            self.token_counter,
+            source_views=[chronology_view],
+            candidate_text=minimal_chronology.text,
+        )
+        receiver_chronology_view = (
+            chronology_selection.text or chronology_view
         )
         state_refs = self._safe_kernel_call(
             "write_autogen_real_rewrite_input_state",
@@ -3035,7 +3092,7 @@ class AutoGenHookManager:
                         "method": context.method_name,
                         "native_result_type": "agent_real_rewrite_input",
                         "real_rewrite_input_state": True,
-                        "prompt_view_summary": chronology_view,
+                        "prompt_view_summary": receiver_chronology_view,
                         "autogen_decoded_messages": [
                             message.to_dict() for message in decoded_messages
                         ],
@@ -3060,7 +3117,10 @@ class AutoGenHookManager:
                     state_ref=ref,
                     receiver_id=context.agent.agent_id,
                     context=context,
-                    budget_chars=max(900, len(chronology_view) + 512),
+                    budget_chars=max(
+                        900,
+                        len(receiver_chronology_view) + 256,
+                    ),
                 ),
             )
             if isinstance(view, str) and view:
@@ -3196,6 +3256,7 @@ class AutoGenHookManager:
             role_memory_selection=memory_selection,
             continuity_cost_override=continuity_cost_override,
         )
+        self._remember_rewritten_prompt(rewritten_content)
         return new_args, new_kwargs
 
     def _hydrate_team_receiver_context_view(
@@ -4020,6 +4081,9 @@ class AutoGenHookManager:
                 "native_input_tokens": native_tokens,
                 "rewritten_input_tokens": rewritten_tokens,
                 "rewritten_wire_tokens": rewritten_wire_tokens,
+                "model_visible_protocol_marker_count": (
+                    _protocol_marker_count(rewritten_content)
+                ),
                 "token_delta_native_minus_rewrite": native_tokens - rewritten_tokens,
                 "rewritten_preview": _preview(rewritten_content),
                 "rewrite_safety": rewrite_safety or {},
@@ -6402,8 +6466,10 @@ def _continuity_source_text(
 ) -> str:
     messages = list(decoded_messages)
     user_texts = [
-        _team_rewrite_current_task(
-            str(getattr(message, "content_text", "") or "").strip()
+        _sanitize_model_visible_content(
+            _team_rewrite_current_task(
+                str(getattr(message, "content_text", "") or "").strip()
+            )
         )
         for message in messages
         if str(getattr(message, "source", "") or "").strip().lower() == "user"
@@ -6412,8 +6478,10 @@ def _continuity_source_text(
     if user_texts:
         return user_texts[-1]
     unscoped_texts = [
-        _team_rewrite_current_task(
-            str(getattr(message, "content_text", "") or "").strip()
+        _sanitize_model_visible_content(
+            _team_rewrite_current_task(
+                str(getattr(message, "content_text", "") or "").strip()
+            )
         )
         for message in messages
         if not str(getattr(message, "source", "") or "").strip()
@@ -6516,7 +6584,9 @@ def _unique_memory_ref_count(refs: list[dict[str, Any]]) -> int:
 
 def _memory_summary(messages: list[Any], fallback: str, *, limit: int) -> str:
     for message in reversed(messages):
-        content = str(getattr(message, "content_text", "") or "").strip()
+        content = _sanitize_model_visible_content(
+            str(getattr(message, "content_text", "") or "")
+        )
         source = str(getattr(message, "source", "") or "").lower()
         native_type = str(getattr(message, "native_type", "") or "")
         message_kind = str(getattr(message, "message_kind", "") or "")
@@ -6533,7 +6603,9 @@ def _latest_visible_message(
     fallback: str,
 ) -> tuple[str, str]:
     for message in reversed(messages):
-        content = str(getattr(message, "content_text", "") or "").strip()
+        content = _sanitize_model_visible_content(
+            str(getattr(message, "content_text", "") or "")
+        )
         source = str(getattr(message, "source", "") or "").strip()
         native_type = str(getattr(message, "native_type", "") or "")
         message_kind = str(getattr(message, "message_kind", "") or "")
@@ -7218,6 +7290,60 @@ def _character_ngrams(text: str, *, size: int) -> set[str]:
     return {text[index : index + size] for index in range(len(text) - size + 1)}
 
 
+def _content_fingerprint(content: str) -> str:
+    normalized = str(content or "").strip()
+    if not normalized:
+        return ""
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _protocol_marker_count(content: str) -> int:
+    text = str(content or "")
+    return sum(
+        text.count(marker)
+        for marker in (
+            "AGENTLITE_",
+            "shp_wire=",
+            "native_payload_moved_to_state_pool=",
+            "native_core_message_content_moved_to_state_pool=",
+        )
+    )
+
+
+def _sanitize_model_visible_content(content: str) -> str:
+    """Remove runtime transport metadata while preserving business content."""
+
+    visible = str(content or "").strip()
+    if not visible:
+        return ""
+    prompt_marker = "\nprompt_view:\n"
+    if _contains_agentlite_rewrite_marker(visible) and prompt_marker in visible:
+        visible = visible.split(prompt_marker, 1)[1]
+
+    internal_markers = (
+        "AGENTLITE_REAL_REWRITE v1",
+        "AGENTLITE_TEAM_REAL_REWRITE v1",
+        "AGENTLITE_HANDOFF_TYPED_REWRITE_CANDIDATE v1",
+        "AGENTLITE_TOOL_SUMMARY_TYPED_REWRITE_CANDIDATE v1",
+        CORE_REWRITE_MARKER,
+    )
+    internal_prefixes = (
+        "native_payload_moved_to_state_pool=",
+        "native_core_message_content_moved_to_state_pool=",
+        "native_python_message_type_preserved=",
+        "shp_wire=",
+    )
+    lines = []
+    for line in visible.splitlines():
+        stripped = line.strip()
+        if any(marker in stripped for marker in internal_markers):
+            continue
+        if stripped.startswith(internal_prefixes):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
 def _build_chronology_prompt_view(
     messages: list[Any],
     *,
@@ -7229,7 +7355,9 @@ def _build_chronology_prompt_view(
 
     visible: list[tuple[str, str]] = []
     for message in messages:
-        content = str(getattr(message, "content_text", "") or "").strip()
+        content = _sanitize_model_visible_content(
+            str(getattr(message, "content_text", "") or "")
+        )
         source = str(getattr(message, "source", "") or "").strip() or "unknown"
         native_type = str(getattr(message, "native_type", "") or "")
         message_kind = str(getattr(message, "message_kind", "") or "")
@@ -7326,18 +7454,10 @@ def _build_real_rewrite_content(
     wire_envelope: dict[str, Any],
     prompt_view_text: str,
 ) -> str:
-    wire_json = json.dumps(
-        wire_envelope,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    return (
-        "AGENTLITE_REAL_REWRITE v1\n"
-        "native_payload_moved_to_state_pool=true\n"
-        f"shp_wire={wire_json}\n"
-        "prompt_view:\n"
-        f"{prompt_view_text}"
-    )
+    # The SHP envelope remains in trace/audit storage. Only the receiver's
+    # prompt-safe view is visible to the model.
+    del wire_envelope
+    return prompt_view_text.strip()
 
 
 def _contains_agentlite_rewrite_marker(text: str) -> bool:
@@ -7902,18 +8022,65 @@ def _extract_text(value: Any, *, _depth: int = 0) -> str:
 
 
 def _has_semantic_payload(decoded_messages: list[Any], text: str) -> bool:
-    if text.strip():
+    if text.strip() and not _is_autogen_routing_metadata_only(text):
         return True
     for message in decoded_messages:
-        if str(getattr(message, "target", "") or "").strip():
-            return True
-        if str(getattr(message, "content_text", "") or "").strip():
+        content = str(getattr(message, "content_text", "") or "").strip()
+        if content and not _is_autogen_routing_metadata_only(content):
             return True
         if getattr(message, "tool_calls", None):
             return True
         if getattr(message, "tool_results", None):
             return True
     return False
+
+
+def _is_autogen_routing_metadata_only(text: str) -> bool:
+    normalized = " ".join(str(text or "").split())
+    if not normalized or len(normalized) > 1600:
+        return False
+    if "DefaultTopicId(" not in normalized and "AgentId(" not in normalized:
+        return False
+    if re.search(r"[\u4e00-\u9fff]", normalized):
+        return False
+
+    residue = re.sub(r"DefaultTopicId\([^)]*\)", " ", normalized)
+    residue = re.sub(r"AgentId\([^)]*\)", " ", residue)
+    residue = re.sub(
+        r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+        " ",
+        residue,
+        flags=re.IGNORECASE,
+    )
+    residue = re.sub(
+        r"\b(?:SingleThreadedAgentRuntime|RoundRobinGroupChatManager|"
+        r"RoundRobinGroupChat|DefaultTopicId|AgentId)\b",
+        " ",
+        residue,
+    )
+    residue = re.sub(r"[^a-zA-Z0-9_]+", " ", residue)
+    tokens = {
+        token.casefold()
+        for token in residue.split()
+        if token and not token.isdigit()
+    }
+    routing_tokens = {
+        "args",
+        "kwargs",
+        "message",
+        "messages",
+        "sender",
+        "recipient",
+        "target",
+        "topic",
+        "topic_id",
+        "agent",
+        "agent_id",
+        "type",
+        "source",
+        "id",
+    }
+    return not tokens or tokens.issubset(routing_tokens)
 
 
 def _logical_autogen_agent_id(

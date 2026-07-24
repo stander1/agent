@@ -310,6 +310,9 @@ class MemoryAdmissionReport:
     resolved_conflict_count: int = 0
     unresolved_conflict_count: int = 0
     active_value_selection_count: int = 0
+    deduplicated_claim_count: int = 0
+    deduplicated_memory_count: int = 0
+    evidence_reference_merge_count: int = 0
 
 
 @dataclass(slots=True)
@@ -741,8 +744,10 @@ class MemoryStoreLite:
             reuse_intent=reuse_intent,
         )
         affected_view_ids: set[str] = set()
+        newly_written_memory_ids: set[str] = set()
+        successful_mapping_count = 0
         for claim_candidate in claim_candidates:
-            memory, alias_hit, unresolved, unresolved_scope = (
+            memory, alias_hit, unresolved, unresolved_scope, deduplicated = (
                 self._write_admitted_claim_candidate(
                 candidate=claim_candidate,
                 task_id=task_id,
@@ -762,6 +767,13 @@ class MemoryStoreLite:
                     "unresolved_slot" if unresolved else "unresolved_scope"
                 )
                 continue
+            successful_mapping_count += 1
+            if deduplicated:
+                report.deduplicated_claim_count += 1
+                report.deduplicated_memory_count += 1
+                report.evidence_reference_merge_count += 1
+            else:
+                newly_written_memory_ids.add(memory.memory_id)
             affected_view_ids.add(memory.memory_view_id)
             report.memory_refs.append(self.ref(memory))
             report.claim_ids.append(memory.claim_id)
@@ -792,19 +804,27 @@ class MemoryStoreLite:
         report.active_value_selection_count = (
             compaction_report.active_value_selection_count
         )
+        unique_memory_ids = list(
+            dict.fromkeys(
+                ref.memory_id
+                for ref in report.memory_refs
+                if ref.memory_id in self._memories
+            )
+        )
         report.memory_refs = [
-            self.ref(self._memories[ref.memory_id])
-            for ref in report.memory_refs
-            if ref.memory_id in self._memories
+            self.ref(self._memories[memory_id])
+            for memory_id in unique_memory_ids
         ]
+        report.claim_ids = list(dict.fromkeys(report.claim_ids))
+        report.memory_view_ids = list(dict.fromkeys(report.memory_view_ids))
         report.memory_ref = report.memory_refs[0]
-        report.memory_write_count = len(report.memory_refs)
-        report.provisional_claim_count = len(report.memory_refs)
-        report.slot_mapping_success_count = len(report.memory_refs)
+        report.memory_write_count = len(newly_written_memory_ids)
+        report.provisional_claim_count = len(newly_written_memory_ids)
+        report.slot_mapping_success_count = successful_mapping_count
         report.claim_card_count = len(report.claim_ids)
-        report.memory_view_count = len(set(report.memory_view_ids))
+        report.memory_view_count = len(report.memory_view_ids)
         report.promotion_view_count = int(promotion_view_id is not None)
-        report.claim_to_memoryview_count = len(report.claim_ids)
+        report.claim_to_memoryview_count = successful_mapping_count
         self._persist_snapshot()
         return report
 
@@ -821,12 +841,21 @@ class MemoryStoreLite:
     ) -> str | None:
         if not source_state_ids:
             return None
+        normalized_states = self._dedupe(source_state_ids)
+        normalized_evidence = self._dedupe(evidence_refs)
+        for existing in self._promotion_views.values():
+            if (
+                existing.source_state_ids == normalized_states
+                and existing.evidence_refs == normalized_evidence
+                and existing.core_claim.strip() == summary.strip()
+            ):
+                return existing.promotion_view_id
         promotion_view_id = self._next_id("pv", task_id, source_agent, summary)
         self._promotion_views[promotion_view_id] = PromotionView(
             promotion_view_id=promotion_view_id,
-            source_state_ids=list(source_state_ids),
+            source_state_ids=normalized_states,
             core_claim=summary,
-            evidence_refs=list(evidence_refs),
+            evidence_refs=normalized_evidence,
             reuse_intent=reuse_intent or f"复用 {task_topic} 的结构化事实",
         )
         return promotion_view_id
@@ -842,15 +871,15 @@ class MemoryStoreLite:
         source_state_ids: list[str],
         evidence_refs: list[str],
         promotion_view_id: str | None,
-    ) -> tuple[MemoryObject | None, bool, bool, bool]:
+    ) -> tuple[MemoryObject | None, bool, bool, bool, bool]:
         resolved = self._resolve_slot(
             candidate.slot_id or candidate.raw_slot_text
         )
         if resolved.unresolved:
-            return None, resolved.alias_hit, True, False
+            return None, resolved.alias_hit, True, False, False
         policy = self.schema_registry.policy_for(resolved.slot_id)
         if policy.scope_required and candidate.scope in {"", "general"}:
-            return None, resolved.alias_hit, False, True
+            return None, resolved.alias_hit, False, True, False
         canonical = self.schema_registry.canonicalize_claim(
             subject=candidate.subject,
             slot_id=resolved.slot_id,
@@ -868,6 +897,80 @@ class MemoryStoreLite:
             valid_from=task_id,
             schema_version=candidate.schema_version,
         )
+        semantic_key = claim_identity(
+            {
+                "subject": canonical.subject,
+                "slot_id": canonical.slot_id,
+                "scope": canonical.scope,
+                "temporal_scope": canonical.temporal_scope,
+            }
+        )
+        canonical_value = normalized_value(
+            canonical.value,
+            canonical.value_type,
+            canonical.unit,
+        )
+        existing_claim = next(
+            (
+                claim
+                for claim in self._claims.values()
+                if claim.semantic_key == semantic_key
+                and claim.polarity == canonical.polarity
+                and claim.status in {"active", "provisional_active"}
+                and (
+                    canonical.temporal_scope in {"cross_task", "persistent", "global"}
+                    or claim.valid_from == canonical.valid_from
+                )
+                and normalized_value(
+                    claim.value,
+                    claim.value_type,
+                    claim.unit,
+                )
+                == canonical_value
+            ),
+            None,
+        )
+        if existing_claim is not None:
+            existing_memory = next(
+                (
+                    memory
+                    for memory in self._memories.values()
+                    if memory.claim_id == existing_claim.claim_id
+                    and memory.status in {"active", "provisional_active", "dormant"}
+                ),
+                None,
+            )
+            if existing_memory is not None:
+                existing_claim.confidence = max(
+                    existing_claim.confidence,
+                    canonical.confidence,
+                )
+                existing_claim.supported_by = self._dedupe(
+                    [
+                        *existing_claim.supported_by,
+                        *source_state_ids,
+                        *evidence_refs,
+                        candidate.source_pointer,
+                    ]
+                )
+                existing_claim.tags = self._dedupe([*existing_claim.tags, *tags])
+                existing_memory.tags = self._dedupe(
+                    [*existing_memory.tags, *tags]
+                )
+                self._create_memory_references(
+                    memory=existing_memory,
+                    claim_id=existing_claim.claim_id,
+                    source_state_ids=source_state_ids,
+                    evidence_refs=evidence_refs,
+                    promotion_view_id=promotion_view_id,
+                )
+                return (
+                    existing_memory,
+                    resolved.alias_hit,
+                    False,
+                    False,
+                    True,
+                )
         now = datetime.now(timezone.utc).isoformat()
         claim_id = self._next_id(
             "claim",
@@ -909,7 +1012,7 @@ class MemoryStoreLite:
             ),
             revision_kind=candidate.revision_kind,
         )
-        claim.semantic_key = self._semantic_key(claim)
+        claim.semantic_key = semantic_key
         self._claims[claim_id] = claim
 
         view_id = (
@@ -967,7 +1070,7 @@ class MemoryStoreLite:
             evidence_refs=evidence_refs,
             promotion_view_id=promotion_view_id,
         )
-        return memory, resolved.alias_hit, False, False
+        return memory, resolved.alias_hit, False, False, False
 
     def search_memory(
         self,
@@ -2035,6 +2138,14 @@ class MemoryStoreLite:
                 ],
                 selected_by=best.conflict_policy,
             )
+            if view.schema_version.startswith("ccf.v2"):
+                value = str(view.active_value.get("value", "") or "")
+                unit = str(view.active_value.get("unit", "") or "")
+                view.prompt_summary = (
+                    f"{view.subject}.{view.scope}={value}{unit}; "
+                    f"confidence={view.active_value.get('confidence', 0.0):.2f}; "
+                    "status=active"
+                )
         else:
             view.active_value = None
         view.historical_values = [

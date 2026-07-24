@@ -32,12 +32,17 @@ class AutoGenSessionReportTest(unittest.TestCase):
                                 "payload_kind": "structured_non_text",
                                 "contains_embedding_refs": False,
                                 "size_bytes": 120,
+                                "semantic_identity_hash": "hash_a",
+                                "dedup_reuse_count": 2,
+                                "summary": "business artifact",
                             },
                             {
                                 "state_type": "retrieval_state",
                                 "payload_kind": "structured_non_text",
                                 "contains_embedding_refs": True,
                                 "size_bytes": 80,
+                                "semantic_identity_hash": "hash_b",
+                                "dedup_reuse_count": 0,
                             },
                         ]
                     }
@@ -53,6 +58,42 @@ class AutoGenSessionReportTest(unittest.TestCase):
         self.assertEqual(summary["structured_non_text_count"], 2)
         self.assertEqual(summary["contains_embedding_refs_count"], 1)
         self.assertEqual(summary["total_size_bytes"], 200)
+        self.assertEqual(summary["logical_state_write_count"], 4)
+        self.assertEqual(summary["unique_semantic_identity_count"], 2)
+        self.assertEqual(summary["state_dedup_reuse_count"], 2)
+        self.assertEqual(summary["routing_metadata_state_count"], 0)
+
+    def test_token_summary_reports_admission_dedup_and_protocol_hygiene(self) -> None:
+        summary = _autogen_token_summary(
+            [
+                {
+                    "event_type": "state_memory_bridge",
+                    "payload": {
+                        "deduplicated_claim_count": 2,
+                        "deduplicated_memory_count": 2,
+                        "evidence_reference_merge_count": 2,
+                    },
+                },
+                {
+                    "event_type": "autogen_agent_input_real_rewrite",
+                    "payload": {
+                        "rewrite_applied": True,
+                        "model_visible_protocol_marker_count": 0,
+                    },
+                },
+            ]
+        )
+
+        self.assertEqual(
+            summary["memory_admission_deduplicated_claim_count"],
+            2,
+        )
+        self.assertEqual(
+            summary["memory_admission_deduplicated_memory_count"],
+            2,
+        )
+        self.assertEqual(summary["memory_evidence_reference_merge_count"], 2)
+        self.assertEqual(summary["model_visible_protocol_marker_count"], 0)
 
     def test_mixed_memory_adoption_is_exclusive_and_reported(self) -> None:
         events = [
