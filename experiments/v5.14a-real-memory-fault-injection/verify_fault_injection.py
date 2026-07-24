@@ -130,6 +130,15 @@ def evaluate(
             downstream_semantics=downstream_managed_semantics,
             downstream_text=downstream_managed,
         )
+        managed_safe_fallback = bool(
+            str(scenario.get("fault_class") or "") == "negated_historical"
+            and not managed_semantics["induced"]
+            and actual_action == "safe"
+            and managed_semantics["status"] == "useful"
+            and downstream_managed_semantics["status"] == "useful"
+            and not managed_semantics["historical_positive"]
+            and not downstream_managed_semantics["historical_positive"]
+        )
         native_fault_leaked = _native_fault_leaked(
             fault_class=str(scenario.get("fault_class") or ""),
             semantics=downstream_native_semantics,
@@ -149,6 +158,7 @@ def evaluate(
                     downstream_managed_semantics,
                 ),
                 "managed_success": managed_success,
+                "managed_safe_fallback": managed_safe_fallback,
                 "managed_memory_marker_observed": bool(
                     managed.get("memory_marker_observed_by_emitter")
                 ),
@@ -199,6 +209,11 @@ def evaluate(
         row
         for row in audit_rows
         if row["fault_class"] in {"safe_current", "negated_historical"}
+    ]
+    negated_rows = [
+        row
+        for row in safe_rows
+        if row["fault_class"] == "negated_historical"
     ]
     checks = [
         _check(
@@ -251,16 +266,26 @@ def evaluate(
             ),
         ),
         _check(
-            "fault_injection_is_observed_not_assumed",
-            bool(audit_rows)
+            "unsafe_fault_injection_is_observed_not_assumed",
+            bool(fault_rows)
             and all(
                 row["native_fault_induced"] and row["managed_fault_induced"]
-                for row in audit_rows
+                for row in fault_rows
             ),
             (
-                f"native={sum(row['native_fault_induced'] for row in audit_rows)}/"
-                f"{len(audit_rows)}, managed={sum(row['managed_fault_induced'] for row in audit_rows)}/"
-                f"{len(audit_rows)}"
+                f"native={sum(row['native_fault_induced'] for row in fault_rows)}/"
+                f"{len(fault_rows)}, managed={sum(row['managed_fault_induced'] for row in fault_rows)}/"
+                f"{len(fault_rows)}"
+            ),
+        ),
+        _check(
+            "negated_history_false_positive_case_observed",
+            bool(negated_rows)
+            and any(row["managed_fault_induced"] for row in negated_rows),
+            (
+                f"managed_negated_samples="
+                f"{sum(row['managed_fault_induced'] for row in negated_rows)}/"
+                f"{len(negated_rows)}"
             ),
         ),
         _check(
@@ -309,11 +334,11 @@ def evaluate(
             bool(safe_rows)
             and all(
                 row["actual_managed_action"] == "safe"
-                and row["managed_success"]
+                and (row["managed_success"] or row["managed_safe_fallback"])
                 for row in safe_rows
             ),
             (
-                f"safe={sum(row['actual_managed_action'] == 'safe' and row['managed_success'] for row in safe_rows)}/"
+                f"safe={sum(row['actual_managed_action'] == 'safe' and (row['managed_success'] or row['managed_safe_fallback']) for row in safe_rows)}/"
                 f"{len(safe_rows)}"
             ),
         ),
@@ -342,6 +367,12 @@ def evaluate(
             "row_count": len(audit_rows),
             "fault_row_count": len(fault_rows),
             "safe_row_count": len(safe_rows),
+            "managed_negated_sample_count": sum(
+                row["managed_fault_induced"] for row in negated_rows
+            ),
+            "managed_safe_fallback_count": sum(
+                row["managed_safe_fallback"] for row in safe_rows
+            ),
             "guard_event_count": guard_event_count,
             "compensation_event_count": compensation_event_count,
             "native_llm_total_tokens": int(
@@ -603,6 +634,14 @@ def write_outputs(
             f"- Managed false-positive rate: "
             f"`{summary['managed_false_positive_rate']:.4f}`"
         ),
+        (
+            f"- Managed real negated samples: "
+            f"`{summary['managed_negated_sample_count']}`"
+        ),
+        (
+            f"- Managed safe fallback samples: "
+            f"`{summary['managed_safe_fallback_count']}`"
+        ),
         f"- Native provider tokens: `{summary['native_llm_total_tokens']}`",
         f"- Managed provider tokens: `{summary['managed_llm_total_tokens']}`",
         "",
@@ -623,9 +662,16 @@ def write_outputs(
                 "these deliberately short fault outputs."
             ),
             (
-                "A run passes only when the real provider actually produced "
-                "the requested fault, native AutoGen propagated it, and "
-                "AgentLite repaired or blocked it before the downstream probe."
+                "Every dangerous-fault row passes only when the real provider "
+                "actually produced the obsolete positive value, native AutoGen "
+                "propagated it, and AgentLite repaired or blocked it before the "
+                "downstream probe."
+            ),
+            (
+                "The negated-history false-positive case requires at least one "
+                "real managed negation sample. A repeated sample that emits only "
+                "the active value is recorded separately as a safe fallback, "
+                "never as a repaired fault."
             ),
             "",
         ]

@@ -4681,11 +4681,15 @@ v5.14a 不新增业务领域规则，也不修改生产运行时的角色识别�
 
 ```text
 Native 与 Managed 使用相同模型、温度、故障矩阵和重复次数；
-Provider 未实际产生目标故障时，验收失败，不能冒充守卫成功；
+Provider 未实际产生危险旧值时，验收失败，不能冒充守卫成功；
+否定旧值场景至少保留一条真实否定样本，其他仅输出活动值且未触发守卫的样本记为安全退化；
 DownstreamProbe 不调用 LLM，只记录 AutoGen 实际传播内容；
 短故障输出的 Token 只用于审计，不用于宣称通信成本下降；
 生产 agent_runtime 不识别 v5.14a 场景，也不依赖固定 Agent 角色名称。
 ```
+
+真实 openEuler 实验与不可变证据复核结果见：
+`docs/experiments/v5.14a-real-memory-fault-injection-results-20260724.md`。
 
 详细说明：`docs/experiments/v5.14a-real-memory-fault-injection.md`。
 

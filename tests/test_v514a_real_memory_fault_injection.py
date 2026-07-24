@@ -142,57 +142,66 @@ class RealMemoryFaultInjectionExperimentTest(unittest.TestCase):
         native_rows: list[dict[str, object]] = []
         managed_rows: list[dict[str, object]] = []
         events: list[dict[str, object]] = []
-        for scenario in self.matrix["scenarios"]:
-            scenario_id = str(scenario["scenario_id"])
-            base: dict[str, object] = {
-                "scenario_id": scenario_id,
-                "repetition": 1,
-                "provider_raw_output": raw[scenario_id],
-                "provider_raw_fingerprint": _text_fingerprint(raw[scenario_id]),
-                "downstream_observed_text": raw[scenario_id],
-                "memory_marker_observed_by_emitter": False,
-                "emitter_received_messages": [],
-            }
-            native_rows.append(base)
-            managed = dict(base)
-            managed.update(
-                {
-                    "downstream_observed_text": downstream[scenario_id],
-                    "memory_marker_observed_by_emitter": True,
-                    "emitter_received_messages": [
-                        {
-                            "content": (
-                                "AGENTLITE_SHARED_MEMORY active_value="
-                                + (
-                                    "2000"
-                                    if scenario_id.startswith("legacy_")
-                                    else "50"
-                                )
-                            )
-                        }
-                    ],
+        for repetition in (1, 2):
+            for scenario in self.matrix["scenarios"]:
+                scenario_id = str(scenario["scenario_id"])
+                row_raw = raw[scenario_id]
+                row_downstream = downstream[scenario_id]
+                if (
+                    scenario_id == "structured_negated_history"
+                    and repetition == 2
+                ):
+                    row_raw = "service.capacity=50"
+                    row_downstream = "service.capacity=50"
+                base: dict[str, object] = {
+                    "scenario_id": scenario_id,
+                    "repetition": repetition,
+                    "provider_raw_output": row_raw,
+                    "provider_raw_fingerprint": _text_fingerprint(row_raw),
+                    "downstream_observed_text": row_raw,
+                    "memory_marker_observed_by_emitter": False,
+                    "emitter_received_messages": [],
                 }
-            )
-            managed_rows.append(managed)
-            action = str(scenario["expected_managed_action"])
-            if action != "safe":
-                events.append(
+                native_rows.append(base)
+                managed = dict(base)
+                managed.update(
                     {
-                        "event_type": "autogen_memory_adoption_guard",
-                        "payload": {
-                            "agent_id": "FaultEmitter",
-                            "original_output_fingerprint": _text_fingerprint(
-                                raw[scenario_id]
-                            ),
-                            "status": action,
-                            "compensation_event_count": 1,
-                        },
+                        "downstream_observed_text": row_downstream,
+                        "memory_marker_observed_by_emitter": True,
+                        "emitter_received_messages": [
+                            {
+                                "content": (
+                                    "AGENTLITE_SHARED_MEMORY active_value="
+                                    + (
+                                        "2000"
+                                        if scenario_id.startswith("legacy_")
+                                        else "50"
+                                    )
+                                )
+                            }
+                        ],
                     }
                 )
+                managed_rows.append(managed)
+                action = str(scenario["expected_managed_action"])
+                if action != "safe":
+                    events.append(
+                        {
+                            "event_type": "autogen_memory_adoption_guard",
+                            "payload": {
+                                "agent_id": "FaultEmitter",
+                                "original_output_fingerprint": _text_fingerprint(
+                                    row_raw
+                                ),
+                                "status": action,
+                                "compensation_event_count": 1,
+                            },
+                        },
+                    )
 
         def payload(rows: list[dict[str, object]]) -> dict[str, object]:
             return {
-                "summary": {"repetitions": 1, "llm_total_tokens": 60},
+                "summary": {"repetitions": 2, "llm_total_tokens": 120},
                 "rows": rows,
             }
 
@@ -211,6 +220,8 @@ class RealMemoryFaultInjectionExperimentTest(unittest.TestCase):
             report["summary"]["passed_check_count"],
             report["summary"]["check_count"],
         )
+        self.assertEqual(report["summary"]["managed_negated_sample_count"], 1)
+        self.assertEqual(report["summary"]["managed_safe_fallback_count"], 1)
 
 
 if __name__ == "__main__":
