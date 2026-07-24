@@ -33,7 +33,11 @@ class ContextEchoWriter(DeterministicAgent):
         joined = "\n".join(item.content for item in context)
         return AgentOutput(
             agent_id=self.agent_id,
-            content=f"writer_output task={task.task_id}\ncontext={joined}",
+            content=(
+                f"writer_output task={task.task_id}\n"
+                "runtime_evidence=structured_communication\n"
+                f"context={joined}"
+            ),
         )
 
 
@@ -185,7 +189,7 @@ class RuntimeTest(unittest.TestCase):
     def test_runtime_messages_report_cost_and_reused_memory_refs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)
-            runtime, metrics = self._runtime(output_dir, build_default_agents())
+            runtime, metrics = self._runtime(output_dir, [ContextEchoWriter()])
             try:
                 first = TaskSpec(
                     "R1",

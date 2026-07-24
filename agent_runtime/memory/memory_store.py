@@ -9,11 +9,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from agent_runtime.memory.claim_extractor import (
+    claim_identity,
+    normalize_claim_cards,
+    normalized_value,
+)
 from agent_runtime.memory.references import (
     MemoryReferenceManagerLite,
     MemoryReferenceRecord,
 )
-from agent_runtime.memory.schema_registry import SchemaRegistryLite
+from agent_runtime.memory.schema_registry import SchemaRegistryLite, SlotPolicy
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+|[\u3400-\u4dbf\u4e00-\u9fff]")
 
@@ -28,6 +33,10 @@ CANONICAL_SLOTS = {
     "slot.paper.evidence",
     "slot.project.requirement",
     "slot.system.deliverable_requirement",
+    "slot.project.state",
+    "slot.runtime.config",
+    "slot.tool.result",
+    "slot.user.preference",
 }
 
 ALIAS_MAPPING = {
@@ -42,6 +51,54 @@ ALIAS_MAPPING = {
     "reuse_hint": "slot.system.reuse_strategy",
     "reuse_strategy": "slot.system.reuse_strategy",
     "final_deliverable": "slot.system.deliverable_requirement",
+    "project_state": "slot.project.state",
+    "runtime_config": "slot.runtime.config",
+    "tool_result": "slot.tool.result",
+    "user_preference": "slot.user.preference",
+}
+
+SLOT_POLICIES = {
+    "slot.project.requirement": SlotPolicy(
+        slot_id="slot.project.requirement",
+        conflict_policy="latest_explicit_state_wins",
+        scope_required=True,
+        temporal_required=True,
+    ),
+    "slot.project.state": SlotPolicy(
+        slot_id="slot.project.state",
+        conflict_policy="latest_explicit_state_wins",
+        scope_required=True,
+        temporal_required=True,
+    ),
+    "slot.system.design_decision": SlotPolicy(
+        slot_id="slot.system.design_decision",
+        conflict_policy="latest_explicit_state_wins",
+        scope_required=True,
+        temporal_required=True,
+    ),
+    "slot.runtime.config": SlotPolicy(
+        slot_id="slot.runtime.config",
+        conflict_policy="latest_explicit_state_wins",
+        scope_required=True,
+        temporal_required=True,
+    ),
+    "slot.user.preference": SlotPolicy(
+        slot_id="slot.user.preference",
+        conflict_policy="latest_valid_high_confidence_wins",
+        scope_required=True,
+        temporal_required=True,
+    ),
+    "slot.paper.evidence": SlotPolicy(
+        slot_id="slot.paper.evidence",
+        conflict_policy="verified_source_wins",
+        scope_required=True,
+    ),
+    "slot.tool.result": SlotPolicy(
+        slot_id="slot.tool.result",
+        conflict_policy="tool_verified_wins",
+        scope_required=True,
+        temporal_required=True,
+    ),
 }
 
 PROMPT_VIEW_MEMORY_STATUSES = {"active", "provisional_active"}
@@ -49,6 +106,7 @@ DORMANT_MEMORY_STATUSES = {"dormant"}
 BLOCKED_MEMORY_STATUSES = {
     "deprecated",
     "deleted",
+    "legacy_audit",
     "superseded",
     "outdated",
     "unresolved_conflict",
@@ -96,6 +154,19 @@ class ClaimCard:
     temporal_scope: str = "current_task"
     schema_version: str = "ccf.v1-lite"
     conflict_policy: str = "highest_confidence_then_latest"
+    candidate_id: str = ""
+    raw_text: str = ""
+    raw_slot_text: str = ""
+    scope: str = "general"
+    certainty: str = "asserted"
+    valid_from: str = ""
+    valid_to: str | None = None
+    value_type: str = "string"
+    unit: str = ""
+    slot_mapping_confidence: float = 1.0
+    supported_by: list[str] = field(default_factory=list)
+    revision_kind: str = "asserted"
+    semantic_key: str = ""
 
 
 @dataclass(slots=True)
@@ -111,6 +182,15 @@ class MemoryView:
     conflicting_claim_ids: list[str] = field(default_factory=list)
     resolution_status: str = "resolved"
     downstream_policy: str = "use_active_claims_only"
+    subject: str = ""
+    scope: str = "general"
+    temporal_scope: str = "current_task"
+    semantic_key: str = ""
+    active_value: dict[str, Any] | None = None
+    historical_values: list[dict[str, Any]] = field(default_factory=list)
+    conflicting_values: list[dict[str, Any]] = field(default_factory=list)
+    version_id: int = 1
+    schema_version: str = "ccf.v1-lite"
 
 
 @dataclass(slots=True)
@@ -184,6 +264,19 @@ class ClaimCandidate:
     confidence: float
     source_pointer: str
     admission_status: str = "pending"
+    raw_slot_text: str = ""
+    slot_id: str = ""
+    scope: str = "general"
+    value_type: str = "string"
+    unit: str = ""
+    raw_text: str = ""
+    summary: str = ""
+    certainty: str = "asserted"
+    modality: str = "asserted"
+    polarity: str = "positive"
+    revision_kind: str = "asserted"
+    temporal_scope: str = "cross_task"
+    schema_version: str = "ccf.v2"
 
 
 @dataclass(slots=True)
@@ -194,6 +287,9 @@ class MemoryAdmissionReport:
     memory_ref: MemoryRef | None = None
     memory_candidate_count: int = 1
     claim_candidate_count: int = 0
+    raw_claim_count: int = 0
+    provisional_claim_count: int = 0
+    slot_mapping_success_count: int = 0
     memory_admitted_count: int = 0
     memory_rejected_count: int = 0
     memory_pending_count: int = 0
@@ -206,6 +302,14 @@ class MemoryAdmissionReport:
     promotion_view_count: int = 0
     alias_mapping_hit_count: int = 0
     unresolved_slot_count: int = 0
+    memory_refs: list[MemoryRef] = field(default_factory=list)
+    claim_ids: list[str] = field(default_factory=list)
+    memory_view_ids: list[str] = field(default_factory=list)
+    unresolved_scope_count: int = 0
+    conflict_detected_count: int = 0
+    resolved_conflict_count: int = 0
+    unresolved_conflict_count: int = 0
+    active_value_selection_count: int = 0
 
 
 @dataclass(slots=True)
@@ -297,7 +401,10 @@ class MemoryCompactionReport:
     new_claim_count: int = 0
     merged_claim_count: int = 0
     superseded_claim_count: int = 0
+    conflict_detected_count: int = 0
+    resolved_conflict_count: int = 0
     unresolved_conflict_count: int = 0
+    active_value_selection_count: int = 0
     compaction_log_count: int = 1
 
 
@@ -321,7 +428,15 @@ class MemoryStoreLite:
         resolved_slots = set(CANONICAL_SLOTS) | set(canonical_slots or set())
         resolved_aliases = dict(ALIAS_MAPPING)
         resolved_aliases.update(alias_mapping or {})
-        self.schema_registry = SchemaRegistryLite(resolved_slots, resolved_aliases)
+        resolved_policies = {
+            slot_id: SLOT_POLICIES.get(slot_id, SlotPolicy(slot_id=slot_id))
+            for slot_id in resolved_slots
+        }
+        self.schema_registry = SchemaRegistryLite(
+            resolved_slots,
+            resolved_aliases,
+            slot_policies=resolved_policies,
+        )
         self.storage_dir = storage_dir
         if self.storage_dir is not None:
             self.storage_dir.mkdir(parents=True, exist_ok=True)
@@ -341,6 +456,7 @@ class MemoryStoreLite:
         self.cold_memory_dir = self.storage_dir / "memory_cold" if self.storage_dir else None
         self._init_layered_storage()
         self._load_layered_storage()
+        self._migrate_loaded_legacy_claims()
 
     def write_memory(
         self,
@@ -422,10 +538,13 @@ class MemoryStoreLite:
             value=summary,
             source_agent=source_agent,
             confidence=confidence,
+            scope="general",
             claim_type=claim_type,
             polarity=polarity,
             modality=modality,
             temporal_scope=temporal_scope,
+            certainty="asserted",
+            valid_from=task_id,
             schema_version=schema_version,
         )
         slot_policy = self.schema_registry.policy_for(resolved.slot_id)
@@ -448,7 +567,18 @@ class MemoryStoreLite:
             temporal_scope=canonical_claim.temporal_scope,
             schema_version=canonical_claim.schema_version,
             conflict_policy=slot_policy.conflict_policy,
+            raw_text=summary,
+            raw_slot_text=slot_hint or resolved.slot_id,
+            scope=canonical_claim.scope,
+            certainty=canonical_claim.certainty,
+            valid_from=canonical_claim.valid_from,
+            valid_to=canonical_claim.valid_to,
+            value_type=canonical_claim.value_type,
+            unit=canonical_claim.unit,
+            slot_mapping_confidence=0.0 if resolved.unresolved else 1.0,
+            supported_by=self._dedupe([*source_state_ids, *evidence_refs]),
         )
+        claim.semantic_key = self._semantic_key(claim)
         self._claims[claim_id] = claim
 
         memory_view, superseded_count, conflict_count = self._upsert_memory_view(claim)
@@ -553,9 +683,28 @@ class MemoryStoreLite:
             candidate_id=candidate_id,
             task_topic=task_topic,
             claim_cards=claim_cards or [],
+            default_slot_hint=candidate_slot_hint,
+            default_confidence=confidence,
+            source_pointer=",".join(evidence_refs),
         )
         resolved = self._resolve_slot(candidate.slot_hint)
+        if resolved.unresolved:
+            claim_resolutions = [
+                self._resolve_slot(item.slot_id or item.raw_slot_text)
+                for item in claim_candidates
+            ]
+            resolved = next(
+                (
+                    item
+                    for item in claim_resolutions
+                    if not item.unresolved
+                ),
+                resolved,
+            )
         status, reasons = self._admit_candidate(candidate, resolved)
+        if status == "admitted" and not claim_candidates:
+            status = "audit_only"
+            reasons = ["no_structured_claims"]
         candidate.admission_status = status
         candidate.admission_reasons = reasons
         self._memory_candidates[candidate_id] = candidate
@@ -568,6 +717,7 @@ class MemoryStoreLite:
             admission_status=status,
             admission_reasons=reasons,
             claim_candidate_count=len(claim_candidates),
+            raw_claim_count=len(claim_candidates),
             memory_admitted_count=int(status == "admitted"),
             memory_rejected_count=int(status == "rejected"),
             memory_pending_count=int(status == "pending"),
@@ -581,32 +731,243 @@ class MemoryStoreLite:
             self._persist_snapshot()
             return report
 
-        write_report = self.write_memory_with_report(
+        promotion_view_id = self._store_candidate_promotion_view(
             task_id=task_id,
             source_agent=source_agent,
-            task_topic=task_topic,
             summary=summary,
-            tags=candidate_tags,
-            slot_hint=resolved.slot_id,
+            task_topic=task_topic,
             source_state_ids=source_state_ids,
             evidence_refs=evidence_refs,
             reuse_intent=reuse_intent,
-            confidence=confidence,
-            claim_type=str(card.get("claim_type") or "fact"),
-            polarity=str(card.get("polarity") or "positive"),
-            modality=str(card.get("modality") or "asserted"),
-            temporal_scope=str(card.get("temporal_scope") or "current_task"),
-            schema_version=str(card.get("schema_version") or "ccf.v1-lite"),
         )
-        report.memory_ref = write_report.memory_ref
-        report.memory_write_count = write_report.memory_write_count
-        report.claim_card_count = write_report.claim_card_count
-        report.memory_view_count = write_report.memory_view_count
-        report.promotion_view_count = write_report.promotion_view_count
-        report.alias_mapping_hit_count += write_report.alias_mapping_hit_count
-        report.unresolved_slot_count += write_report.unresolved_slot_count
-        report.claim_to_memoryview_count = write_report.claim_card_count
+        affected_view_ids: set[str] = set()
+        for claim_candidate in claim_candidates:
+            memory, alias_hit, unresolved, unresolved_scope = (
+                self._write_admitted_claim_candidate(
+                candidate=claim_candidate,
+                task_id=task_id,
+                source_agent=source_agent,
+                task_topic=task_topic,
+                tags=candidate_tags,
+                source_state_ids=source_state_ids,
+                evidence_refs=evidence_refs,
+                promotion_view_id=promotion_view_id,
+                )
+            )
+            report.alias_mapping_hit_count += int(alias_hit)
+            report.unresolved_slot_count += int(unresolved)
+            report.unresolved_scope_count += int(unresolved_scope)
+            if memory is None:
+                claim_candidate.admission_status = (
+                    "unresolved_slot" if unresolved else "unresolved_scope"
+                )
+                continue
+            affected_view_ids.add(memory.memory_view_id)
+            report.memory_refs.append(self.ref(memory))
+            report.claim_ids.append(memory.claim_id)
+            report.memory_view_ids.append(memory.memory_view_id)
+
+        if not report.memory_refs:
+            report.admission_status = (
+                "unresolved_slot"
+                if report.unresolved_slot_count
+                else "unresolved_scope"
+            )
+            report.admission_reasons = [
+                "all_claim_slots_or_scopes_unresolved"
+            ]
+            report.memory_admitted_count = 0
+            report.admission_unresolved_slot_count = int(
+                report.admission_status == "unresolved_slot"
+            )
+            self._persist_snapshot()
+            return report
+
+        compaction_report = self.run_compaction(view_ids=affected_view_ids)
+        report.conflict_detected_count = compaction_report.conflict_detected_count
+        report.resolved_conflict_count = compaction_report.resolved_conflict_count
+        report.unresolved_conflict_count = (
+            compaction_report.unresolved_conflict_count
+        )
+        report.active_value_selection_count = (
+            compaction_report.active_value_selection_count
+        )
+        report.memory_refs = [
+            self.ref(self._memories[ref.memory_id])
+            for ref in report.memory_refs
+            if ref.memory_id in self._memories
+        ]
+        report.memory_ref = report.memory_refs[0]
+        report.memory_write_count = len(report.memory_refs)
+        report.provisional_claim_count = len(report.memory_refs)
+        report.slot_mapping_success_count = len(report.memory_refs)
+        report.claim_card_count = len(report.claim_ids)
+        report.memory_view_count = len(set(report.memory_view_ids))
+        report.promotion_view_count = int(promotion_view_id is not None)
+        report.claim_to_memoryview_count = len(report.claim_ids)
+        self._persist_snapshot()
         return report
+
+    def _store_candidate_promotion_view(
+        self,
+        *,
+        task_id: str,
+        source_agent: str,
+        summary: str,
+        task_topic: str,
+        source_state_ids: list[str],
+        evidence_refs: list[str],
+        reuse_intent: str | None,
+    ) -> str | None:
+        if not source_state_ids:
+            return None
+        promotion_view_id = self._next_id("pv", task_id, source_agent, summary)
+        self._promotion_views[promotion_view_id] = PromotionView(
+            promotion_view_id=promotion_view_id,
+            source_state_ids=list(source_state_ids),
+            core_claim=summary,
+            evidence_refs=list(evidence_refs),
+            reuse_intent=reuse_intent or f"复用 {task_topic} 的结构化事实",
+        )
+        return promotion_view_id
+
+    def _write_admitted_claim_candidate(
+        self,
+        *,
+        candidate: ClaimCandidate,
+        task_id: str,
+        source_agent: str,
+        task_topic: str,
+        tags: list[str],
+        source_state_ids: list[str],
+        evidence_refs: list[str],
+        promotion_view_id: str | None,
+    ) -> tuple[MemoryObject | None, bool, bool, bool]:
+        resolved = self._resolve_slot(
+            candidate.slot_id or candidate.raw_slot_text
+        )
+        if resolved.unresolved:
+            return None, resolved.alias_hit, True, False
+        policy = self.schema_registry.policy_for(resolved.slot_id)
+        if policy.scope_required and candidate.scope in {"", "general"}:
+            return None, resolved.alias_hit, False, True
+        canonical = self.schema_registry.canonicalize_claim(
+            subject=candidate.subject,
+            slot_id=resolved.slot_id,
+            value=candidate.object,
+            source_agent=source_agent,
+            confidence=candidate.confidence,
+            scope=candidate.scope,
+            claim_type="fact",
+            polarity=candidate.polarity,
+            modality=candidate.modality,
+            temporal_scope=candidate.temporal_scope,
+            certainty=candidate.certainty,
+            value_type=candidate.value_type,
+            unit=candidate.unit,
+            valid_from=task_id,
+            schema_version=candidate.schema_version,
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        claim_id = self._next_id(
+            "claim",
+            task_id,
+            source_agent,
+            f"{canonical.slot_id}:{canonical.scope}:{canonical.value}",
+        )
+        claim = ClaimCard(
+            claim_id=claim_id,
+            subject=canonical.subject,
+            slot_id=canonical.slot_id,
+            summary=candidate.summary or candidate.raw_text or canonical.value,
+            source_agent=source_agent,
+            source_task_id=task_id,
+            promotion_view_id=promotion_view_id,
+            confidence=canonical.confidence,
+            status="provisional_active",
+            tags=list(tags),
+            created_at=now,
+            claim_type=canonical.claim_type,
+            value=canonical.value,
+            polarity=canonical.polarity,
+            modality=canonical.modality,
+            temporal_scope=canonical.temporal_scope,
+            schema_version=canonical.schema_version,
+            conflict_policy=policy.conflict_policy,
+            candidate_id=candidate.candidate_id,
+            raw_text=candidate.raw_text,
+            raw_slot_text=candidate.raw_slot_text,
+            scope=canonical.scope,
+            certainty=canonical.certainty,
+            valid_from=canonical.valid_from,
+            valid_to=canonical.valid_to,
+            value_type=canonical.value_type,
+            unit=canonical.unit,
+            slot_mapping_confidence=0.95 if resolved.alias_hit else 1.0,
+            supported_by=self._dedupe(
+                [*source_state_ids, *evidence_refs, candidate.source_pointer]
+            ),
+            revision_kind=candidate.revision_kind,
+        )
+        claim.semantic_key = self._semantic_key(claim)
+        self._claims[claim_id] = claim
+
+        view_id = (
+            f"view_{hashlib.sha256(claim.semantic_key.encode('utf-8')).hexdigest()[:10]}"
+        )
+        view = self._views.get(view_id)
+        if view is None:
+            view = MemoryView(
+                memory_view_id=view_id,
+                slot_id=claim.slot_id,
+                active_claim_ids=[],
+                prompt_summary="",
+                audit_claim_ids=[],
+                created_at=now,
+                status="provisional_active",
+                subject=claim.subject,
+                scope=claim.scope,
+                temporal_scope=claim.temporal_scope,
+                semantic_key=claim.semantic_key,
+                active_value=None,
+                resolution_status="pending_compaction",
+                downstream_policy="do_not_use_for_final_generation",
+                schema_version=claim.schema_version,
+            )
+            self._views[view_id] = view
+        if claim_id not in view.audit_claim_ids:
+            view.audit_claim_ids.append(claim_id)
+
+        memory_id = self._next_memory_id(
+            task_id,
+            source_agent,
+            f"{claim.semantic_key}:{claim.value}",
+        )
+        memory = MemoryObject(
+            memory_id=memory_id,
+            version_id=1,
+            task_id=task_id,
+            source_agent=source_agent,
+            task_topic=task_topic,
+            summary=claim.summary,
+            tags=list(tags),
+            created_at=now,
+            slot_id=claim.slot_id,
+            claim_id=claim_id,
+            memory_view_id=view_id,
+            promotion_view_id=promotion_view_id,
+            status="provisional_active",
+            status_updated_at=now,
+        )
+        self._memories[memory_id] = memory
+        self._create_memory_references(
+            memory=memory,
+            claim_id=claim_id,
+            source_state_ids=source_state_ids,
+            evidence_refs=evidence_refs,
+            promotion_view_id=promotion_view_id,
+        )
+        return memory, resolved.alias_hit, False, False
 
     def search_memory(
         self,
@@ -657,11 +1018,17 @@ class MemoryStoreLite:
 
         scored.sort(key=lambda item: (-item[0], item[1].created_at))
         refs: list[MemoryRef] = []
+        selected_view_ids: set[str] = set()
         now = datetime.now(timezone.utc).isoformat()
-        for _, memory in scored[:top_k]:
+        for _, memory in scored:
+            if memory.memory_view_id in selected_view_ids:
+                continue
+            selected_view_ids.add(memory.memory_view_id)
             memory.hit_count += 1
             memory.last_accessed_at = now
             refs.append(self.ref(memory))
+            if len(refs) >= top_k:
+                break
         if refs:
             self._persist_snapshot()
         return MemorySearchReport(refs=refs)
@@ -861,7 +1228,18 @@ class MemoryStoreLite:
         guard = self._render_revision_guard(view)
         reserved = len(prefix) + len(suffix) + len(guard)
         summary_budget = max(0, budget_chars - reserved)
-        summary = view.prompt_summary[:summary_budget]
+        if view.active_value is not None and view.schema_version.startswith("ccf.v2"):
+            active = view.active_value
+            summary = (
+                f"semantic_key={view.semantic_key}; "
+                f"active_value={active.get('value', '')}; "
+                f"value_type={active.get('value_type', 'string')}; "
+                f"unit={active.get('unit', '')}; "
+                f"confidence={active.get('confidence', 0.0):.2f}; "
+                "status=active"
+            )[:summary_budget]
+        else:
+            summary = view.prompt_summary[:summary_budget]
         rendered = f"{prefix}{summary}{suffix}{guard}"
         return rendered[:budget_chars]
 
@@ -881,13 +1259,30 @@ class MemoryStoreLite:
         ]
         return {
             "required": bool(historical_claims or view.conflicting_claim_ids),
+            "schema_version": view.schema_version,
             "memory_view_id": view.memory_view_id,
             "slot_id": view.slot_id,
+            "subject": view.subject,
+            "scope": view.scope,
+            "semantic_key": view.semantic_key,
             "resolution_status": view.resolution_status,
             "downstream_policy": view.downstream_policy,
             "active_claim_ids": [claim.claim_id for claim in active_claims],
             "active_source_task_ids": [
                 claim.source_task_id for claim in active_claims
+            ],
+            "active_facts": [
+                {
+                    "semantic_key": claim.semantic_key,
+                    "slot_id": claim.slot_id,
+                    "scope": claim.scope,
+                    "value": claim.value,
+                    "value_type": claim.value_type,
+                    "unit": claim.unit,
+                    "polarity": claim.polarity,
+                    "claim_id": claim.claim_id,
+                }
+                for claim in active_claims
             ],
             "historical_claims": [
                 {
@@ -896,10 +1291,37 @@ class MemoryStoreLite:
                     "summary": claim.summary,
                     "value": claim.value,
                     "status": claim.status,
+                    "semantic_key": claim.semantic_key,
+                    "slot_id": claim.slot_id,
+                    "scope": claim.scope,
+                    "value_type": claim.value_type,
+                    "unit": claim.unit,
+                    "polarity": claim.polarity,
+                    "schema_version": claim.schema_version,
+                    "claim_type": claim.claim_type,
+                    "exclude_from_negative_attribution": (
+                        claim.schema_version == "ccf.v1-lite"
+                        and claim.slot_id
+                        == "slot.system.deliverable_requirement"
+                    ),
+                }
+                for claim in historical_claims
+            ],
+            "historical_facts": [
+                {
+                    "semantic_key": claim.semantic_key,
+                    "slot_id": claim.slot_id,
+                    "scope": claim.scope,
+                    "value": claim.value,
+                    "value_type": claim.value_type,
+                    "unit": claim.unit,
+                    "polarity": claim.polarity,
+                    "claim_id": claim.claim_id,
                 }
                 for claim in historical_claims
             ],
             "conflicting_claim_ids": list(view.conflicting_claim_ids),
+            "conflicting_facts": list(view.conflicting_values),
         }
 
     def resolve_ref(self, memory_id: str) -> MemoryRef | None:
@@ -934,6 +1356,121 @@ class MemoryStoreLite:
             )
         text = str(payload)
         return text[:budget_chars]
+
+    def get_prompt_view(
+        self,
+        semantic_keys: str | list[str],
+        *,
+        budget_chars: int = 700,
+    ) -> list[str]:
+        """Return active fact views without expanding historical evidence."""
+        requested = (
+            [semantic_keys]
+            if isinstance(semantic_keys, str)
+            else list(semantic_keys)
+        )
+        rendered: list[str] = []
+        for semantic_key in dict.fromkeys(requested):
+            view = next(
+                (
+                    item
+                    for item in self._views.values()
+                    if item.semantic_key == semantic_key
+                    and item.active_value is not None
+                    and item.resolution_status == "resolved"
+                    and item.downstream_policy
+                    != "do_not_use_for_final_generation"
+                ),
+                None,
+            )
+            if view is None:
+                continue
+            memory = next(
+                (
+                    item
+                    for item in self._memories.values()
+                    if item.memory_view_id == view.memory_view_id
+                    and item.claim_id in view.active_claim_ids
+                    and item.status in PROMPT_VIEW_MEMORY_STATUSES
+                ),
+                None,
+            )
+            if memory is not None:
+                rendered.append(
+                    self.render_prompt_view(
+                        self.ref(memory),
+                        budget_chars=budget_chars,
+                    )
+                )
+        return rendered
+
+    def get_audit_view(
+        self,
+        memory_view_id: str,
+        *,
+        budget_chars: int = 4000,
+    ) -> str:
+        """Expand one MemoryView for reviewers and audit tooling."""
+        view = self._views.get(memory_view_id)
+        if view is None:
+            return ""
+        memory_ids = [
+            memory.memory_id
+            for memory in self._memories.values()
+            if memory.memory_view_id == memory_view_id
+        ]
+        payload = {
+            "view_type": "audit_view",
+            "memory_view": asdict(view),
+            "claims": [
+                asdict(self._claims[claim_id])
+                for claim_id in view.audit_claim_ids
+                if claim_id in self._claims
+            ],
+            "memory_ids": memory_ids,
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2)[:budget_chars]
+
+    def expand_evidence(
+        self,
+        memory_view_id: str,
+        claim_id: str,
+        *,
+        budget_chars: int = 4000,
+    ) -> str:
+        """Expand evidence for one claim instead of broadcasting full history."""
+        view = self._views.get(memory_view_id)
+        claim = self._claims.get(claim_id)
+        if view is None or claim is None or claim_id not in view.audit_claim_ids:
+            return ""
+        memories = [
+            memory
+            for memory in self._memories.values()
+            if memory.memory_view_id == memory_view_id
+            and memory.claim_id == claim_id
+        ]
+        payload: dict[str, Any] = {
+            "view_type": "evidence_expansion",
+            "memory_view_id": memory_view_id,
+            "claim": asdict(claim),
+            "memories": [asdict(memory) for memory in memories],
+            "references": [
+                asdict(reference)
+                for memory in memories
+                for reference in self.reference_manager.active_refs(memory.memory_id)
+            ],
+        }
+        promotion_ids = {
+            memory.promotion_view_id
+            for memory in memories
+            if memory.promotion_view_id
+        }
+        payload["promotion_views"] = [
+            asdict(self._promotion_views[promotion_id])
+            for promotion_id in promotion_ids
+            if promotion_id in self._promotion_views
+        ]
+        return json.dumps(payload, ensure_ascii=False, indent=2)[:budget_chars]
 
     def render_storage_view(self, memory_ref: MemoryRef, budget_chars: int = 6000) -> str:
         memory = self._memories[memory_ref.memory_id]
@@ -980,43 +1517,214 @@ class MemoryStoreLite:
             )
         return "\n".join(lines)[:budget_chars]
 
-    def run_compaction(self, *, slot_id: str | None = None) -> MemoryCompactionReport:
+    def run_compaction(
+        self,
+        *,
+        slot_id: str | None = None,
+        view_ids: set[str] | None = None,
+    ) -> MemoryCompactionReport:
         self.apply_lifecycle_transitions()
         compaction_id = f"compact_{len(self._compaction_log) + 1:04d}"
         views = [
             view
             for view in self._views.values()
-            if slot_id is None or view.slot_id == slot_id
+            if (slot_id is None or view.slot_id == slot_id)
+            and (view_ids is None or view.memory_view_id in view_ids)
         ]
         report = MemoryCompactionReport(compaction_id=compaction_id)
         for view in views:
+            compactable_claims = [
+                self._claims[claim_id]
+                for claim_id in view.audit_claim_ids
+                if claim_id in self._claims
+                and self._claims[claim_id].status
+                in {"active", "provisional_active"}
+            ]
+            provisional_count = sum(
+                claim.status == "provisional_active" for claim in compactable_claims
+            )
+            report.new_claim_count += (
+                provisional_count
+                if provisional_count
+                else len(view.audit_claim_ids)
+                if not view.schema_version.startswith("ccf.v2")
+                else 0
+            )
+            if not compactable_claims:
+                self._refresh_memory_view(view)
+                report.memory_view_count += 1
+                continue
+
+            value_groups: dict[tuple[str, str], list[ClaimCard]] = {}
+            for claim in compactable_claims:
+                key = (
+                    normalized_value(claim.value, claim.value_type, claim.unit),
+                    claim.polarity,
+                )
+                value_groups.setdefault(key, []).append(claim)
+
+            if len(value_groups) == 1:
+                selected_claims = list(next(iter(value_groups.values())))
+                view.active_claim_ids = [
+                    claim.claim_id for claim in selected_claims
+                ]
+                view.conflicting_claim_ids = []
+                for claim in selected_claims:
+                    self._set_claim_status(claim, "active")
+            else:
+                report.conflict_detected_count += 1
+                selected_claims = self._select_compaction_winner(
+                    compactable_claims
+                )
+                if selected_claims is None:
+                    view.active_claim_ids = []
+                    view.conflicting_claim_ids = [
+                        claim.claim_id for claim in compactable_claims
+                    ]
+                    for claim in compactable_claims:
+                        self._set_claim_status(claim, "unresolved_conflict")
+                    report.unresolved_conflict_count += 1
+                else:
+                    report.resolved_conflict_count += 1
+                    selected_ids = {
+                        claim.claim_id for claim in selected_claims
+                    }
+                    view.active_claim_ids = list(selected_ids)
+                    view.conflicting_claim_ids = []
+                    for claim in compactable_claims:
+                        if claim.claim_id in selected_ids:
+                            self._set_claim_status(claim, "active")
+                            continue
+                        self._set_claim_status(claim, "superseded")
+                        if claim.claim_id not in view.historical_claim_ids:
+                            view.historical_claim_ids.append(claim.claim_id)
+                            report.superseded_claim_count += 1
+
             active_claim_ids = [
                 claim_id
                 for claim_id in view.active_claim_ids
                 if self._claims[claim_id].status == "active"
             ]
             view.active_claim_ids = active_claim_ids
-            view.prompt_summary = self._compact_claims(active_claim_ids)
-            view.resolution_status = (
-                "unresolved_conflict" if view.conflicting_claim_ids else "resolved"
+            view.status = (
+                "unresolved_conflict"
+                if view.conflicting_claim_ids
+                else "active"
+            )
+            view.version_id += 1
+            self._refresh_memory_view(view)
+            report.active_value_selection_count += int(
+                view.active_value is not None
             )
             report.memory_view_count += 1
-            report.new_claim_count += len(view.audit_claim_ids)
-            report.merged_claim_count += max(0, len(view.audit_claim_ids) - len(active_claim_ids))
-            report.superseded_claim_count += len(view.historical_claim_ids)
-            report.unresolved_conflict_count += len(view.conflicting_claim_ids)
+            if not view.schema_version.startswith("ccf.v2"):
+                report.merged_claim_count += max(
+                    0,
+                    len(view.audit_claim_ids) - len(active_claim_ids),
+                )
+                report.superseded_claim_count += len(view.historical_claim_ids)
+            else:
+                report.merged_claim_count += max(
+                    0,
+                    len(compactable_claims) - len(value_groups),
+                )
         self._compaction_log.append(
             {
                 "compaction_id": compaction_id,
                 "slot_id": slot_id,
+                "view_ids": sorted(view_ids or []),
                 "memory_view_count": report.memory_view_count,
                 "new_claim_count": report.new_claim_count,
                 "merged_claim_count": report.merged_claim_count,
+                "superseded_claim_count": report.superseded_claim_count,
+                "conflict_detected_count": report.conflict_detected_count,
+                "resolved_conflict_count": report.resolved_conflict_count,
+                "unresolved_conflict_count": report.unresolved_conflict_count,
+                "active_value_selection_count": (
+                    report.active_value_selection_count
+                ),
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
         )
         self._persist_snapshot()
         return report
+
+    def _select_compaction_winner(
+        self,
+        claims: list[ClaimCard],
+    ) -> list[ClaimCard] | None:
+        if not claims:
+            return []
+        policy = claims[-1].conflict_policy
+        if policy in {
+            "latest_explicit_state_wins",
+            "latest_valid_high_confidence_wins",
+            "highest_confidence_then_latest",
+        }:
+            if policy == "latest_explicit_state_wins":
+                winner = max(
+                    claims,
+                    key=lambda claim: (
+                        claim.revision_kind == "replaces",
+                        claim.created_at,
+                        claim.confidence,
+                    ),
+                )
+            elif policy == "latest_valid_high_confidence_wins":
+                winner = max(
+                    claims,
+                    key=lambda claim: (
+                        claim.created_at,
+                        claim.confidence,
+                    ),
+                )
+            else:
+                winner = max(
+                    claims,
+                    key=lambda claim: (
+                        claim.confidence,
+                        claim.created_at,
+                    ),
+                )
+            winner_value = normalized_value(
+                winner.value,
+                winner.value_type,
+                winner.unit,
+            )
+            return [
+                claim
+                for claim in claims
+                if normalized_value(claim.value, claim.value_type, claim.unit)
+                == winner_value
+                and claim.polarity == winner.polarity
+            ]
+
+        ranked = sorted(
+            claims,
+            key=lambda claim: (claim.confidence, claim.created_at),
+            reverse=True,
+        )
+        if len(ranked) == 1 or ranked[0].confidence > ranked[1].confidence:
+            winner = ranked[0]
+            winner_value = normalized_value(
+                winner.value,
+                winner.value_type,
+                winner.unit,
+            )
+            return [
+                claim
+                for claim in claims
+                if normalized_value(claim.value, claim.value_type, claim.unit)
+                == winner_value
+                and claim.polarity == winner.polarity
+            ]
+        return None
+
+    def _set_claim_status(self, claim: ClaimCard, status: str) -> None:
+        if claim.status == status:
+            return
+        claim.status = status
+        self._sync_memory_status_for_claim(claim.claim_id, status)
 
     def open_write_intent(
         self,
@@ -1191,7 +1899,8 @@ class MemoryStoreLite:
         )
 
     def _upsert_memory_view(self, claim: ClaimCard) -> tuple[MemoryView, int, int]:
-        view_id = f"view_{hashlib.sha256(claim.slot_id.encode('utf-8')).hexdigest()[:10]}"
+        semantic_key = claim.semantic_key or self._semantic_key(claim)
+        view_id = f"view_{hashlib.sha256(semantic_key.encode('utf-8')).hexdigest()[:10]}"
         if view_id in self._views:
             view = self._views[view_id]
             superseded_count = 0
@@ -1201,10 +1910,7 @@ class MemoryStoreLite:
                 superseded_count, conflict_count = self._resolve_claim_conflict(
                     view, claim
                 )
-            view.prompt_summary = self._compact_claims(view.active_claim_ids)
-            view.resolution_status = (
-                "unresolved_conflict" if view.conflicting_claim_ids else "resolved"
-            )
+            self._refresh_memory_view(view)
             return view, superseded_count, conflict_count
 
         view = MemoryView(
@@ -1214,8 +1920,14 @@ class MemoryStoreLite:
             prompt_summary=claim.summary,
             audit_claim_ids=[claim.claim_id],
             created_at=datetime.now(timezone.utc).isoformat(),
+            subject=claim.subject,
+            scope=claim.scope,
+            temporal_scope=claim.temporal_scope,
+            semantic_key=semantic_key,
+            schema_version=claim.schema_version,
         )
         self._views[view_id] = view
+        self._refresh_memory_view(view)
         return view, 0, 0
 
     def _resolve_claim_conflict(
@@ -1232,6 +1944,19 @@ class MemoryStoreLite:
             return 0, 0
 
         candidates = [self._claims[item] for item in same_subject_claim_ids] + [new_claim]
+        equivalent_ids = [
+            claim.claim_id
+            for claim in candidates
+            if normalized_value(claim.value, claim.value_type, claim.unit)
+            == normalized_value(new_claim.value, new_claim.value_type, new_claim.unit)
+            and claim.polarity == new_claim.polarity
+        ]
+        if len(equivalent_ids) > 1:
+            for claim_id in equivalent_ids:
+                if claim_id not in view.active_claim_ids:
+                    view.active_claim_ids.append(claim_id)
+            return 0, 0
+
         best = max(candidates, key=lambda claim: (claim.confidence, claim.created_at))
         superseded_count = 0
         conflict_count = 0
@@ -1257,6 +1982,94 @@ class MemoryStoreLite:
         if best.summary != new_claim.summary:
             conflict_count = 1
         return 1, conflict_count
+
+    def _refresh_memory_view(self, view: MemoryView) -> None:
+        active_claims = [
+            self._claims[claim_id]
+            for claim_id in view.active_claim_ids
+            if claim_id in self._claims
+            and self._claims[claim_id].status in {"active", "provisional_active"}
+        ]
+        historical_claims = [
+            self._claims[claim_id]
+            for claim_id in view.historical_claim_ids
+            if claim_id in self._claims
+        ]
+        conflicting_claims = [
+            self._claims[claim_id]
+            for claim_id in view.conflicting_claim_ids
+            if claim_id in self._claims
+        ]
+        view.prompt_summary = self._compact_claims(
+            [claim.claim_id for claim in active_claims]
+        )
+        if active_claims:
+            best = max(active_claims, key=lambda claim: (claim.confidence, claim.created_at))
+            view.active_value = self._claim_value_payload(
+                best,
+                supported_by=[
+                    claim.claim_id
+                    for claim in active_claims
+                    if normalized_value(claim.value, claim.value_type, claim.unit)
+                    == normalized_value(best.value, best.value_type, best.unit)
+                ],
+                selected_by=best.conflict_policy,
+            )
+        else:
+            view.active_value = None
+        view.historical_values = [
+            self._claim_value_payload(claim, status=claim.status)
+            for claim in historical_claims
+        ]
+        view.conflicting_values = [
+            self._claim_value_payload(claim, status=claim.status)
+            for claim in conflicting_claims
+        ]
+        if conflicting_claims:
+            view.resolution_status = "unresolved_conflict"
+            view.downstream_policy = "do_not_use_for_final_generation"
+        else:
+            view.resolution_status = "resolved"
+            view.downstream_policy = (
+                "use_active_claims_only"
+                if historical_claims
+                else "safe_for_prompt_view"
+            )
+
+    @staticmethod
+    def _claim_value_payload(
+        claim: ClaimCard,
+        *,
+        supported_by: list[str] | None = None,
+        selected_by: str = "",
+        status: str = "",
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "value": claim.value,
+            "value_type": claim.value_type,
+            "unit": claim.unit,
+            "confidence": claim.confidence,
+            "polarity": claim.polarity,
+            "valid_from": claim.valid_from,
+            "valid_to": claim.valid_to,
+            "supported_by": supported_by or [claim.claim_id],
+        }
+        if selected_by:
+            payload["selected_by"] = selected_by
+        if status:
+            payload["status"] = status
+        return payload
+
+    @staticmethod
+    def _semantic_key(claim: ClaimCard) -> str:
+        return claim_identity(
+            {
+                "subject": claim.subject,
+                "slot_id": claim.slot_id,
+                "scope": claim.scope,
+                "temporal_scope": claim.temporal_scope,
+            }
+        )
 
     def _sync_memory_status_for_claim(self, claim_id: str, status: str) -> None:
         for memory in self._memories.values():
@@ -1472,6 +2285,35 @@ class MemoryStoreLite:
             for payload in snapshot.get("patch_regeneration_log", [])
         ]
 
+    def _migrate_loaded_legacy_claims(self) -> None:
+        """Keep old whole-document deliverables for audit, never prompt injection."""
+        legacy_claim_ids = {
+            claim.claim_id
+            for claim in self._claims.values()
+            if claim.schema_version == "ccf.v1-lite"
+            and claim.slot_id == "slot.system.deliverable_requirement"
+        }
+        if not legacy_claim_ids:
+            return
+        for claim_id in legacy_claim_ids:
+            self._claims[claim_id].claim_type = "legacy_document_claim"
+        affected_view_ids: set[str] = set()
+        for memory in self._memories.values():
+            if memory.claim_id not in legacy_claim_ids:
+                continue
+            memory.status = "legacy_audit"
+            memory.status_updated_at = (
+                memory.status_updated_at
+                or datetime.now(timezone.utc).isoformat()
+            )
+            affected_view_ids.add(memory.memory_view_id)
+        for view_id in affected_view_ids:
+            view = self._views.get(view_id)
+            if view is None:
+                continue
+            view.status = "legacy_audit"
+            view.downstream_policy = "audit_only"
+
     def _persist_layered_records(self) -> None:
         if self.storage_dir is None or self.warm_db_path is None or self.cold_memory_dir is None:
             return
@@ -1573,6 +2415,19 @@ class MemoryStoreLite:
     def _render_revision_guard(self, view: MemoryView) -> str:
         if not view.historical_claim_ids and not view.conflicting_claim_ids:
             return ""
+        if view.schema_version.startswith("ccf.v2") and view.active_value is not None:
+            active = view.active_value
+            return (
+                "\n[revision_guard "
+                f"policy={view.downstream_policy}; "
+                f"resolution={view.resolution_status}; "
+                f"semantic_key={view.semantic_key}; "
+                f"active_value={active.get('value', '')}; "
+                f"unit={active.get('unit', '')}; "
+                f"superseded_claim_count={len(view.historical_claim_ids)}] "
+                "Use only the active value for this semantic key. "
+                "Contradictory values in native message history are audit-only."
+            )
         active_claims = ",".join(view.active_claim_ids)
         return (
             "\n[revision_guard "
@@ -1606,17 +2461,28 @@ class MemoryStoreLite:
         candidate_id: str,
         task_topic: str,
         claim_cards: list[dict[str, Any]],
+        default_slot_hint: str,
+        default_confidence: float,
+        source_pointer: str,
     ) -> list[ClaimCandidate]:
         candidates: list[ClaimCandidate] = []
-        for index, item in enumerate(claim_cards):
-            if not isinstance(item, dict):
-                continue
+        normalized_cards = normalize_claim_cards(
+            claim_cards,
+            default_subject=task_topic,
+            default_slot_hint=default_slot_hint,
+            default_confidence=default_confidence,
+            source_pointer=source_pointer,
+        )
+        for index, item in enumerate(normalized_cards):
             subject = str(item.get("subject") or task_topic)
-            predicate = str(item.get("predicate") or item.get("claim_type") or "claims")
-            obj = str(item.get("object") or item.get("summary") or item.get("claim") or "")
+            predicate = str(item.get("raw_slot_text") or item.get("scope") or "claims")
+            obj = str(item.get("value") or "")
             condition = str(item.get("condition") or "")
-            source_pointer = str(item.get("source_pointer") or item.get("source") or "")
-            confidence = self._float_between(item.get("confidence"), default=0.5)
+            resolved_source = str(item.get("source_pointer") or source_pointer)
+            confidence = self._float_between(
+                item.get("confidence"),
+                default=default_confidence,
+            )
             claim_id = self._next_candidate_id(
                 "cc", candidate_id, str(index), f"{subject}:{predicate}:{obj}"
             )
@@ -1629,7 +2495,20 @@ class MemoryStoreLite:
                     object=obj,
                     condition=condition,
                     confidence=confidence,
-                    source_pointer=source_pointer,
+                    source_pointer=resolved_source,
+                    raw_slot_text=str(item.get("raw_slot_text") or predicate),
+                    slot_id=str(item.get("slot_id") or default_slot_hint),
+                    scope=str(item.get("scope") or "general"),
+                    value_type=str(item.get("value_type") or "string"),
+                    unit=str(item.get("unit") or ""),
+                    raw_text=str(item.get("raw_text") or item.get("summary") or obj),
+                    summary=str(item.get("summary") or item.get("raw_text") or obj),
+                    certainty=str(item.get("certainty") or "asserted"),
+                    modality=str(item.get("modality") or "asserted"),
+                    polarity=str(item.get("polarity") or "positive"),
+                    revision_kind=str(item.get("revision_kind") or "asserted"),
+                    temporal_scope=str(item.get("temporal_scope") or "cross_task"),
+                    schema_version=str(item.get("schema_version") or "ccf.v2"),
                 )
             )
         return candidates

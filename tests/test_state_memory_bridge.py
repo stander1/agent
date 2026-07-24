@@ -19,7 +19,24 @@ class StateToMemoryBridgeLiteTest(unittest.TestCase):
             source_state_ids=["state_writer"],
             evidence_refs=["state_writer"],
             reuse_intent="供 travel_A 后续连续任务复用",
-            control=None,
+            control={
+                "claim_cards": [
+                    {
+                        "subject": "travel plan",
+                        "raw_slot_text": "budget",
+                        "slot_id": "slot.project.requirement",
+                        "scope": "constraint.budget",
+                        "value": "3000",
+                        "value_type": "integer",
+                        "unit": "CNY",
+                        "certainty": "confirmed",
+                        "modality": "asserted",
+                        "polarity": "positive",
+                        "confidence": 0.9,
+                        "source_pointer": "state_writer",
+                    }
+                ]
+            },
             degraded=False,
         )
 
@@ -28,6 +45,30 @@ class StateToMemoryBridgeLiteTest(unittest.TestCase):
         self.assertEqual(report.memory_write_count, 1)
         self.assertEqual(report.promotion_view_count, 1)
         self.assertIsNotNone(report.memory_ref)
+
+    def test_bridge_keeps_unstructured_summary_out_of_formal_memory(self) -> None:
+        store = MemoryStoreLite()
+        bridge = StateToMemoryBridgeLite(store)
+
+        report, validation = bridge.promote(
+            task_id="N1",
+            source_agent="writer",
+            task_topic="generic project",
+            fallback_summary="This is a reusable narrative summary without a concrete fact.",
+            tags=["generic", "N1", "writer"],
+            slot_hint="reuse_strategy",
+            source_state_ids=["state_summary"],
+            evidence_refs=["state_summary"],
+            reuse_intent="reuse in later tasks",
+            control=None,
+            degraded=False,
+        )
+
+        self.assertTrue(validation.allowed)
+        self.assertEqual(report.admission_status, "audit_only")
+        self.assertEqual(report.memory_write_count, 0)
+        self.assertEqual(report.admission_reasons, ["no_structured_claims"])
+        self.assertIsNone(report.memory_ref)
 
     def test_degraded_contract_becomes_audit_only_candidate(self) -> None:
         store = MemoryStoreLite()

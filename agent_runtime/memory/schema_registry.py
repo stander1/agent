@@ -18,6 +18,9 @@ class SlotPolicy:
     scope_required: bool = False
     temporal_required: bool = False
     prompt_rendering: str = "summary_with_evidence"
+    value_type: str = "string"
+    allowed_modalities: tuple[str, ...] = ()
+    prompt_visible: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,12 +28,18 @@ class CanonicalClaimLite:
     subject: str
     slot_id: str
     value: str
+    scope: str
     claim_type: str
     polarity: str
     modality: str
     temporal_scope: str
+    certainty: str
     source_agent: str
     confidence: float
+    value_type: str = "string"
+    unit: str = ""
+    valid_from: str = ""
+    valid_to: str | None = None
     schema_version: str = "ccf.v1-lite"
 
 
@@ -76,28 +85,46 @@ class SchemaRegistryLite:
         *,
         subject: str,
         slot_id: str,
-        value: str,
+        value: object,
         source_agent: str,
         confidence: float,
+        scope: str = "general",
         claim_type: str = "fact",
         polarity: str = "positive",
         modality: str = "asserted",
         temporal_scope: str = "current_task",
+        certainty: str = "asserted",
+        value_type: str | None = None,
+        unit: str = "",
+        valid_from: str = "",
+        valid_to: str | None = None,
         schema_version: str = "ccf.v1-lite",
     ) -> CanonicalClaimLite:
+        policy = self.policy_for(slot_id)
         return CanonicalClaimLite(
             subject=subject,
             slot_id=slot_id,
-            value=value,
+            value=str(value),
+            scope=self.normalize_scope(scope),
             claim_type=claim_type,
             polarity=polarity,
             modality=modality,
             temporal_scope=temporal_scope,
+            certainty=certainty,
             source_agent=source_agent,
             confidence=confidence,
+            value_type=value_type or policy.value_type,
+            unit=unit,
+            valid_from=valid_from,
+            valid_to=valid_to,
             schema_version=schema_version,
         )
 
     @staticmethod
     def normalize(text: str) -> str:
         return re.sub(r"[^a-z0-9_.]+", "_", text.lower()).strip("_")
+
+    @classmethod
+    def normalize_scope(cls, text: str) -> str:
+        normalized = cls.normalize(text)
+        return normalized or "general"

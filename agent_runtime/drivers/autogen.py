@@ -40,6 +40,10 @@ from agent_runtime.drivers.loader import DriverActivation
 from agent_runtime.eval.metrics import MetricsCollector
 from agent_runtime.eval.token_counter import TokenCounter
 from agent_runtime.eval.trace_logger import TraceLogger
+from agent_runtime.memory.claim_extractor import (
+    extract_claim_cards,
+    normalized_value,
+)
 from agent_runtime.memory.memory_store import MemoryRef, MemoryStoreLite
 from agent_runtime.memory.context_views import (
     build_minimal_context_view,
@@ -78,7 +82,7 @@ MEMORY_SCOPE_ENV = "AGENTLITE_MEMORY_SCOPE"
 FINAL_DELIVERY_MARKER_ENV = "AGENTLITE_AUTOGEN_FINAL_MARKER"
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
 CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
-DRIVER_PHASE = "v5.13w"
+DRIVER_PHASE = "v5.13x"
 _AUTOGEN_REPEATED_INSTANCE_ID_RE = re.compile(
     r"^(?P<logical>.+)_(?P<run>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
     r"[0-9a-f]{4}-[0-9a-f]{12})_(?P=run)$",
@@ -719,7 +723,15 @@ class AutoGenHookManager:
                 "memory_supported_output_count": int(
                     bool(unique_useful or unique_mixed)
                 ),
-                "attribution_mode": "active_and_historical_fact_rules_v3",
+                "attribution_mode": (
+                    "ccf_v2_semantic_key_value_rules"
+                    if any(
+                        row.get("attribution_mode")
+                        == "ccf_v2_semantic_key_value_rules"
+                        for row in evidence_rows
+                    )
+                    else "active_and_historical_fact_rules_v3"
+                ),
                 "current_task_source": records[0].current_task_source,
                 "current_task_fingerprint": _text_fingerprint(
                     records[0].current_task_text
@@ -823,11 +835,10 @@ class AutoGenHookManager:
                         if delivery_assessment is not None
                         else {}
                     ),
-                    "memory_refs": (
-                        [_memory_ref_payload(report.memory_ref)]
-                        if getattr(report, "memory_ref", None) is not None
-                        else []
-                    ),
+                    "memory_refs": [
+                        _memory_ref_payload(ref)
+                        for ref in _admission_memory_refs(report)
+                    ],
                 },
             )
         return report
@@ -1199,11 +1210,10 @@ class AutoGenHookManager:
             text=text,
             state_refs=list(state_refs),
         )
-        admitted_memory_refs = (
-            [_memory_ref_payload(admission_report.memory_ref)]
-            if getattr(admission_report, "memory_ref", None) is not None
-            else []
-        )
+        admitted_refs = _admission_memory_refs(admission_report)
+        admitted_memory_refs = [
+            _memory_ref_payload(ref) for ref in admitted_refs
+        ]
         self.trace.write(
             "autogen_agent_output",
             {
@@ -1232,11 +1242,7 @@ class AutoGenHookManager:
             native_text=text,
             state_refs=list(state_refs or []),
             state_ref_payload=state_ref_payload,
-            memory_refs=(
-                [admission_report.memory_ref]
-                if getattr(admission_report, "memory_ref", None) is not None
-                else []
-            ),
+            memory_refs=admitted_refs,
         )
         self._record_shadow_broadcast_replacement(
             context=context,
@@ -6252,6 +6258,16 @@ def _memory_ref_payload(ref: Any) -> dict[str, Any]:
     }
 
 
+def _admission_memory_refs(report: Any) -> list[Any]:
+    if report is None:
+        return []
+    refs = getattr(report, "memory_refs", None)
+    if isinstance(refs, list) and refs:
+        return list(refs)
+    ref = getattr(report, "memory_ref", None)
+    return [ref] if ref is not None else []
+
+
 def _unique_memory_ref_count(refs: list[dict[str, Any]]) -> int:
     keys = {
         (
@@ -6417,6 +6433,18 @@ def _memory_adoption_evidence(
         identifier and _normalize_fact_text(identifier) in normalized_output
         for identifier in (memory_id, memory_view_id)
     )
+    if (
+        isinstance(revision_guard, Mapping)
+        and str(revision_guard.get("schema_version") or "").startswith("ccf.v2")
+        and revision_guard.get("active_facts")
+    ):
+        return _structured_memory_adoption_evidence(
+            revision_guard=revision_guard,
+            current_task_text=current_task_text,
+            output_text=output_text,
+            explicit_reference=explicit_reference,
+        )
+
     active_body = _active_memory_view_body(memory_prompt_view)
     source_units = _adoption_fact_units(active_body)
     candidate_units = [
@@ -6506,6 +6534,7 @@ def _revision_conflict_evidence(
     active_units = _adoption_fact_units(active_text)
     historical_units: list[str] = []
     historical_claim_ids: list[str] = []
+    excluded_legacy_claim_ids: list[str] = []
     if isinstance(historical_claims, list):
         for claim in historical_claims:
             if not isinstance(claim, Mapping):
@@ -6513,6 +6542,10 @@ def _revision_conflict_evidence(
             claim_id = str(claim.get("claim_id", "") or "")
             if claim_id:
                 historical_claim_ids.append(claim_id)
+            if bool(claim.get("exclude_from_negative_attribution", False)):
+                if claim_id:
+                    excluded_legacy_claim_ids.append(claim_id)
+                continue
             summary = str(claim.get("summary", "") or claim.get("value", "") or "")
             historical_units.extend(_adoption_fact_units(summary))
 
@@ -6543,6 +6576,13 @@ def _revision_conflict_evidence(
     return {
         "revision_guard_present": bool(historical_claim_ids),
         "historical_claim_count": len(historical_claim_ids),
+        "excluded_legacy_historical_claim_count": len(
+            excluded_legacy_claim_ids
+        ),
+        "excluded_legacy_historical_claim_fingerprints": [
+            hashlib.sha256(claim_id.encode("utf-8")).hexdigest()[:16]
+            for claim_id in excluded_legacy_claim_ids[:5]
+        ],
         "historical_claim_fingerprints": [
             hashlib.sha256(claim_id.encode("utf-8")).hexdigest()[:16]
             for claim_id in historical_claim_ids[:5]
@@ -6564,6 +6604,214 @@ def _revision_conflict_evidence(
             round(score, 6) for _, _, score in matched[:5]
         ],
     }
+
+
+def _structured_memory_adoption_evidence(
+    *,
+    revision_guard: Mapping[str, Any],
+    current_task_text: str,
+    output_text: str,
+    explicit_reference: bool,
+) -> dict[str, Any]:
+    subject = str(revision_guard.get("subject") or "project:current")
+    output_claims = extract_claim_cards(
+        output_text,
+        subject=subject,
+        source_pointer="agent_output",
+        default_confidence=0.8,
+    )
+    task_claims = extract_claim_cards(
+        current_task_text,
+        subject=subject,
+        source_pointer="current_task",
+        default_confidence=0.95,
+    )
+    active_facts = _unique_structured_facts(
+        revision_guard.get("active_facts", [])
+    )
+    historical_facts = _unique_structured_facts(
+        revision_guard.get("historical_facts", [])
+    )
+
+    matched_active: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    matched_historical: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    excluded_current: list[dict[str, Any]] = []
+    for fact in active_facts:
+        current_match = _matching_structured_claim(fact, task_claims)
+        output_match = _matching_structured_claim(fact, output_claims)
+        if current_match is not None:
+            excluded_current.append(fact)
+            continue
+        if output_match is not None and str(output_match.get("polarity")) != "negative":
+            matched_active.append((fact, output_match))
+
+    for fact in historical_facts:
+        output_match = _matching_structured_claim(fact, output_claims)
+        if output_match is None or str(output_match.get("polarity")) == "negative":
+            continue
+        matched_historical.append((fact, output_match))
+
+    active_adopted = explicit_reference or bool(matched_active)
+    historical_adopted = bool(matched_historical)
+    if active_adopted and historical_adopted:
+        status = "mixed"
+    elif historical_adopted:
+        status = "wrong"
+    elif active_adopted:
+        status = "useful"
+    else:
+        status = "unassessed"
+
+    return {
+        "adopted": active_adopted or historical_adopted,
+        "status": status,
+        "explicit_reference": explicit_reference,
+        "attribution_threshold": 1.0,
+        "current_task_overlap_threshold": 1.0,
+        "current_task_fingerprint": _text_fingerprint(current_task_text),
+        "current_task_fact_count": len(task_claims),
+        "source_fact_count": len(active_facts),
+        "candidate_fact_count": len(active_facts),
+        "not_injected_fact_count": 0,
+        "current_task_duplicate_fact_count": len(excluded_current),
+        "current_task_duplicate_fact_fingerprints": [
+            _structured_fact_fingerprint(fact)
+            for fact in excluded_current[:5]
+        ],
+        "current_task_duplicate_fact_previews": [
+            _structured_fact_preview(fact) for fact in excluded_current[:3]
+        ],
+        "current_task_duplicate_scores": [1.0] * min(5, len(excluded_current)),
+        "matched_fact_count": len(matched_active),
+        "matched_fact_fingerprints": [
+            _structured_fact_fingerprint(fact)
+            for fact, _ in matched_active[:5]
+        ],
+        "matched_fact_previews": [
+            _structured_fact_preview(fact) for fact, _ in matched_active[:3]
+        ],
+        "match_scores": [1.0] * min(5, len(matched_active)),
+        "current_task_match_scores": [0.0] * min(5, len(matched_active)),
+        "attribution_margins": [1.0] * min(5, len(matched_active)),
+        "revision_guard_present": bool(historical_facts),
+        "historical_claim_count": len(historical_facts),
+        "historical_claim_fingerprints": [
+            _structured_fact_fingerprint(fact)
+            for fact in historical_facts[:5]
+        ],
+        "historical_fact_count": len(historical_facts),
+        "matched_historical_fact_count": len(matched_historical),
+        "matched_historical_fact_fingerprints": [
+            _structured_fact_fingerprint(fact)
+            for fact, _ in matched_historical[:5]
+        ],
+        "matched_historical_fact_previews": [
+            _structured_fact_preview(fact)
+            for fact, _ in matched_historical[:3]
+        ],
+        "conflicting_active_fact_fingerprints": [
+            _structured_fact_fingerprint(fact)
+            for fact, _ in matched_active[:5]
+        ],
+        "historical_output_match_scores": [1.0]
+        * min(5, len(matched_historical)),
+        "semantic_key": str(revision_guard.get("semantic_key") or ""),
+        "active_value": (
+            active_facts[0].get("value") if active_facts else None
+        ),
+        "historical_values": [
+            fact.get("value") for fact in historical_facts
+        ],
+        "matched_output_spans": [
+            str(match.get("raw_text") or match.get("summary") or "")
+            for _, match in [*matched_active, *matched_historical][:5]
+        ],
+        "classification_reason": (
+            "structured_active_and_historical_values"
+            if status == "mixed"
+            else "structured_historical_value_only"
+            if status == "wrong"
+            else "structured_active_value"
+            if status == "useful"
+            else "structured_value_not_observed"
+        ),
+        "attribution_mode": "ccf_v2_semantic_key_value_rules",
+    }
+
+
+def _unique_structured_facts(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    unique: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        fact = dict(item)
+        key = (
+            str(fact.get("slot_id") or ""),
+            str(fact.get("scope") or "general"),
+            normalized_value(
+                fact.get("value"),
+                str(fact.get("value_type") or "string"),
+                str(fact.get("unit") or ""),
+            ),
+            str(fact.get("polarity") or "positive"),
+        )
+        unique[key] = fact
+    return list(unique.values())
+
+
+def _matching_structured_claim(
+    fact: Mapping[str, Any],
+    claims: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    expected_slot = str(fact.get("slot_id") or "")
+    expected_scope = str(fact.get("scope") or "general")
+    expected_value = normalized_value(
+        fact.get("value"),
+        str(fact.get("value_type") or "string"),
+        str(fact.get("unit") or ""),
+    )
+    expected_unit = str(fact.get("unit") or "")
+    expected_value_type = str(fact.get("value_type") or "string")
+    expected_polarity = str(fact.get("polarity") or "positive")
+    for claim in claims:
+        if str(claim.get("slot_id") or "") != expected_slot:
+            continue
+        if str(claim.get("scope") or "general") != expected_scope:
+            continue
+        actual_value = normalized_value(
+            claim.get("value"),
+            str(claim.get("value_type") or expected_value_type),
+            str(claim.get("unit") or expected_unit),
+        )
+        if actual_value != expected_value:
+            continue
+        if expected_polarity == "negative" and str(
+            claim.get("polarity") or "positive"
+        ) != "negative":
+            continue
+        return claim
+    return None
+
+
+def _structured_fact_fingerprint(fact: Mapping[str, Any]) -> str:
+    raw = "|".join(
+        (
+            str(fact.get("semantic_key") or ""),
+            str(fact.get("slot_id") or ""),
+            str(fact.get("scope") or ""),
+            str(fact.get("value") or ""),
+        )
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _structured_fact_preview(fact: Mapping[str, Any]) -> str:
+    return (
+        f"{fact.get('slot_id', '')}/{fact.get('scope', '')}="
+        f"{fact.get('value', '')}"
+    )
 
 
 def _facts_have_revision_conflict(historical: str, active: str) -> bool:

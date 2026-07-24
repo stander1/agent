@@ -720,6 +720,11 @@ class CollaborationKernel:
             mode=mode,
             memory_candidate_count=admission_report.memory_candidate_count,
             claim_candidate_count=admission_report.claim_candidate_count,
+            raw_claim_count=admission_report.raw_claim_count,
+            provisional_claim_count=admission_report.provisional_claim_count,
+            slot_mapping_success_count=(
+                admission_report.slot_mapping_success_count
+            ),
             memory_admitted_count=admission_report.memory_admitted_count,
             memory_rejected_count=admission_report.memory_rejected_count,
             memory_pending_count=admission_report.memory_pending_count,
@@ -728,6 +733,19 @@ class CollaborationKernel:
                 admission_report.admission_unresolved_slot_count
             ),
             claim_to_memoryview_count=admission_report.claim_to_memoryview_count,
+            memory_conflict_detected_count=(
+                admission_report.conflict_detected_count
+            ),
+            memory_conflict_resolved_count=(
+                admission_report.resolved_conflict_count
+            ),
+            memory_unresolved_conflict_count=(
+                admission_report.unresolved_conflict_count
+            ),
+            active_memory_value_selection_count=(
+                admission_report.active_value_selection_count
+            ),
+            unresolved_scope_count=admission_report.unresolved_scope_count,
         )
         self.metrics.record_memory_write(
             task_id=task.task_id,
@@ -757,6 +775,31 @@ class CollaborationKernel:
                     admission_report.memory_ref.memory_id
                     if admission_report.memory_ref is not None
                     else None
+                ),
+                "memory_refs": [
+                    ref.memory_id for ref in admission_report.memory_refs
+                ],
+                "raw_claim_count": admission_report.raw_claim_count,
+                "provisional_claim_count": (
+                    admission_report.provisional_claim_count
+                ),
+                "slot_mapping_success_count": (
+                    admission_report.slot_mapping_success_count
+                ),
+                "unresolved_scope_count": (
+                    admission_report.unresolved_scope_count
+                ),
+                "conflict_detected_count": (
+                    admission_report.conflict_detected_count
+                ),
+                "resolved_conflict_count": (
+                    admission_report.resolved_conflict_count
+                ),
+                "unresolved_conflict_count": (
+                    admission_report.unresolved_conflict_count
+                ),
+                "active_value_selection_count": (
+                    admission_report.active_value_selection_count
                 ),
             },
         )

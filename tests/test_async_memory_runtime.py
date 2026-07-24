@@ -23,7 +23,10 @@ class SimpleAgent(DeterministicAgent):
         del context
         return AgentOutput(
             agent_id=self.agent_id,
-            content=f"{self.agent_id} completed {task.task_id}",
+            content=(
+                f"{self.agent_id} completed {task.task_id}; "
+                f"{self.agent_id}_result=completed"
+            ),
         )
 
 

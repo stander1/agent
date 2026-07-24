@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from agent_runtime.memory.claim_extractor import extract_claim_cards
 from agent_runtime.memory.memory_store import MemoryAdmissionReport, MemoryStoreLite
 
 
@@ -95,15 +96,12 @@ class MemoryPromotionCompiler:
             memory_card.setdefault("raw_required_hint", False)
 
         if not claim_cards and promotion_view.core_claim:
-            claim_cards = [
-                {
-                    "subject": promotion_view.task_topic,
-                    "predicate": "summarizes",
-                    "object": promotion_view.core_claim,
-                    "source_pointer": ",".join(promotion_view.evidence_refs),
-                    "confidence": memory_card.get("confidence", 0.5),
-                }
-            ]
+            claim_cards = extract_claim_cards(
+                promotion_view.core_claim,
+                subject=promotion_view.task_topic,
+                source_pointer=",".join(promotion_view.evidence_refs),
+                default_confidence=float(memory_card.get("confidence", 0.5)),
+            )
 
         return PromotionCandidate(
             memory_card=memory_card,
@@ -214,4 +212,3 @@ class StateToMemoryBridgeLite:
                 dict.fromkeys(report.admission_reasons + validation.reasons)
             )
         return report, validation
-

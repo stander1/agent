@@ -4544,3 +4544,49 @@ agent_runtime 不认识 Question A/D；
 ```
 
 详细说明：`docs/experiments/v5.13w-conflict-aware-memory.md`。
+
+## 61. v5.13x：事实级 Claim 与 MemoryView 校准
+
+v5.13x 将 v5.13w 的“整篇交付 Claim + 文本冲突匹配”校准为最终创新方案规定的 TLC-Memory 事实级主线。运行时仍不识别具体问题、业务领域或固定 Agent 角色。
+
+实现映射：
+
+- `agent_runtime/memory/claim_extractor.py`：按“结构化 Claim 优先、显式键值和高置信规则补充”提取通用事实，不包含 Question A/D 词表；
+- `agent_runtime/memory/schema_registry.py`：补齐 `scope`、`certainty`、`value_type`、单位、时效和 Slot 冲突策略；
+- `agent_runtime/memory/memory_store.py`：admitted ClaimCandidate 逐条形成 `ccf.v2` ClaimCard，先写 `provisional_active`，再按 `subject + slot_id + scope + temporal_scope` 批量生成 MemoryView；
+- `agent_runtime/memory/memory_store.py`：同值合并证据，显式修订形成 active/historical，无法裁决形成 conflicting 并阻断 Prompt；检索按 MemoryView 去重；
+- `agent_runtime/memory/memory_store.py`：新增 `get_prompt_view()`、`get_audit_view()` 和 `expand_evidence()`，业务 Prompt 与审计溯源分离；
+- `agent_runtime/memory/memory_store.py`：加载旧 `ccf.v1-lite` 整篇交付 Claim 时转为 `legacy_document_claim / legacy_audit`，不参与业务 Prompt 和负向污染；
+- `agent_runtime/drivers/autogen.py`：采用评估升级为 `ccf_v2_semantic_key_value_rules`，按语义键、规范化值和极性区分 useful、wrong、mixed、unassessed；
+- `agent_runtime/eval/metrics.py`：新增原始/临时 Claim、Slot 映射、冲突发现/裁决/未决和 active value 选择计数；
+- `experiments/v5.13x-fact-level-memory/`：提供跨“系统配置”和“普通规划”两个领域的确定性验收及 openEuler 工程证据打包入口。
+
+确定性验收：
+
+```text
+11/11 checks passed
+244 unit tests passed in agentlite-autogen environment
+```
+
+当前可确认：
+
+```text
+整篇最终交付不再作为无条件 formal Claim fallback；
+Prompt View 只暴露 active_value 和必要修订策略；
+历史值只在 Audit/Evidence 展开中出现；
+任意 Agent 名称共用同一事实、冲突和角色视图机制；
+unresolved scope/conflict 不会进入业务 Prompt。
+```
+
+仍需下一阶段真实实验确认：
+
+```text
+Native / Observed / Managed 在相同 Team、调用上限下的 Provider Token；
+端到端协作 Token、延迟和重试成本；
+事实级分类人工抽查的假阳性/假阴性；
+匿名质量评审是否相对 Native 显著下降。
+```
+
+详细设计：`docs/planning/v5.13x-事实级Claim与MemoryView校准.md`。
+
+工程验收：`experiments/v5.13x-fact-level-memory/README.md`。

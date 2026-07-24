@@ -47,12 +47,20 @@ class TaskMetricRow:
     memory_write_count: int = 0
     memory_candidate_count: int = 0
     claim_candidate_count: int = 0
+    raw_claim_count: int = 0
+    provisional_claim_count: int = 0
+    slot_mapping_success_count: int = 0
+    slot_mapping_success_rate: float = 0.0
     memory_admitted_count: int = 0
     memory_rejected_count: int = 0
     memory_pending_count: int = 0
     memory_audit_only_count: int = 0
     admission_unresolved_slot_count: int = 0
     claim_to_memoryview_count: int = 0
+    memory_conflict_detected_count: int = 0
+    memory_conflict_resolved_count: int = 0
+    memory_unresolved_conflict_count: int = 0
+    active_memory_value_selection_count: int = 0
     memory_admission_rate: float = 0.0
     claim_card_count: int = 0
     memory_view_count: int = 0
@@ -61,6 +69,7 @@ class TaskMetricRow:
     context_pruned_retry_count: int = 0
     format_retry_success_count: int = 0
     unresolved_slot_count: int = 0
+    unresolved_scope_count: int = 0
     alias_mapping_hit_count: int = 0
     vector_retrieval_count: int = 0
     retrieval_backend: str = ""
@@ -304,22 +313,42 @@ class MetricsCollector:
         mode: Mode,
         memory_candidate_count: int = 0,
         claim_candidate_count: int = 0,
+        raw_claim_count: int = 0,
+        provisional_claim_count: int = 0,
+        slot_mapping_success_count: int = 0,
         memory_admitted_count: int = 0,
         memory_rejected_count: int = 0,
         memory_pending_count: int = 0,
         memory_audit_only_count: int = 0,
         admission_unresolved_slot_count: int = 0,
         claim_to_memoryview_count: int = 0,
+        memory_conflict_detected_count: int = 0,
+        memory_conflict_resolved_count: int = 0,
+        memory_unresolved_conflict_count: int = 0,
+        active_memory_value_selection_count: int = 0,
+        unresolved_scope_count: int = 0,
     ) -> None:
         row = self._row(task_id, round_id, mode)
         row.memory_candidate_count += memory_candidate_count
         row.claim_candidate_count += claim_candidate_count
+        row.raw_claim_count += raw_claim_count
+        row.provisional_claim_count += provisional_claim_count
+        row.slot_mapping_success_count += slot_mapping_success_count
         row.memory_admitted_count += memory_admitted_count
         row.memory_rejected_count += memory_rejected_count
         row.memory_pending_count += memory_pending_count
         row.memory_audit_only_count += memory_audit_only_count
         row.admission_unresolved_slot_count += admission_unresolved_slot_count
         row.claim_to_memoryview_count += claim_to_memoryview_count
+        row.memory_conflict_detected_count += memory_conflict_detected_count
+        row.memory_conflict_resolved_count += memory_conflict_resolved_count
+        row.memory_unresolved_conflict_count += (
+            memory_unresolved_conflict_count
+        )
+        row.active_memory_value_selection_count += (
+            active_memory_value_selection_count
+        )
+        row.unresolved_scope_count += unresolved_scope_count
 
     def record_memory_search_backend(
         self,
@@ -665,6 +694,10 @@ class MetricsCollector:
             row.memory_admission_rate = (
                 row.memory_admitted_count / row.memory_candidate_count
             )
+        if row.raw_claim_count:
+            row.slot_mapping_success_rate = (
+                row.slot_mapping_success_count / row.raw_claim_count
+            )
         row.end_to_end_collaboration_tokens = (
             row.direct_text_tokens
             + row.prompt_view_tokens
@@ -713,12 +746,19 @@ class MetricsCollector:
                 "memory_write_count": 0,
                 "memory_candidate_count": 0,
                 "claim_candidate_count": 0,
+                "raw_claim_count": 0,
+                "provisional_claim_count": 0,
+                "slot_mapping_success_count": 0,
                 "memory_admitted_count": 0,
                 "memory_rejected_count": 0,
                 "memory_pending_count": 0,
                 "memory_audit_only_count": 0,
                 "admission_unresolved_slot_count": 0,
                 "claim_to_memoryview_count": 0,
+                "memory_conflict_detected_count": 0,
+                "memory_conflict_resolved_count": 0,
+                "memory_unresolved_conflict_count": 0,
+                "active_memory_value_selection_count": 0,
                 "claim_card_count": 0,
                 "memory_view_count": 0,
                 "promotion_view_count": 0,
@@ -726,6 +766,7 @@ class MetricsCollector:
                 "context_pruned_retry_count": 0,
                 "format_retry_success_count": 0,
                 "unresolved_slot_count": 0,
+                "unresolved_scope_count": 0,
                 "alias_mapping_hit_count": 0,
                 "vector_retrieval_count": 0,
                 "retrieval_backend": "",
@@ -813,6 +854,11 @@ class MetricsCollector:
             bucket["memory_write_count"] += row.memory_write_count
             bucket["memory_candidate_count"] += row.memory_candidate_count
             bucket["claim_candidate_count"] += row.claim_candidate_count
+            bucket["raw_claim_count"] += row.raw_claim_count
+            bucket["provisional_claim_count"] += row.provisional_claim_count
+            bucket["slot_mapping_success_count"] += (
+                row.slot_mapping_success_count
+            )
             bucket["memory_admitted_count"] += row.memory_admitted_count
             bucket["memory_rejected_count"] += row.memory_rejected_count
             bucket["memory_pending_count"] += row.memory_pending_count
@@ -821,6 +867,18 @@ class MetricsCollector:
                 row.admission_unresolved_slot_count
             )
             bucket["claim_to_memoryview_count"] += row.claim_to_memoryview_count
+            bucket["memory_conflict_detected_count"] += (
+                row.memory_conflict_detected_count
+            )
+            bucket["memory_conflict_resolved_count"] += (
+                row.memory_conflict_resolved_count
+            )
+            bucket["memory_unresolved_conflict_count"] += (
+                row.memory_unresolved_conflict_count
+            )
+            bucket["active_memory_value_selection_count"] += (
+                row.active_memory_value_selection_count
+            )
             bucket["claim_card_count"] += row.claim_card_count
             bucket["memory_view_count"] += row.memory_view_count
             bucket["promotion_view_count"] += row.promotion_view_count
@@ -828,6 +886,7 @@ class MetricsCollector:
             bucket["context_pruned_retry_count"] += row.context_pruned_retry_count
             bucket["format_retry_success_count"] += row.format_retry_success_count
             bucket["unresolved_slot_count"] += row.unresolved_slot_count
+            bucket["unresolved_scope_count"] += row.unresolved_scope_count
             bucket["alias_mapping_hit_count"] += row.alias_mapping_hit_count
             bucket["vector_retrieval_count"] += row.vector_retrieval_count
             if row.retrieval_backend:
@@ -931,6 +990,11 @@ class MetricsCollector:
             bucket["memory_admission_rate"] = (
                 bucket["memory_admitted_count"] / bucket["memory_candidate_count"]
                 if bucket["memory_candidate_count"]
+                else 0.0
+            )
+            bucket["slot_mapping_success_rate"] = (
+                bucket["slot_mapping_success_count"] / bucket["raw_claim_count"]
+                if bucket["raw_claim_count"]
                 else 0.0
             )
             bucket["schema_valid_rate"] = (
