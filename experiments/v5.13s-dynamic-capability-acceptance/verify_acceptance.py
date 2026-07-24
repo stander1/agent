@@ -266,30 +266,41 @@ def verify_acceptance(
             f"continuity_memory_injection={continuity_injected}"
         ),
     )
-    if report_version in {"v5.13u", "v5.13v", "v5.13w"}:
+    if report_version in {"v5.13u", "v5.13v", "v5.13w", "v5.13x", "v5.13y"}:
         _append_v513u_evidence_checks(
             checks,
             token_summary=token_summary,
             events=events,
             expected_attribution_mode=(
-                "active_and_historical_fact_rules_v3"
-                if report_version == "v5.13w"
+                "ccf_v2_semantic_key_value_rules"
+                if report_version in {"v5.13x", "v5.13y"}
                 else (
-                    "distinctive_fact_overlap_rules_v2"
-                    if report_version == "v5.13v"
-                    else "distinctive_fact_overlap_rules_v1"
+                    "active_and_historical_fact_rules_v3"
+                    if report_version == "v5.13w"
+                    else (
+                        "distinctive_fact_overlap_rules_v2"
+                        if report_version == "v5.13v"
+                        else "distinctive_fact_overlap_rules_v1"
+                    )
                 )
             ),
         )
-    if report_version in {"v5.13v", "v5.13w"}:
+    if report_version in {"v5.13v", "v5.13w", "v5.13x", "v5.13y"}:
         _append_v513v_evidence_checks(
             checks,
             events=events,
             quality=quality,
             comparison=comparison,
+            structured_attribution=report_version in {"v5.13x", "v5.13y"},
         )
-    if report_version == "v5.13w":
+    if report_version in {"v5.13w", "v5.13x", "v5.13y"}:
         _append_v513w_evidence_checks(
+            checks,
+            token_summary=token_summary,
+            events=events,
+        )
+    if report_version in {"v5.13x", "v5.13y"}:
+        _append_v513x_fact_memory_checks(
             checks,
             token_summary=token_summary,
             events=events,
@@ -640,6 +651,7 @@ def _append_v513v_evidence_checks(
     events: list[dict[str, Any]],
     quality: dict[str, Any],
     comparison: dict[str, Any],
+    structured_attribution: bool = False,
 ) -> None:
     adoption_payloads = [
         event.get("payload")
@@ -671,7 +683,7 @@ def _append_v513v_evidence_checks(
             )
             if (
                 threshold <= 0.0
-                or threshold > 0.68
+                or threshold > (1.0 if structured_attribution else 0.68)
                 or baseline_threshold != threshold
             ):
                 malformed_calls.append(call_id)
@@ -830,6 +842,95 @@ def _append_v513w_evidence_checks(
         (
             f"injected={injected}, useful={useful}, wrong={wrong}, "
             f"mixed={mixed}, unassessed={unassessed}"
+        ),
+    )
+
+
+def _append_v513x_fact_memory_checks(
+    checks: list[Check],
+    *,
+    token_summary: dict[str, Any],
+    events: list[dict[str, Any]],
+) -> None:
+    bridge_events = [
+        event
+        for event in events
+        if event.get("event_type") == "state_memory_bridge"
+        and isinstance(event.get("payload"), dict)
+    ]
+    raw_claims = _int(token_summary.get("raw_claim_count"))
+    provisional_claims = _int(token_summary.get("provisional_claim_count"))
+    mapped_claims = _int(token_summary.get("slot_mapping_success_count"))
+    active_values = _int(
+        token_summary.get("active_memory_value_selection_count")
+    )
+    _check(
+        checks,
+        "fact_level_claim_pipeline_observed",
+        bool(bridge_events)
+        and raw_claims > 0
+        and provisional_claims > 0
+        and mapped_claims > 0
+        and active_values > 0,
+        (
+            f"bridge_events={len(bridge_events)}, raw={raw_claims}, "
+            f"provisional={provisional_claims}, mapped={mapped_claims}, "
+            f"active_values={active_values}"
+        ),
+    )
+
+    adoption_payloads = [
+        event.get("payload")
+        for event in events
+        if event.get("event_type") == "autogen_memory_adoption"
+        and isinstance(event.get("payload"), dict)
+    ]
+    evidence_rows: list[dict[str, Any]] = []
+    for payload in adoption_payloads:
+        evidence = payload.get("evidence")
+        if not isinstance(evidence, list):
+            continue
+        evidence_rows.extend(
+            row for row in evidence if isinstance(row, dict)
+        )
+    wrong_modes = sorted(
+        {
+            str(row.get("attribution_mode") or "")
+            for row in evidence_rows
+            if row.get("attribution_mode")
+            != "ccf_v2_semantic_key_value_rules"
+        }
+    )
+    missing_semantic_keys = sum(
+        1
+        for row in evidence_rows
+        if not str(row.get("semantic_key") or "")
+    )
+    _check(
+        checks,
+        "fact_level_adoption_uses_semantic_keys",
+        bool(evidence_rows)
+        and not wrong_modes
+        and missing_semantic_keys == 0,
+        (
+            f"evidence_rows={len(evidence_rows)}, wrong_modes={wrong_modes}, "
+            f"missing_semantic_keys={missing_semantic_keys}"
+        ),
+    )
+
+    unresolved_scopes = _int(token_summary.get("unresolved_scope_count"))
+    unresolved_conflicts = _int(
+        token_summary.get("memory_unresolved_conflict_count")
+    )
+    _check(
+        checks,
+        "unsafe_fact_outcomes_reported",
+        "unresolved_scope_count" in token_summary
+        and "memory_unresolved_conflict_count" in token_summary,
+        (
+            f"unresolved_scope={unresolved_scopes}, "
+            f"unresolved_conflict={unresolved_conflicts}; "
+            "nonzero values are blocked from business Prompt and remain auditable"
         ),
     )
 

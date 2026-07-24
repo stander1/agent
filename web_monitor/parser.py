@@ -659,13 +659,23 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "capability_action_counts": {},
         "memory_candidate_deduplicated_count": 0,
         "memory_candidate_deduplicated_tokens": 0,
+        "state_memory_bridge_event_count": 0,
+        "raw_claim_count": 0,
+        "provisional_claim_count": 0,
+        "slot_mapping_success_count": 0,
+        "slot_mapping_success_rate": 0.0,
+        "unresolved_scope_count": 0,
+        "memory_conflict_detected_count": 0,
+        "memory_conflict_resolved_count": 0,
+        "memory_unresolved_conflict_count": 0,
+        "active_memory_value_selection_count": 0,
         "shadow_native_tokens": 0,
         "shadow_candidate_tokens": 0,
         "shadow_potential_savings": 0,
         "shadow_potential_savings_ratio": 0.0,
         "shadow_event_count": 0,
         "event_count": 0,
-        "source": "autogen_trace_memory_adoption_v8",
+        "source": "autogen_trace_fact_memory_v9",
     }
     actual_event_types = {
         "autogen_agent_input_real_rewrite",
@@ -799,6 +809,33 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
             if assessment:
                 final_delivery_assessed += 1
                 final_delivery_valid += int(bool(assessment.get("valid")))
+            continue
+        if event_type == "state_memory_bridge":
+            breakdown["state_memory_bridge_event_count"] += 1
+            breakdown["raw_claim_count"] += _int(
+                payload.get("raw_claim_count")
+            )
+            breakdown["provisional_claim_count"] += _int(
+                payload.get("provisional_claim_count")
+            )
+            breakdown["slot_mapping_success_count"] += _int(
+                payload.get("slot_mapping_success_count")
+            )
+            breakdown["unresolved_scope_count"] += _int(
+                payload.get("unresolved_scope_count")
+            )
+            breakdown["memory_conflict_detected_count"] += _int(
+                payload.get("conflict_detected_count")
+            )
+            breakdown["memory_conflict_resolved_count"] += _int(
+                payload.get("resolved_conflict_count")
+            )
+            breakdown["memory_unresolved_conflict_count"] += _int(
+                payload.get("unresolved_conflict_count")
+            )
+            breakdown["active_memory_value_selection_count"] += _int(
+                payload.get("active_value_selection_count")
+            )
             continue
         if event_type == "autogen_model_client_usage":
             usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
@@ -1060,6 +1097,15 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
     )
     breakdown["capability_action_counts"] = dict(
         sorted(capability_action_counts.items())
+    )
+    breakdown["slot_mapping_success_rate"] = (
+        round(
+            breakdown["slot_mapping_success_count"]
+            / breakdown["raw_claim_count"],
+            6,
+        )
+        if breakdown["raw_claim_count"] > 0
+        else 0.0
     )
     breakdown["minimal_context_view_tokens"] = breakdown[
         "minimal_role_view_tokens"

@@ -130,6 +130,7 @@ def build_autogen_session_report(request: SessionReportRequest) -> dict[str, Any
             "无文本 AutoGen 控制消息属于 ineligible_control_passthrough（无可改写内容透传），不属于协议错误。",
             "memory_candidate_deduplicated_* 统计规则在候选阶段移除的上下文重复记忆，不等同于已注入或有效记忆。",
             "角色视图候选不比语义等价来源更短时，实际注入来源视图；候选 Token 与不膨胀回退次数单独记录。",
+            "raw_claim、provisional_claim、Slot 映射、冲突和 active value 指标来自 state_memory_bridge，用于证明事实级 TLC-Memory 链路，而非把整篇交付物计作一个事实。",
         ],
     }
 
@@ -493,6 +494,34 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
     memory_deduplicated_tokens = _int(
         token_summary.get("memory_candidate_deduplicated_tokens")
     )
+    state_memory_bridge_event_count = _int(
+        token_summary.get("state_memory_bridge_event_count")
+    )
+    raw_claim_count = _int(token_summary.get("raw_claim_count"))
+    provisional_claim_count = _int(
+        token_summary.get("provisional_claim_count")
+    )
+    slot_mapping_success_count = _int(
+        token_summary.get("slot_mapping_success_count")
+    )
+    slot_mapping_success_rate = float(
+        token_summary.get("slot_mapping_success_rate", 0.0) or 0.0
+    )
+    unresolved_scope_count = _int(
+        token_summary.get("unresolved_scope_count")
+    )
+    memory_conflict_detected_count = _int(
+        token_summary.get("memory_conflict_detected_count")
+    )
+    memory_conflict_resolved_count = _int(
+        token_summary.get("memory_conflict_resolved_count")
+    )
+    memory_unresolved_conflict_count = _int(
+        token_summary.get("memory_unresolved_conflict_count")
+    )
+    active_memory_value_selection_count = _int(
+        token_summary.get("active_memory_value_selection_count")
+    )
     shadow_savings = shadow_native - shadow_candidate if shadow_native else 0
     shadow_ratio = shadow_savings / shadow_native if shadow_native > 0 else 0.0
     savings = native - runtime if native else _int(token_summary.get("token_savings"))
@@ -753,6 +782,56 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
             "agentlite_memory_candidate_deduplicated_tokens",
             memory_deduplicated_tokens,
             "被内容去重规则从候选 Prompt View 中移除的记忆 Token",
+        ),
+        _row(
+            "agentlite_state_memory_bridge_event_count",
+            state_memory_bridge_event_count,
+            "状态候选进入 TLC-Memory 准入与事实压缩链路的次数",
+        ),
+        _row(
+            "agentlite_raw_claim_count",
+            raw_claim_count,
+            "从已准入候选中识别出的原始事实数量",
+        ),
+        _row(
+            "agentlite_provisional_claim_count",
+            provisional_claim_count,
+            "形成 provisional ClaimCard 的事实数量",
+        ),
+        _row(
+            "agentlite_slot_mapping_success_count",
+            slot_mapping_success_count,
+            "成功映射到规范 Slot 的事实数量",
+        ),
+        _row(
+            "agentlite_slot_mapping_success_rate",
+            slot_mapping_success_rate,
+            "规范 Slot 映射成功率",
+        ),
+        _row(
+            "agentlite_unresolved_scope_count",
+            unresolved_scope_count,
+            "作用域无法安全确定、因而不进入业务 Prompt 的事实数量",
+        ),
+        _row(
+            "agentlite_memory_conflict_detected_count",
+            memory_conflict_detected_count,
+            "事实级批量压缩检测到的值冲突数量",
+        ),
+        _row(
+            "agentlite_memory_conflict_resolved_count",
+            memory_conflict_resolved_count,
+            "依据修订关系或确定性策略解决的事实冲突数量",
+        ),
+        _row(
+            "agentlite_memory_unresolved_conflict_count",
+            memory_unresolved_conflict_count,
+            "无法安全裁决、被阻断出业务 Prompt 的冲突数量",
+        ),
+        _row(
+            "agentlite_active_memory_value_selection_count",
+            active_memory_value_selection_count,
+            "MemoryView 最终选出的当前有效事实值数量",
         ),
         _row("agentlite_control_llm_tokens", control, "控制模块 LLM 成本"),
         _row("agentlite_retry_tokens", retry, "重试带来的额外成本"),

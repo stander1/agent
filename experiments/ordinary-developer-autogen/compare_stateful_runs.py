@@ -464,7 +464,7 @@ def _build_warnings(group_summaries: dict[str, dict[str, Any]]) -> list[str]:
 def _render_markdown(payload: dict[str, Any]) -> str:
     summary = payload["summary"]
     lines = [
-        "# Stateful AutoGen A1-A10 comparison",
+        "# Stateful AutoGen comparison",
         "",
         "## Provider-reported LLM usage",
         "",

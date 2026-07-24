@@ -170,6 +170,19 @@ class AutoGenSessionReportTest(unittest.TestCase):
                 },
             },
             {
+                "event_type": "state_memory_bridge",
+                "payload": {
+                    "raw_claim_count": 4,
+                    "provisional_claim_count": 3,
+                    "slot_mapping_success_count": 3,
+                    "unresolved_scope_count": 1,
+                    "conflict_detected_count": 2,
+                    "resolved_conflict_count": 1,
+                    "unresolved_conflict_count": 1,
+                    "active_value_selection_count": 2,
+                },
+            },
+            {
                 "event_type": "autogen_memory_adoption",
                 "payload": {
                     "memory_injected_count": 1,
@@ -252,6 +265,16 @@ class AutoGenSessionReportTest(unittest.TestCase):
         self.assertEqual(summary["registered_capability_profile_count"], 1)
         self.assertEqual(summary["registered_system_profile_count"], 1)
         self.assertEqual(summary["registered_total_profile_count"], 2)
+        self.assertEqual(summary["state_memory_bridge_event_count"], 1)
+        self.assertEqual(summary["raw_claim_count"], 4)
+        self.assertEqual(summary["provisional_claim_count"], 3)
+        self.assertEqual(summary["slot_mapping_success_count"], 3)
+        self.assertEqual(summary["slot_mapping_success_rate"], 0.75)
+        self.assertEqual(summary["unresolved_scope_count"], 1)
+        self.assertEqual(summary["memory_conflict_detected_count"], 2)
+        self.assertEqual(summary["memory_conflict_resolved_count"], 1)
+        self.assertEqual(summary["memory_unresolved_conflict_count"], 1)
+        self.assertEqual(summary["active_memory_value_selection_count"], 2)
 
     def test_builds_token_report_from_latest_session_trace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

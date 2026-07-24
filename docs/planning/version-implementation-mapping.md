@@ -4590,3 +4590,38 @@ Native / Observed / Managed 在相同 Team、调用上限下的 Provider Token�
 详细设计：`docs/planning/v5.13x-事实级Claim与MemoryView校准.md`。
 
 工程验收：`experiments/v5.13x-fact-level-memory/README.md`。
+
+## 62. v5.13y：真实 AutoGen 事实级公平对照
+
+v5.13y 不新增业务规则，负责把 v5.13x 的确定性机制放入真实 AutoGen 和真实
+Provider 环境，完成 Native、Observed、Managed 三组公平实验。
+
+实现映射：
+
+- `web_monitor/parser.py`：从 `state_memory_bridge` 汇总原始 Claim、
+  provisional Claim、Slot 映射、作用域、冲突和 active value 指标；
+- `agent_runtime/eval/autogen_session_report.py`：把上述事实级指标加入会话报告，
+  与 Provider Token、端到端协作 Token 和记忆采用指标并列展示；
+- `experiments/ordinary-developer-autogen/compare_stateful_runs.py`：报告标题改为
+  通用连续 AutoGen 对照，不再误写成 A1-A10；
+- `experiments/v5.13s-dynamic-capability-acceptance/verify_acceptance.py`：支持
+  `ccf_v2_semantic_key_value_rules`，并验证事实链路、语义键采用和四分类守恒；
+- `experiments/v5.13y-real-autogen-fact-memory/`：提供 openEuler 一键运行、
+  双盲质量评审、事实采用抽样和不可变证据打包；
+- `fact_attribution_sample.csv`：保留空白人工标签，供后续逐条核验假阳性、
+  假阴性和不确定样本，未填写前不冒充人工验收结论。
+
+公平变量固定为同一任务序列、Team、Provider、模型参数、最大轮次和重试参数。
+Observed 只测钩子观测开销，Managed 才启用真实改写和共享记忆。报告同时保留：
+
+```text
+Provider 实际 Token；
+相同 task + agent + ordinal 的归一化公共调用 Token；
+消息 + Prompt View + 记忆读取 + 控制 + 重试的端到端协作 Token；
+匿名主评审与独立技术评审的较低分；
+完整逐步消息与事实采用证据。
+```
+
+详细说明：`docs/experiments/v5.13y-real-autogen-fact-memory.md`。
+
+运行入口：`experiments/v5.13y-real-autogen-fact-memory/run_openeuler.sh`。
