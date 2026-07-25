@@ -1,0 +1,46 @@
+{
+  "scenario_id": "B-formal",
+  "description": "防御性合成安全审计 B1-B10 正式连续任务。所有实体、日志和证据均为冻结的本地合成数据。",
+  "tasks": [
+    {
+      "task_id": "B1",
+      "question": "审计系统捕获了一条合成高危告警。请抽取初始硬约束、核心线索和后续追踪键，形成可追溯的 alert_state 起点。\n\n本轮本地资料快照：\n- alert_id=alert_071\n- source_node=Node_71\n- timestamp=2026-06-15T02:15:00Z\n- event_type=bulk_upload_anomaly\n- target_pointer=proxy_token_PX42\n- severity=high\n\n后续 B2-B10 将复用该告警起点。只处理本地合成数据，不涉及真实攻击目标或利用步骤。"
+    },
+    {
+      "task_id": "B2",
+      "question": "基于 B1 的 proxy_token_PX42，分析下面冻结的 network_observations.csv 合成检索结果，确定设备、关联账户、证据行和下一跳依据，并输出可追溯的 retrieval_state 摘要。\n\n资料快照：\n- network_row_8402: proxy_token=proxy_token_PX42; resolved_device=device_shadow_17; touched_accounts=[wallet_demo_902,wallet_demo_911]; confidence=0.86\n- network_row_11904: proxy_token=proxy_token_PX42; resolved_device=device_shadow_17; touched_accounts=[wallet_demo_911]; confidence=0.79\n\n不得补造快照之外的地址、账户或日志。"
+    },
+    {
+      "task_id": "B3",
+      "question": "基于 B2 已确认的 wallet_demo_911，解析下面 payload_notes.json 的本地合成映射，给出 artifact_state 摘要和下一跳实体标记。\n\n资料快照：\n- payload_note_911: wallet_id=wallet_demo_911\n- decoded_marker=ROUTE_VIA_ENTITY_085\n- mapping_source=synthetic_payload_notes\n- next_lookup_key=ENTITY_085\n\nPrompt View 只需展示 artifact_id、摘要、sha256 和 next_lookup_key；完整映射与执行日志属于冷层审计载荷。不得生成真实解密或攻击代码。"
+    },
+    {
+      "task_id": "B4",
+      "question": "B3 得到的实体标记是 ENTITY_085。请审计下面 synthetic_ledger.csv 的冻结合成结果，输出 evidence_chain_state，明确 hop_path、ultimate_target、amount_bucket 和 evidence_refs。\n\n资料快照：\n- ledger_path_085: entity=ENTITY_085\n- path=[ENTITY_085,intermediary_demo_302,beneficiary_demo_999]\n- amount_bucket=high\n- evidence_rows=[ledger_1022,ledger_1067,ledger_1098]\n\n不得把合成路径解释为真实主体或真实资金流。"
+    },
+    {
+      "task_id": "B5",
+      "question": "请把 B1-B4 的 alert_state、retrieval_state、artifact_state 和 evidence_chain_state 融合成第一版合成安全审计链路报告。逐跳列出 lookup key、state_ref、证据引用、已确认事实、推断和未确认风险；不得丢失前序证据血缘，也不得展开资料快照之外的原始日志。"
+    },
+    {
+      "task_id": "B6",
+      "question": "新增反混淆修订：早期 device_shadow_17 可能受到标识混淆影响，现标记为 deprecated clue，不再作为强证据。请在不推翻 B1-B5 审计骨架的前提下更新证据链。\n\n新资料快照：\n- deprecated_clue=device_shadow_17\n- primary_evidence=[wallet_demo_911,ledger_path_085,entity_registry_match]\n- affected_states=[B2_network_lookup,B4_ledger_path]\n\n必须说明活动事实如何替代旧线索，并保留旧线索的审计血缘。"
+    },
+    {
+      "task_id": "B7",
+      "question": "由于 B6 标记了设备线索污染，请使用下面 vector_clusters.json 的冻结合成结果对五个候选实体去重，输出 embedding_state 摘要并选择最可能对应 beneficiary_demo_999 的实体画像。\n\n资料快照：\n- query_embedding_id=emb_query_beneficiary_demo_999\n- vector_dim=384\n- candidates=[entity_profile_085,entity_profile_086,entity_profile_091,entity_profile_104,entity_profile_118]\n- similarity_scores={entity_profile_085:0.91,entity_profile_086:0.74,entity_profile_091:0.69,entity_profile_104:0.42,entity_profile_118:0.31}\n\n只展示 top-k、分数、冲突点和选择理由，不展开完整向量矩阵。"
+    },
+    {
+      "task_id": "B8",
+      "question": "运行时控制预算下降：本轮控制模型调用最多 1 次，重试输入 Token 预算最多 500。请在该限制下继续核验 beneficiary_demo_999 的历史关联风险，并说明哪些证据足够、哪些应暂缓展开。\n\n允许视图=[summary,top_k_evidence,audit_digest]\n禁止默认展开=[full_raw_log,full_vector_matrix,full_ledger_dump]\n\n不得用预算限制作为编造结论的理由。"
+    },
+    {
+      "task_id": "B9",
+      "question": "请结合 B1 初始告警、B6 反混淆修订、B7 实体画像和下面 compliance_rules.md 的冻结规则，对 beneficiary_demo_999 的风险类型做证据链匹配。\n\n候选风险类型=[synthetic_fraud_ring,synthetic_internal_collusion,insufficient_evidence]\n必需支持状态=[B1_alert_profile,B4_ledger_path,B6_anti_obfuscation,B7_entity_cluster]\n质量规则：证据不足时必须输出 needs_more_evidence，不得为了成功率编造结论。\n\n输出风险判断、逐项证据和剩余不确定性。"
+    },
+    {
+      "task_id": "B10",
+      "question": "请基于 B1-B9 所有已确认和修订过的内容，生成最终合成安全审计手册。必须包含：链路图谱、风险类型、逐跳证据表、所有 lookup key、device_shadow_17 的 deprecated 状态、实体聚类结论、B8 控制预算、未确认事项，以及系统决策日志。决策日志必须说明 B6 与 B8 下系统如何避免脏读、过期线索和 raw content 过度展开。只交付最终完整成果，不得补造资料快照之外的事实。"
+    }
+  ]
+}

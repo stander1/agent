@@ -11,11 +11,14 @@ PRIMARY_JUDGE="experiments/ordinary-developer-autogen/judge_stateful_blind_batch
 TECHNICAL_JUDGE="experiments/ordinary-developer-autogen/judge_stateful_technical_blind_batch.py"
 SUMMARIZE="experiments/ordinary-developer-autogen/summarize_stateful_blind_scores.py"
 VERIFY="$SCRIPT_DIR/verify_preflight.py"
-PREREG="$SCRIPT_DIR/preregistration.json"
-A_TASKS="$SCRIPT_DIR/question_A_preflight.json"
-B_TASKS="$SCRIPT_DIR/question_B_preflight.json"
-A_AGENTS="experiments/ordinary-developer-autogen/agent_config.json"
-B_AGENTS="$SCRIPT_DIR/agent_config_B.json"
+PREREG="${AGENTLITE_V514B_PREREGISTRATION:-$SCRIPT_DIR/preregistration.json}"
+A_TASKS="${AGENTLITE_V514B_A_TASKS:-$SCRIPT_DIR/question_A_preflight.json}"
+B_TASKS="${AGENTLITE_V514B_B_TASKS:-$SCRIPT_DIR/question_B_preflight.json}"
+A_AGENTS="${AGENTLITE_V514B_A_AGENTS:-experiments/ordinary-developer-autogen/agent_config.json}"
+B_AGENTS="${AGENTLITE_V514B_B_AGENTS:-$SCRIPT_DIR/agent_config_B.json}"
+A_TASKS_COPY_NAME="${AGENTLITE_V514B_A_TASKS_COPY_NAME:-question_A_preflight.json}"
+B_TASKS_COPY_NAME="${AGENTLITE_V514B_B_TASKS_COPY_NAME:-question_B_preflight.json}"
+PHASE_LABEL="${AGENTLITE_V514B_PHASE_LABEL:-预检}"
 
 : "${OPENAI_API_KEY:=${MIMO_API_KEY:-}}"
 : "${OPENAI_BASE_URL:=https://token-plan-cn.xiaomimimo.com/v1}"
@@ -46,8 +49,15 @@ command -v agentlite >/dev/null
 command -v tar >/dev/null
 command -v sha256sum >/dev/null
 
+for input_path in "$PREREG" "$A_TASKS" "$B_TASKS" "$A_AGENTS" "$B_AGENTS"; do
+  if [[ ! -f "$input_path" ]]; then
+    echo "错误：冻结输入不存在：$input_path" >&2
+    exit 2
+  fi
+done
+
 if ! git diff --quiet || ! git diff --cached --quiet; then
-  echo "错误：存在已跟踪但未提交的修改，拒绝开始正式预检。" >&2
+  echo "错误：存在已跟踪但未提交的修改，拒绝开始正式$PHASE_LABEL。" >&2
   echo "请先提交、还原或另存这些修改，再重新运行。" >&2
   exit 2
 fi
@@ -75,8 +85,8 @@ done
 mkdir -p "$RUN_ROOT/system/frozen-inputs" "$TRACE_ROOT" exports
 cp "$PREREG" "$RUN_ROOT/system/preregistration.json"
 cp "$PREREG" "$RUN_ROOT/system/frozen-inputs/preregistration.json"
-cp "$A_TASKS" "$RUN_ROOT/system/frozen-inputs/question_A_preflight.json"
-cp "$B_TASKS" "$RUN_ROOT/system/frozen-inputs/question_B_preflight.json"
+cp "$A_TASKS" "$RUN_ROOT/system/frozen-inputs/$A_TASKS_COPY_NAME"
+cp "$B_TASKS" "$RUN_ROOT/system/frozen-inputs/$B_TASKS_COPY_NAME"
 cp "$A_AGENTS" "$RUN_ROOT/system/frozen-inputs/agent_config_A.json"
 cp "$B_AGENTS" "$RUN_ROOT/system/frozen-inputs/agent_config_B.json"
 sha256sum \
@@ -86,8 +96,8 @@ sha256sum \
   cd "$RUN_ROOT/system/frozen-inputs"
   sha256sum \
     preregistration.json \
-    question_A_preflight.json \
-    question_B_preflight.json \
+    "$A_TASKS_COPY_NAME" \
+    "$B_TASKS_COPY_NAME" \
     agent_config_A.json \
     agent_config_B.json
 ) > "$RUN_ROOT/system/frozen-input-copies.sha256"
@@ -193,11 +203,11 @@ run_scenario() {
     --output "$scenario_root/comparison/quality_blind_summary.json"
 }
 
-echo "开始 $EXPERIMENT_LABEL 预检，实验编号：$EXP_ID"
+echo "开始 $EXPERIMENT_LABEL $PHASE_LABEL，实验编号：$EXP_ID"
 run_scenario "A" "$A_TASKS" "$A_AGENTS"
 run_scenario "B" "$B_TASKS" "$B_AGENTS"
 
-echo "[final 1/3] 按预注册阈值执行统一验收"
+echo "[final 1/3] 按预注册阈值执行统一$PHASE_LABEL"
 set +e
 python "$VERIFY" \
   --run-root "$RUN_ROOT" \

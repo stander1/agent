@@ -4835,3 +4835,40 @@ v5.14e 根据 v5.14d 真实 Provider 归档修复两类通用质量缺陷：当�
 
 详细说明：
 `docs/experiments/v5.14e-current-task-fidelity-and-artifact-promotion.md`。
+
+真实 openEuler 实验结果：
+`docs/experiments/v5.14e-current-task-fidelity-results-20260725.md`。
+
+## 69. v5.14f：A1-A10/B1-B10 正式规模验收
+
+v5.14f 不增加生产运行时机制，而是把 v5.14e 已通过的成本、质量、最终成果和
+当前任务保真门禁扩展到完整十轮连续任务链。该阶段采用冻结的自包含合成资料，
+避免 A 组继续由模型自由假设出发地、预算口径或候选数据库。
+
+实现映射：
+
+- `question_A_formal.json`：冻结两人从上海出发、三候选资料、预算收紧和
+  A1-A10 连续旅行决策链；
+- `question_B_formal.json`：冻结 B1-B10 合成安全审计证据链，包含 retrieval、
+  artifact、evidence chain 和 embedding 使用场景；
+- `preregistration.json`：冻结 15% 双成本门槛、总体质量非劣、A10/B10 终局质量、
+  记忆有效性、零错误命中、零保真失败和协议/路由卫生门禁；
+- v5.14b `run_openeuler.sh`：增加任务、Agent、预注册文件和冻结副本名称的显式覆盖，
+  未设置覆盖变量时保持旧预检行为；
+- v5.14f `run_openeuler.sh`：运行完整 20 任务三组实验、双重匿名质量评分、阶段验收
+  和不可变证据打包；
+- `verify_acceptance.py`：继承 v5.14e 验收，增加完整任务矩阵、A10/B10 交付质量、
+  记忆命中/注入/有效采用和错误命中门禁，并如实报告 StatePool 实际状态类型。
+
+边界：
+
+```text
+本阶段是一次完整规模正式验收，不提供跨重复实验方差；
+三组任务、Agent、模型、轮次和输出策略完全一致；
+生产 agent_runtime 不识别 A/B、旅游地点或合成审计实体；
+任务中写出 retrieval_state/embedding_state 不代表运行时已生成该类型；
+缺失状态类型作为诊断差距保留，不由提示词推断为实现。
+```
+
+详细说明：
+`docs/experiments/v5.14f-formal-scale-acceptance.md`。
