@@ -4766,3 +4766,38 @@ SHP StateRef/MemoryRef 仍存在于真实运行时和 trace；
 成本目标尚未重跑，不据本地机制测试宣称 15% 目标已经达成。
 
 详细说明：`docs/experiments/v5.14c-semantic-dedup-context-hygiene.md`。
+
+## 67. v5.14d：最终成果解析、硬约束守卫与路由状态净化
+
+v5.14d 根据 v5.14c 真实预检归档修复三类通用问题：完整成果漏结束标记后多跑一轮、
+Reviewer 仅批准前序成果时选错最终正文、AutoGen 路由控制对象进入 StatePool。该阶段
+不修改 A/B 题、Agent 领域提示词、输出长度或最大轮次。
+
+实现映射：
+
+- `agent_runtime/adapters/autogen_termination.py`：增加 Reviewer 完整成果缺标记的确定性
+  修复、前序成果批准解析和最终成果来源谱系；
+- `agent_runtime/reliability/final_delivery_guard.py`：区分批准说明与完整交付物，并对
+  上下文中明确声明的预算上限执行规则优先校验；
+- `experiments/ordinary-developer-autogen/code_app.py`：从完整消息序列解析最终成果，
+  记录 `final_artifact_origin_source` 和 `final_resolution_kind`；
+- `agent_runtime/drivers/autogen.py`：从业务状态正文中删除 `DefaultTopicId`、
+  `AgentId`、`CancellationToken` 和 UUID 路由前缀，纯控制消息不写入 StatePool；
+- `web_monitor/parser.py`：合并 `state_reused` 事件，修复状态复用次数显示为 0 的问题。
+- `experiments/v5.14d-final-artifact-resolution-acceptance/`：复用 v5.14b 冻结实验，
+  在打包前追加最终成果谱系、批准说明、数字上限、路由状态、协议可见性和状态复用
+  验收，不修改原有成本与质量阈值。
+
+通用边界：
+
+```text
+最终成果解析不固定 Planner/Writer 名称，Reviewer 来源由 Team 配置提供；
+漏标记修复只补协议标记，不生成或截断业务正文；
+批准说明只可提升已存在且通过语义守卫的前序成果；
+数值守卫只在用户明确声明预算上限时生效；
+路由对象仍保留在框架 trace，但不进入业务状态正文；
+离线反事实 Token 只用于根因诊断，真实成本与质量必须重新运行 Provider 实验。
+```
+
+详细说明：
+`docs/experiments/v5.14d-final-artifact-resolution-and-routing-hygiene.md`。

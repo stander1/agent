@@ -279,6 +279,24 @@ class WebMonitorParserTest(unittest.TestCase):
                             "tier": "cold",
                             "lifecycle": "active",
                             "summary": "session state",
+                            "semantic_identity_hash": "hash_session",
+                            "dedup_reuse_count": 0,
+                        }
+                    },
+                },
+                {
+                    "ts": "2026-07-02T00:00:01.500000+00:00",
+                    "event_type": "state_reused",
+                    "payload": {
+                        "state": {
+                            "state_id": "state_session",
+                            "state_type": "artifact_state",
+                            "source_agent": "RoundRobinGroupChat",
+                            "tier": "cold",
+                            "lifecycle": "active",
+                            "summary": "session state",
+                            "semantic_identity_hash": "hash_session",
+                            "dedup_reuse_count": 2,
                         }
                     },
                 },
@@ -355,6 +373,7 @@ class WebMonitorParserTest(unittest.TestCase):
             self.assertEqual(snapshot["status"], "succeeded")
             self.assertTrue(snapshot["summary"]["hooks_active"])
             self.assertEqual(runtime["state_pool"][0]["state_id"], "state_session")
+            self.assertEqual(runtime["state_pool"][0]["dedup_reuse_count"], 2)
             self.assertTrue(
                 any(agent["agent_id"] == "RoundRobinGroupChat" for agent in runtime["agents"])
             )

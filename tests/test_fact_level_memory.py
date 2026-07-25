@@ -67,9 +67,20 @@ class FactLevelMemoryTest(unittest.TestCase):
 
         self.assertEqual(first.memory_view_ids, second.memory_view_ids)
         view = store._views[first.memory_view_ids[0]]
-        self.assertEqual(len(view.active_claim_ids), 2)
+        self.assertEqual(len(view.active_claim_ids), 1)
         self.assertFalse(view.historical_claim_ids)
         self.assertEqual(second.conflict_detected_count, 0)
+        self.assertEqual(second.deduplicated_claim_count, 1)
+        self.assertEqual(second.deduplicated_memory_count, 1)
+        claim = store._claims[view.active_claim_ids[0]]
+        self.assertTrue(
+            {
+                "state_D1",
+                "evidence_D1",
+                "state_D2",
+                "evidence_D2",
+            }.issubset(set(claim.supported_by)),
+        )
 
         refs = store.search_memory(
             "busy_timeout configuration",

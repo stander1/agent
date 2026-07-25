@@ -444,7 +444,10 @@ async def _run_tasks(
     from autogen_agentchat.teams import RoundRobinGroupChat
     from autogen_core import CancellationToken
 
-    from agent_runtime.adapters.autogen_termination import ReviewerFinalTextTermination
+    from agent_runtime.adapters.autogen_termination import (
+        ReviewerFinalTextTermination,
+        resolve_final_artifact,
+    )
 
     llm = OpenAICompatibleClient.from_env(temperature=temperature)
     cost_logger = CostLogger(output_dir, run_identity=run_identity)
@@ -502,12 +505,13 @@ async def _run_tasks(
             self._history.clear()
 
     agents = [DeveloperAgent(config) for config in agent_configs]
+    termination_condition = ReviewerFinalTextTermination(
+        marker=DONE_TOKEN,
+        source="reviewer",
+        semantic_guard=True,
+    )
     kwargs: dict[str, Any] = {
-        "termination_condition": ReviewerFinalTextTermination(
-            marker=DONE_TOKEN,
-            source="reviewer",
-            semantic_guard=True,
-        )
+        "termination_condition": termination_condition,
     }
     if max_turns > 0:
         kwargs["max_turns"] = max_turns
@@ -527,12 +531,30 @@ async def _run_tasks(
         usage_start = len(cost_logger.rows)
         task_started = time.perf_counter()
         result = await team.run(task=task.question)
-        final_source, raw_final_answer = _final_message(result)
+        grounding_contexts = [item.question for item in tasks[:task_index]]
+        resolved_artifact = (
+            termination_condition.last_resolved_artifact
+            or resolve_final_artifact(
+                getattr(result, "messages", []) or [],
+                marker=DONE_TOKEN,
+                reviewer_source="reviewer",
+                grounding_contexts=grounding_contexts,
+            )
+        )
+        if resolved_artifact is not None:
+            final_source = "reviewer"
+            raw_final_answer = resolved_artifact.content
+            final_artifact_origin_source = resolved_artifact.origin_source
+            final_resolution_kind = resolved_artifact.resolution_kind
+        else:
+            final_source, raw_final_answer = _final_message(result)
+            final_artifact_origin_source = final_source
+            final_resolution_kind = "last_visible_message"
         assessment = _assess_task_delivery(
             request=task.question,
             source=final_source,
             content=raw_final_answer,
-            grounding_contexts=[item.question for item in tasks[:task_index]],
+            grounding_contexts=grounding_contexts,
         )
         semantic_retry_count = 0
         messages = _messages_to_dict(result)
@@ -554,6 +576,8 @@ async def _run_tasks(
             "llm_usage": task_usage,
             "stop_reason": stop_reason,
             "final_source": final_source,
+            "final_artifact_origin_source": final_artifact_origin_source,
+            "final_resolution_kind": final_resolution_kind,
             "final_marker_present": _has_exact_done_token(raw_final_answer),
             "delivery_valid": delivery_valid,
             "delivery_status": (

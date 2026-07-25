@@ -20,6 +20,7 @@ from agent_runtime.drivers.autogen import (
     _has_semantic_payload,
     _memory_adoption_evidence,
     _memory_view_facts_covered,
+    _semantic_autogen_state_text,
     _sanitize_model_visible_content,
     _select_token_nonexpanding_view,
 )
@@ -92,6 +93,22 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                 f"{routing}\nUser confirmed the timeout is 30 seconds.",
             )
         )
+
+    def test_autogen_control_objects_are_removed_from_semantic_state(self) -> None:
+        routing_only = (
+            "DefaultTopicId(type='planner', source='session')\n"
+            "AgentId(type='planner', key='session')\n"
+            "CancellationToken: "
+            "<autogen_core.base._cancellation_token.CancellationToken "
+            "object at 0x000001ABCDEF>"
+        )
+        mixed = f"user: Review the release plan.\n{routing_only}"
+
+        self.assertEqual(_semantic_autogen_state_text([], routing_only), "")
+        semantic = _semantic_autogen_state_text([], mixed)
+        self.assertEqual(semantic, "user: Review the release plan.")
+        self.assertNotIn("AgentId", semantic)
+        self.assertNotIn("CancellationToken", semantic)
 
     def test_legacy_rewrite_metadata_is_removed_from_model_visible_content(self) -> None:
         content = (

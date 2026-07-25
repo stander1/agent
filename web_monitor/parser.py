@@ -305,10 +305,25 @@ def build_session_snapshot(
                 if isinstance(profile, dict):
                     agent["capability_profile"] = profile
             continue
-        if event_type == "state_written":
+        if event_type in {"state_written", "state_reused"}:
             state = payload.get("state")
             if isinstance(state, dict):
-                state_pool.append(state)
+                state_id = str(state.get("state_id") or "")
+                existing_index = next(
+                    (
+                        index
+                        for index, item in enumerate(state_pool)
+                        if str(item.get("state_id") or "") == state_id
+                    ),
+                    None,
+                )
+                if existing_index is None:
+                    state_pool.append(state)
+                else:
+                    state_pool[existing_index] = {
+                        **state_pool[existing_index],
+                        **state,
+                    }
             continue
         if event_type in {
             "autogen_agent_receive",

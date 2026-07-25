@@ -1373,7 +1373,10 @@ class AutoGenHookManager:
                     agent=context.agent,
                     output=AgentOutput(
                         agent_id=context.agent.agent_id,
-                        content=text,
+                        content=_semantic_autogen_state_text(
+                            decoded_messages,
+                            text,
+                        ),
                         metadata={
                             "framework": "autogen",
                             "target_kind": context.target_kind,
@@ -1565,8 +1568,38 @@ class AutoGenHookManager:
         }
         if context.target_kind != "core_runtime":
             return
-        if not _has_semantic_payload(decoded_messages, native_text):
+        semantic_text = _semantic_autogen_state_text(
+            decoded_messages,
+            native_text,
+        )
+        if not semantic_text:
+            if native_text.strip():
+                self.trace.write(
+                    "autogen_routing_metadata_filtered",
+                    {
+                        "call_id": context.call_id,
+                        "agent_id": context.agent.agent_id,
+                        "target_kind": context.target_kind,
+                        "method": context.method_name,
+                        "native_chars": len(native_text),
+                        "semantic_chars": 0,
+                        "routing_only": True,
+                    },
+                )
             return
+        if semantic_text != native_text.strip():
+            self.trace.write(
+                "autogen_routing_metadata_filtered",
+                {
+                    "call_id": context.call_id,
+                    "agent_id": context.agent.agent_id,
+                    "target_kind": context.target_kind,
+                    "method": context.method_name,
+                    "native_chars": len(native_text),
+                    "semantic_chars": len(semantic_text),
+                    "routing_only": False,
+                },
+            )
         state_refs = self._safe_kernel_call(
             "write_autogen_transport_input_state",
             lambda: self.kernel.write_agent_state(
@@ -1576,7 +1609,7 @@ class AutoGenHookManager:
                 agent=context.agent,
                 output=AgentOutput(
                     agent_id=context.agent.agent_id,
-                    content=native_text,
+                    content=semantic_text,
                     metadata={
                         "framework": "autogen",
                         "target_kind": context.target_kind,
@@ -1785,7 +1818,10 @@ class AutoGenHookManager:
                 agent=context.agent,
                 output=AgentOutput(
                     agent_id=context.agent.agent_id,
-                    content=native_content,
+                    content=_semantic_autogen_state_text(
+                        decoded_messages,
+                        native_content,
+                    ),
                     metadata={
                         "framework": "autogen",
                         "target_kind": context.target_kind,
@@ -2205,7 +2241,10 @@ class AutoGenHookManager:
                 agent=context.agent,
                 output=AgentOutput(
                     agent_id=context.agent.agent_id,
-                    content=native_content,
+                    content=_semantic_autogen_state_text(
+                        decoded_messages,
+                        native_content,
+                    ),
                     metadata={
                         "framework": "autogen",
                         "target_kind": context.target_kind,
@@ -2695,7 +2734,10 @@ class AutoGenHookManager:
                 agent=context.agent,
                 output=AgentOutput(
                     agent_id=context.agent.agent_id,
-                    content=native_text,
+                    content=_semantic_autogen_state_text(
+                        decoded_messages,
+                        native_text,
+                    ),
                     metadata={
                         "framework": "autogen",
                         "target_kind": context.target_kind,
@@ -3085,7 +3127,10 @@ class AutoGenHookManager:
                 agent=context.agent,
                 output=AgentOutput(
                     agent_id=context.agent.agent_id,
-                    content=native_text,
+                    content=_semantic_autogen_state_text(
+                        decoded_messages,
+                        native_text,
+                    ),
                     metadata={
                         "framework": "autogen",
                         "target_kind": context.target_kind,
@@ -3451,7 +3496,10 @@ class AutoGenHookManager:
                 agent=context.agent,
                 output=AgentOutput(
                     agent_id=context.agent.agent_id,
-                    content=native_text,
+                    content=_semantic_autogen_state_text(
+                        decoded_messages,
+                        native_text,
+                    ),
                     metadata={
                         "framework": "autogen",
                         "target_kind": context.target_kind,
@@ -3625,7 +3673,10 @@ class AutoGenHookManager:
                 agent=context.agent,
                 output=AgentOutput(
                     agent_id=context.agent.agent_id,
-                    content=native_text,
+                    content=_semantic_autogen_state_text(
+                        decoded_messages,
+                        native_text,
+                    ),
                     metadata={
                         "framework": "autogen",
                         "target_kind": context.target_kind,
@@ -4335,7 +4386,10 @@ class AutoGenHookManager:
                 agent=context.agent,
                 output=AgentOutput(
                     agent_id=context.agent.agent_id,
-                    content=native_text,
+                    content=_semantic_autogen_state_text(
+                        decoded_messages,
+                        native_text,
+                    ),
                     metadata={
                         "framework": "autogen",
                         "target_kind": context.target_kind,
@@ -8021,18 +8075,72 @@ def _extract_text(value: Any, *, _depth: int = 0) -> str:
     return _preview(repr(value), limit=1000)
 
 
-def _has_semantic_payload(decoded_messages: list[Any], text: str) -> bool:
-    if text.strip() and not _is_autogen_routing_metadata_only(text):
-        return True
+def _semantic_autogen_state_text(
+    decoded_messages: list[Any],
+    text: str,
+) -> str:
+    cleaned_text = _sanitize_autogen_routing_metadata(text)
+    if cleaned_text:
+        return cleaned_text
+
+    semantic_parts: list[str] = []
     for message in decoded_messages:
         content = str(getattr(message, "content_text", "") or "").strip()
-        if content and not _is_autogen_routing_metadata_only(content):
-            return True
-        if getattr(message, "tool_calls", None):
-            return True
-        if getattr(message, "tool_results", None):
-            return True
-    return False
+        cleaned_content = _sanitize_autogen_routing_metadata(content)
+        if cleaned_content:
+            semantic_parts.append(cleaned_content)
+        for attribute in ("tool_calls", "tool_results"):
+            tool_payload = getattr(message, attribute, None)
+            if not tool_payload:
+                continue
+            cleaned_tool_payload = _sanitize_autogen_routing_metadata(
+                _extract_text(tool_payload)
+            )
+            if cleaned_tool_payload:
+                semantic_parts.append(cleaned_tool_payload)
+    return "\n".join(dict.fromkeys(semantic_parts)).strip()
+
+
+def _has_semantic_payload(decoded_messages: list[Any], text: str) -> bool:
+    return bool(_semantic_autogen_state_text(decoded_messages, text))
+
+
+def _sanitize_autogen_routing_metadata(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    cleaned = re.sub(r"DefaultTopicId\([^)]*\)", " ", raw)
+    cleaned = re.sub(r"AgentId\([^)]*\)", " ", cleaned)
+    cleaned = re.sub(
+        r"CancellationToken\s*:\s*<[^>]*>",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"<autogen_core\.[^>]+>",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned_lines: list[str] = []
+    for line in cleaned.splitlines():
+        line = re.sub(
+            r"^\s*[0-9a-f]{8}-[0-9a-f-]{27,}\s*:\s*",
+            "",
+            line,
+            flags=re.IGNORECASE,
+        )
+        line = re.sub(
+            r"(?:AgentId|CancellationToken|DefaultTopicId)\s*:\s*$",
+            "",
+            line,
+            flags=re.IGNORECASE,
+        )
+        normalized = line.strip()
+        if normalized and not _is_autogen_routing_metadata_only(normalized):
+            cleaned_lines.append(normalized)
+    return "\n".join(cleaned_lines).strip()
 
 
 def _is_autogen_routing_metadata_only(text: str) -> bool:
@@ -8079,6 +8187,11 @@ def _is_autogen_routing_metadata_only(text: str) -> bool:
         "type",
         "source",
         "id",
+        "cancellationtoken",
+        "cancellation_token",
+        "autogen_core",
+        "object",
+        "at",
     }
     return not tokens or tokens.issubset(routing_tokens)
 

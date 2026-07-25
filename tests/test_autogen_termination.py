@@ -9,7 +9,10 @@ from autogen_agentchat.messages import BaseChatMessage, TextMessage, ThoughtEven
 from autogen_agentchat.teams import RoundRobinGroupChat
 from autogen_core import CancellationToken
 
-from agent_runtime.adapters.autogen_termination import ReviewerFinalTextTermination
+from agent_runtime.adapters.autogen_termination import (
+    ReviewerFinalTextTermination,
+    resolve_final_artifact,
+)
 
 
 MARKER = "FINAL_ANSWER_READY"
@@ -167,6 +170,120 @@ class ReviewerFinalTextTerminationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(result)
         self.assertTrue(self.condition.terminated)
+
+    async def test_repairs_missing_marker_on_complete_reviewer_artifact(self) -> None:
+        result = await self.condition(
+            [
+                TextMessage(
+                    content=(
+                        "## 最终可交付方案\n\n"
+                        "以下是可由用户直接执行的完整方案。第一部分给出目标与约束，"
+                        "第二部分列出逐步安排、责任人和时间窗口，第三部分给出预算、"
+                        "风险及替代路径，并对所有关键结论提供验证方法。"
+                    ),
+                    source="reviewer",
+                )
+            ]
+        )
+
+        self.assertIsNotNone(result)
+        self.assertTrue(self.condition.terminated)
+        self.assertEqual(
+            self.condition.last_resolved_artifact.resolution_kind,
+            "reviewer_marker_repaired",
+        )
+        self.assertTrue(
+            self.condition.last_resolved_artifact.content.rstrip().endswith(MARKER)
+        )
+
+    async def test_prior_writer_artifact_is_promoted_when_reviewer_only_approves(self) -> None:
+        writer_artifact = (
+            "## 完整审计报告\n\n"
+            "本文给出审计范围、证据清单、逐项发现、风险等级、整改责任人与"
+            "验收办法。所有结论均可追溯到输入证据，正文足以直接交付给用户。"
+        )
+        await self.condition(
+            [TextMessage(content=writer_artifact, source="writer")]
+        )
+
+        result = await self.condition(
+            [
+                TextMessage(
+                    content=(
+                        "## 最终可交付成果\n\n"
+                        "基于对前序 writer 产出（artifact_state:state_1）的验收，"
+                        f"确认其符合规范，现批准并流转。\n{MARKER}"
+                    ),
+                    source="reviewer",
+                )
+            ]
+        )
+
+        self.assertIsNotNone(result)
+        self.assertTrue(self.condition.terminated)
+        self.assertEqual(
+            self.condition.last_resolved_artifact.resolution_kind,
+            "prior_artifact_approved",
+        )
+        self.assertEqual(
+            self.condition.last_resolved_artifact.origin_source,
+            "writer",
+        )
+        self.assertIn("完整审计报告", self.condition.last_resolved_artifact.content)
+
+    async def test_rejects_numeric_upper_bound_violation(self) -> None:
+        await self.condition(
+            [TextMessage(content="请生成完整方案，总预算 3000 元以内。", source="user")]
+        )
+
+        result = await self.condition(
+            [
+                TextMessage(
+                    content=(
+                        "## 最终可交付方案\n\n"
+                        "方案包含完整安排、风险与替代路径，可由用户直接执行。\n"
+                        "| 项目 | 预算 |\n"
+                        "| --- | ---: |\n"
+                        f"| 总计 | 2500 - 3800 元 |\n{MARKER}"
+                    ),
+                    source="reviewer",
+                )
+            ]
+        )
+
+        self.assertIsNone(result)
+        self.assertFalse(self.condition.terminated)
+        self.assertIn(
+            "numeric_upper_bound_violation",
+            self.condition.last_assessment.reasons,
+        )
+
+    async def test_pure_resolver_promotes_approved_prior_artifact(self) -> None:
+        resolved = resolve_final_artifact(
+            [
+                TextMessage(
+                    content=(
+                        "## 完整实施报告\n\n"
+                        "报告包含范围、方法、结果、风险、责任人与验收标准，"
+                        "信息完整且能够直接交付给用户执行。"
+                    ),
+                    source="specialist",
+                ),
+                TextMessage(
+                    content=(
+                        "确认前序 specialist 的成果符合要求，批准作为最终交付物。\n"
+                        f"{MARKER}"
+                    ),
+                    source="reviewer",
+                ),
+            ],
+            marker=MARKER,
+            reviewer_source="reviewer",
+        )
+
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved.origin_source, "specialist")
+        self.assertEqual(resolved.resolution_kind, "prior_artifact_approved")
 
     async def test_rejects_review_summary_mislabeled_as_delivery_highlights(self) -> None:
         result = await self.condition(

@@ -26,7 +26,7 @@ _DELIVERY_BOUNDARY_RE = re.compile(
     r"(?im)(?:"
     r"^\s*(?:#{1,4}\s*)?(?:\*{1,2})?(?:【)?最终(?:可交付|可执行)?"
     r"(?:交付物|成果|答案|规划方案|方案|文档|报告|结果|实现|手册|版本)"
-    r"(?=\s*[:：\-—（(】])|"
+    r"(?=\s*(?:[:：\-—（(】]|$))|"
     r"^\s*#{1,4}\s*(?!.*审查).{0,80}(?:最终|完整)"
     r"(?:成果|答案|方案|文档|报告|结果|实现|手册)|"
     r"^\s*(?:#{1,4}\s*)?完整(?:成果|答案|方案|文档|报告|结果|实现|手册)\s*[:：]?"
@@ -38,6 +38,46 @@ _USER_CONFIRMED_QUOTE_RE = re.compile(
     r"\s*(?:(?:为|是|内容为|事项为)\s*)?[:：,，(（]?\s*"
     r"[“\"]([^”\"\n]{3,180})[”\"]"
 )
+_PRIOR_ARTIFACT_REFERENCE_RE = re.compile(
+    r"(?is)(?:"
+    r"(?:\u524d\u5e8f|\u6b64\u524d|\u4e0a\u4e00\u7248|\u4e0a\u8f6e)"
+    r".{0,48}(?:writer|artifact|draft|\u4ea7\u51fa|\u8349\u7a3f|\u6210\u679c)"
+    r"|(?:previous|prior).{0,48}(?:writer|artifact|draft|output)"
+    r"|artifact_state\s*:"
+    r")"
+)
+_PRIOR_ARTIFACT_APPROVAL_RE = re.compile(
+    r"(?is)(?:"
+    r"\u9a8c\u6536|\u6279\u51c6|\u901a\u8fc7|\u7b26\u5408\u89c4\u8303|"
+    r"\u672a\u53d1\u73b0.{0,32}\u95ee\u9898|"
+    r"approved?|accepted?|validated?"
+    r")"
+)
+_REVISION_REQUIRED_RE = re.compile(
+    r"(?is)(?:"
+    r"\u4fee\u8ba2|\u4fee\u6539|\u91cd\u5199|\u8865\u5145|"
+    r"\u4e0d\u5408\u683c|\u672a\u901a\u8fc7|\u5c1a\u672a|"
+    r"revise|revision|required\s+changes?|repair|failed?"
+    r")"
+)
+_BUDGET_CONTEXT_RE = re.compile(
+    r"(?i)(?:\u603b?\u9884\u7b97|budget|total\s+cost|cost\s+cap)"
+)
+_UPPER_BOUND_SIGNAL_RE = re.compile(
+    r"(?i)(?:"
+    r"\u4ee5\u5185|\u4e0a\u9650|"
+    r"\u4e0d(?:\u5f97|\u53ef|\u80fd)?\u8d85\u8fc7|"
+    r"\u81f3\u591a|\u6700\u591a|"
+    r"<=|under|no\s+more\s+than|at\s+most|maximum|max(?:imum)?|cap"
+    r")"
+)
+_BUDGET_RESULT_RE = re.compile(
+    r"(?i)(?:"
+    r"\u603b\u8ba1|\u5408\u8ba1|\u603b\u91d1\u989d|\u603b\u8d39\u7528|"
+    r"\u9884\u7b97|budget|total(?:\s+cost)?|cost"
+    r")"
+)
+_NUMBER_RE = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)(?![\w.])")
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +87,7 @@ class FinalDeliveryAssessment:
     reasons: tuple[str, ...]
     missing_requirements: tuple[str, ...]
     review_only: bool
+    approved_prior_artifact: bool
     body: str
 
     def to_dict(self) -> dict[str, object]:
@@ -56,6 +97,7 @@ class FinalDeliveryAssessment:
             "reasons": list(self.reasons),
             "missing_requirements": list(self.missing_requirements),
             "review_only": self.review_only,
+            "approved_prior_artifact": self.approved_prior_artifact,
             "body_chars": len(self.body),
         }
 
@@ -88,9 +130,11 @@ def assess_final_delivery(
     review_heading = bool(_REVIEW_HEADING_RE.search(body))
     delegated_revision = bool(_DELEGATED_REVISION_RE.search(body))
     review_only_signal = bool(_REVIEW_ONLY_SIGNAL_RE.search(body))
-    delivery_boundary = bool(_DELIVERY_BOUNDARY_RE.search(body))
-    review_only = not delivery_boundary and (
-        review_heading or delegated_revision or review_only_signal
+    delivery_boundary = has_explicit_delivery_boundary(body)
+    approved_prior_artifact = is_prior_artifact_approval(body)
+    review_only = approved_prior_artifact or (
+        not delivery_boundary
+        and (review_heading or delegated_revision or review_only_signal)
     )
     if review_only:
         reasons.append("review_feedback_not_final_artifact")
@@ -105,14 +149,21 @@ def assess_final_delivery(
             for quote in _USER_CONFIRMED_QUOTE_RE.findall(body)
         ):
             reasons.append("ungrounded_user_confirmation_claim")
+    numeric_violations = _numeric_upper_bound_violations(
+        grounding_text=grounding_text,
+        body=body,
+    )
+    if numeric_violations:
+        reasons.append("numeric_upper_bound_violation")
 
     unique_reasons = tuple(dict.fromkeys(reasons))
     return FinalDeliveryAssessment(
         valid=not unique_reasons,
         status="validated_final_artifact" if not unique_reasons else "degraded_fallback",
         reasons=unique_reasons,
-        missing_requirements=(),
+        missing_requirements=numeric_violations,
         review_only=review_only,
+        approved_prior_artifact=approved_prior_artifact,
         body=body,
     )
 
@@ -131,6 +182,71 @@ def strip_exact_last_line_marker(content: str, marker: str) -> str:
     if lines and marker.strip() and lines[-1].strip() == marker.strip():
         lines.pop()
     return "\n".join(lines).rstrip()
+
+
+def has_explicit_delivery_boundary(content: str) -> bool:
+    return bool(_DELIVERY_BOUNDARY_RE.search(str(content or "")))
+
+
+def is_prior_artifact_approval(content: str) -> bool:
+    body = str(content or "").strip()
+    if not body or len(body) > 900:
+        return False
+    if _REVISION_REQUIRED_RE.search(body):
+        return False
+    return bool(
+        _PRIOR_ARTIFACT_REFERENCE_RE.search(body)
+        and _PRIOR_ARTIFACT_APPROVAL_RE.search(body)
+    )
+
+
+def _numeric_upper_bound_violations(
+    *,
+    grounding_text: str,
+    body: str,
+) -> tuple[str, ...]:
+    budget_bounds: list[float] = []
+    for line in str(grounding_text or "").splitlines():
+        if not _BUDGET_CONTEXT_RE.search(line):
+            continue
+        if not _UPPER_BOUND_SIGNAL_RE.search(line):
+            continue
+        values = _line_numbers(line)
+        if values:
+            budget_bounds.append(max(values))
+    if not budget_bounds:
+        return ()
+
+    active_bound = budget_bounds[-1]
+    violations: list[str] = []
+    for line in str(body or "").splitlines():
+        if not _BUDGET_RESULT_RE.search(line):
+            continue
+        values = [
+            value
+            for value in _line_numbers(line)
+            if not (
+                1900 <= value <= 2100
+                and re.search(r"(?i)(?:year|date|\u5e74|\u65e5\u671f)", line)
+            )
+        ]
+        observed = max(values, default=0.0)
+        if observed > active_bound:
+            violations.append(
+                "budget_upper_bound="
+                f"{_format_number(active_bound)};"
+                "observed_total_upper="
+                f"{_format_number(observed)}"
+            )
+    return tuple(dict.fromkeys(violations))
+
+
+def _line_numbers(text: str) -> list[float]:
+    return [float(match.group(1)) for match in _NUMBER_RE.finditer(text)]
+
+
+def _format_number(value: float) -> str:
+    return str(int(value)) if value.is_integer() else str(value)
 
 
 def _normalize_grounding_text(text: str) -> str:

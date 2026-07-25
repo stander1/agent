@@ -175,6 +175,89 @@ FINAL_ANSWER_READY"""
         self.assertTrue(assessment.valid)
         self.assertFalse(assessment.review_only)
 
+    def test_marks_compact_prior_artifact_approval_as_review_only(self) -> None:
+        content = """## 最终可交付成果
+
+基于对前序 writer 产出（artifact_state:state_1）的验收，确认其符合规范，现批准并流转。
+FINAL_ANSWER_READY"""
+
+        assessment = assess_final_delivery(
+            request="请生成完整审计报告",
+            content=content,
+            source="reviewer",
+            expected_source="reviewer",
+            marker="FINAL_ANSWER_READY",
+            require_marker=True,
+        )
+
+        self.assertFalse(assessment.valid)
+        self.assertTrue(assessment.review_only)
+        self.assertTrue(assessment.approved_prior_artifact)
+        self.assertIn("review_feedback_not_final_artifact", assessment.reasons)
+
+    def test_rejects_budget_total_above_explicit_upper_bound(self) -> None:
+        content = """## 最终可交付方案
+
+方案包含交通、住宿、餐饮和活动安排，可由用户直接执行。
+| 项目 | 预算 |
+| --- | ---: |
+| 总计 | 2500 - 3800 元 |
+FINAL_ANSWER_READY"""
+
+        assessment = assess_final_delivery(
+            request="请生成完整方案，总预算 3000 元以内。",
+            content=content,
+            source="reviewer",
+            expected_source="reviewer",
+            marker="FINAL_ANSWER_READY",
+            require_marker=True,
+        )
+
+        self.assertFalse(assessment.valid)
+        self.assertIn("numeric_upper_bound_violation", assessment.reasons)
+        self.assertIn(
+            "budget_upper_bound=3000;observed_total_upper=3800",
+            assessment.missing_requirements,
+        )
+
+    def test_accepts_budget_total_within_explicit_upper_bound(self) -> None:
+        content = """## 最终可交付方案
+
+方案包含交通、住宿、餐饮和活动安排，可由用户直接执行。
+| 项目 | 预算 |
+| --- | ---: |
+| 总计 | 2500 - 2900 元 |
+FINAL_ANSWER_READY"""
+
+        assessment = assess_final_delivery(
+            request="请生成完整方案，总预算不得超过 3000 元。",
+            content=content,
+            source="reviewer",
+            expected_source="reviewer",
+            marker="FINAL_ANSWER_READY",
+            require_marker=True,
+        )
+
+        self.assertTrue(assessment.valid)
+
+    def test_rejects_budget_total_above_nondelegable_upper_bound(self) -> None:
+        assessment = assess_final_delivery(
+            request="请生成完整执行方案，总预算不得超过 3000 元。",
+            content=(
+                "## 最终可交付方案\n\n"
+                "方案包含目标、步骤、风险和验收方式，"
+                "总预算 3800 元。\n"
+                "FINAL_ANSWER_READY"
+            ),
+            source="reviewer",
+            expected_source="reviewer",
+            marker="FINAL_ANSWER_READY",
+            require_marker=True,
+        )
+
+        self.assertFalse(assessment.valid)
+        self.assertIn("numeric_upper_bound_violation", assessment.reasons)
+
 
 if __name__ == "__main__":
     unittest.main()

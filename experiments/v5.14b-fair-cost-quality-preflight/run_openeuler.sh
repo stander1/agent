@@ -55,7 +55,12 @@ fi
 EXP_ID="${AGENTLITE_V514B_EXP_ID:-$(date +%Y%m%d-%H%M%S)}"
 RUN_ROOT="${AGENTLITE_V514B_RUN_ROOT:-runs/v5.14b-fair-cost-quality-preflight/$EXP_ID}"
 TRACE_ROOT="${AGENTLITE_V514B_TRACE_ROOT:-.agentlite-exp/v5.14b-fair-cost-quality-preflight/$EXP_ID}"
-EXPORT_BASE="exports/v5.14b-fair-cost-quality-preflight-$EXP_ID"
+EXPORT_BASE="${AGENTLITE_V514B_EXPORT_BASE:-exports/v5.14b-fair-cost-quality-preflight-$EXP_ID}"
+EXPERIMENT_LABEL="${AGENTLITE_V514B_EXPERIMENT_LABEL:-v5.14b}"
+MEMORY_SCOPE_PREFIX="${AGENTLITE_V514B_MEMORY_SCOPE_PREFIX:-v514b}"
+POST_VERIFY="${AGENTLITE_V514B_POST_VERIFY:-}"
+POST_VERIFY_JSON="${AGENTLITE_V514B_POST_VERIFY_JSON:-$RUN_ROOT/post_verify_report.json}"
+POST_VERIFY_MARKDOWN="${AGENTLITE_V514B_POST_VERIFY_MARKDOWN:-$RUN_ROOT/post_verify_report.md}"
 TEMPERATURE=0
 MAX_TURNS=9
 
@@ -129,7 +134,7 @@ run_scenario() {
       --output-dir "$scenario_root/observed"
 
   echo "[$label 3/8] Managed：AgentLite 正式接管"
-  export AGENTLITE_MEMORY_SCOPE="v514b-${label}-${EXP_ID}"
+  export AGENTLITE_MEMORY_SCOPE="${MEMORY_SCOPE_PREFIX}-${label}-${EXP_ID}"
   agentlite autogen \
     --data-dir "$trace_root/managed" \
     --experiment-dir "$scenario_root/managed" \
@@ -188,11 +193,11 @@ run_scenario() {
     --output "$scenario_root/comparison/quality_blind_summary.json"
 }
 
-echo "开始 v5.14b 预检，实验编号：$EXP_ID"
+echo "开始 $EXPERIMENT_LABEL 预检，实验编号：$EXP_ID"
 run_scenario "A" "$A_TASKS" "$A_AGENTS"
 run_scenario "B" "$B_TASKS" "$B_AGENTS"
 
-echo "[final 1/2] 按预注册阈值执行统一验收"
+echo "[final 1/3] 按预注册阈值执行统一验收"
 set +e
 python "$VERIFY" \
   --run-root "$RUN_ROOT" \
@@ -202,7 +207,24 @@ python "$VERIFY" \
 ACCEPTANCE_STATUS=$?
 set -e
 
-echo "[final 2/2] 打包不可变证据"
+if [[ -n "$POST_VERIFY" ]]; then
+  echo "[final 2/3] 执行阶段专用附加验收"
+  set +e
+  python "$POST_VERIFY" \
+    --run-root "$RUN_ROOT" \
+    --preflight-report "$RUN_ROOT/preflight_report.json" \
+    --output-json "$POST_VERIFY_JSON" \
+    --output-markdown "$POST_VERIFY_MARKDOWN"
+  POST_VERIFY_STATUS=$?
+  set -e
+  if [[ "$POST_VERIFY_STATUS" -ne 0 ]]; then
+    ACCEPTANCE_STATUS="$POST_VERIFY_STATUS"
+  fi
+else
+  echo "[final 2/3] 未配置阶段专用附加验收，跳过"
+fi
+
+echo "[final 3/3] 打包不可变证据"
 tar -czf "$EXPORT_BASE.tar.gz" "$RUN_ROOT" "$TRACE_ROOT"
 sha256sum "$EXPORT_BASE.tar.gz" > "$EXPORT_BASE.tar.gz.sha256"
 sha256sum -c "$EXPORT_BASE.tar.gz.sha256"
@@ -211,6 +233,9 @@ echo
 echo "Experiment complete"
 echo "Experiment ID: $EXP_ID"
 echo "Preflight report: $RUN_ROOT/preflight_report.md"
+if [[ -n "$POST_VERIFY" ]]; then
+  echo "Stage acceptance report: $POST_VERIFY_MARKDOWN"
+fi
 echo "Archive: $EXPORT_BASE.tar.gz"
 echo "Checksum: $EXPORT_BASE.tar.gz.sha256"
 
