@@ -210,6 +210,7 @@ class FormalScaleAcceptanceTest(unittest.TestCase):
             )
 
         self.assertTrue(report["summary"]["passed"])
+        self.assertEqual(report["summary"]["resume_count"], 0)
         self.assertEqual(report["summary"]["task_count_per_group"], 20)
         self.assertEqual(report["summary"]["terminal_task_count"], 2)
         self.assertEqual(
@@ -273,6 +274,31 @@ class FormalScaleAcceptanceTest(unittest.TestCase):
         )
         self.assertFalse(report["summary"]["passed"])
 
+    def test_resume_history_is_disclosed_without_changing_thresholds(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_run(root)
+            history = root / "system" / "resume-history.txt"
+            history.parent.mkdir(parents=True)
+            history.write_text(
+                "resume_at=2026-07-25T18:00:00+08:00\n"
+                "resume_git_commit=abc123\n---\n",
+                encoding="utf-8",
+            )
+            report = self.verify.evaluate(
+                run_root=root,
+                preflight_report=self._preflight_report(),
+            )
+
+        self.assertTrue(report["summary"]["passed"])
+        self.assertEqual(report["summary"]["resume_count"], 1)
+        self.assertIn(
+            "resume_git_commit=abc123",
+            report["resume_evidence"]["history"],
+        )
+
     def test_frozen_inputs_and_runner_are_full_scale(self) -> None:
         for filename in (
             "question_A_formal.json",
@@ -304,6 +330,7 @@ class FormalScaleAcceptanceTest(unittest.TestCase):
         self.assertIn("question_A_formal.json", runner)
         self.assertIn("question_B_formal.json", runner)
         self.assertIn("formal_acceptance_report.json", runner)
+        self.assertIn("AGENTLITE_V514F_RESUME", runner)
 
         base_runner = (
             REPO_ROOT
@@ -319,6 +346,10 @@ class FormalScaleAcceptanceTest(unittest.TestCase):
             'A_TASKS="${AGENTLITE_V514B_A_TASKS:-',
             base_runner,
         )
+        self.assertIn('RESUME="${AGENTLITE_V514B_RESUME:-0}"', base_runner)
+        self.assertIn("group_is_complete()", base_runner)
+        self.assertIn("archive_incomplete_group()", base_runner)
+        self.assertIn("resume-history.txt", base_runner)
 
 
 if __name__ == "__main__":

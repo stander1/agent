@@ -306,6 +306,18 @@ def evaluate(
         for state_type in requested_state_types
         if _int(actual_state_types.get(state_type)) == 0
     ]
+    resume_history_path = (
+        run_root / "system" / "resume-history.txt"
+    )
+    resume_history = (
+        resume_history_path.read_text(encoding="utf-8")
+        if resume_history_path.is_file()
+        else ""
+    )
+    resume_count = sum(
+        line.startswith("resume_at=")
+        for line in resume_history.splitlines()
+    )
 
     passed = all(item["passed"] for item in checks)
     report.update(
@@ -322,8 +334,14 @@ def evaluate(
                 "scenario_count": len(scenario_specs),
                 "task_count_per_group": expected_group_task_count,
                 "terminal_task_count": len(terminal_rows),
+                "resume_count": resume_count,
             },
             "terminal_tasks": terminal_rows,
+            "resume_evidence": {
+                "resume_count": resume_count,
+                "history_path": str(resume_history_path),
+                "history": resume_history,
+            },
             "state_type_diagnostics": {
                 "requested_by_benchmark": requested_state_types,
                 "observed_in_state_pool": actual_state_types,
@@ -366,6 +384,7 @@ def _render_markdown(report: dict[str, Any]) -> str:
         ),
         f"- 每组任务：`{summary['task_count_per_group']}`",
         f"- 终局任务：`{summary['terminal_task_count']}`",
+        f"- Provider 中断续跑次数：`{summary['resume_count']}`",
         "",
         "## 终局交付",
         "",

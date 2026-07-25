@@ -27,5 +27,6 @@ export AGENTLITE_V514B_B_TASKS_COPY_NAME="question_B_formal.json"
 export AGENTLITE_V514B_POST_VERIFY="$SCRIPT_DIR/verify_acceptance.py"
 export AGENTLITE_V514B_POST_VERIFY_JSON="$RUN_ROOT/formal_acceptance_report.json"
 export AGENTLITE_V514B_POST_VERIFY_MARKDOWN="$RUN_ROOT/formal_acceptance_report.md"
+export AGENTLITE_V514B_RESUME="${AGENTLITE_V514F_RESUME:-0}"
 
 exec bash "$BASE_RUNNER"

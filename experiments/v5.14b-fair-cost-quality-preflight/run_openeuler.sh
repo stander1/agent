@@ -71,45 +71,121 @@ MEMORY_SCOPE_PREFIX="${AGENTLITE_V514B_MEMORY_SCOPE_PREFIX:-v514b}"
 POST_VERIFY="${AGENTLITE_V514B_POST_VERIFY:-}"
 POST_VERIFY_JSON="${AGENTLITE_V514B_POST_VERIFY_JSON:-$RUN_ROOT/post_verify_report.json}"
 POST_VERIFY_MARKDOWN="${AGENTLITE_V514B_POST_VERIFY_MARKDOWN:-$RUN_ROOT/post_verify_report.md}"
+RESUME="${AGENTLITE_V514B_RESUME:-0}"
 TEMPERATURE=0
 MAX_TURNS=9
 
-for path in "$RUN_ROOT" "$TRACE_ROOT" "$EXPORT_BASE.tar.gz"; do
-  if [[ -e "$path" ]]; then
-    echo "错误：实验路径已经存在，拒绝覆盖证据：$path" >&2
-    echo "请设置新的 AGENTLITE_V514B_EXP_ID 后重试。" >&2
+if [[ "$RESUME" != "0" && "$RESUME" != "1" ]]; then
+  echo "错误：AGENTLITE_V514B_RESUME 只能为 0 或 1。" >&2
+  exit 2
+fi
+
+if [[ "$RESUME" == "1" ]]; then
+  if [[ ! -d "$RUN_ROOT" || ! -d "$TRACE_ROOT" ]]; then
+    echo "错误：续跑要求原运行目录和 trace 目录均存在。" >&2
+    echo "RUN_ROOT=$RUN_ROOT" >&2
+    echo "TRACE_ROOT=$TRACE_ROOT" >&2
     exit 2
   fi
-done
+  if [[ -e "$EXPORT_BASE.tar.gz" ]]; then
+    echo "错误：正式归档已经存在，拒绝续跑覆盖：$EXPORT_BASE.tar.gz" >&2
+    exit 2
+  fi
+  for pair in \
+    "$PREREG|$RUN_ROOT/system/frozen-inputs/preregistration.json" \
+    "$A_TASKS|$RUN_ROOT/system/frozen-inputs/$A_TASKS_COPY_NAME" \
+    "$B_TASKS|$RUN_ROOT/system/frozen-inputs/$B_TASKS_COPY_NAME" \
+    "$A_AGENTS|$RUN_ROOT/system/frozen-inputs/agent_config_A.json" \
+    "$B_AGENTS|$RUN_ROOT/system/frozen-inputs/agent_config_B.json"; do
+    source_path="${pair%%|*}"
+    frozen_path="${pair#*|}"
+    if [[ ! -f "$frozen_path" ]] || ! cmp -s "$source_path" "$frozen_path"; then
+      echo "错误：当前输入与原实验冻结副本不一致，拒绝续跑：$source_path" >&2
+      exit 2
+    fi
+  done
+  (
+    cd "$RUN_ROOT/system/frozen-inputs"
+    sha256sum -c ../frozen-input-copies.sha256
+  )
+  {
+    printf 'resume_at=%s\n' "$(date --iso-8601=seconds)"
+    printf 'resume_git_commit=%s\n' "$(git rev-parse HEAD)"
+    printf 'resume_runner=%s\n' "$0"
+    printf '%s\n' "---"
+  } >> "$RUN_ROOT/system/resume-history.txt"
+else
+  for path in "$RUN_ROOT" "$TRACE_ROOT" "$EXPORT_BASE.tar.gz"; do
+    if [[ -e "$path" ]]; then
+      echo "错误：实验路径已经存在，拒绝覆盖证据：$path" >&2
+      echo "请设置新的 AGENTLITE_V514B_EXP_ID 后重试。" >&2
+      exit 2
+    fi
+  done
 
-mkdir -p "$RUN_ROOT/system/frozen-inputs" "$TRACE_ROOT" exports
-cp "$PREREG" "$RUN_ROOT/system/preregistration.json"
-cp "$PREREG" "$RUN_ROOT/system/frozen-inputs/preregistration.json"
-cp "$A_TASKS" "$RUN_ROOT/system/frozen-inputs/$A_TASKS_COPY_NAME"
-cp "$B_TASKS" "$RUN_ROOT/system/frozen-inputs/$B_TASKS_COPY_NAME"
-cp "$A_AGENTS" "$RUN_ROOT/system/frozen-inputs/agent_config_A.json"
-cp "$B_AGENTS" "$RUN_ROOT/system/frozen-inputs/agent_config_B.json"
-sha256sum \
-  "$PREREG" "$A_TASKS" "$B_TASKS" "$A_AGENTS" "$B_AGENTS" \
-  > "$RUN_ROOT/system/frozen-inputs.sha256"
-(
-  cd "$RUN_ROOT/system/frozen-inputs"
+  mkdir -p "$RUN_ROOT/system/frozen-inputs" "$TRACE_ROOT" exports
+  cp "$PREREG" "$RUN_ROOT/system/preregistration.json"
+  cp "$PREREG" "$RUN_ROOT/system/frozen-inputs/preregistration.json"
+  cp "$A_TASKS" "$RUN_ROOT/system/frozen-inputs/$A_TASKS_COPY_NAME"
+  cp "$B_TASKS" "$RUN_ROOT/system/frozen-inputs/$B_TASKS_COPY_NAME"
+  cp "$A_AGENTS" "$RUN_ROOT/system/frozen-inputs/agent_config_A.json"
+  cp "$B_AGENTS" "$RUN_ROOT/system/frozen-inputs/agent_config_B.json"
   sha256sum \
-    preregistration.json \
-    "$A_TASKS_COPY_NAME" \
-    "$B_TASKS_COPY_NAME" \
-    agent_config_A.json \
-    agent_config_B.json
-) > "$RUN_ROOT/system/frozen-input-copies.sha256"
-git rev-parse HEAD > "$RUN_ROOT/system/git-commit.txt"
-git status --short --untracked-files=no > "$RUN_ROOT/system/git-status.txt"
-python --version > "$RUN_ROOT/system/python-version.txt" 2>&1
-python -m pip freeze > "$RUN_ROOT/system/pip-freeze.txt"
-agentlite version > "$RUN_ROOT/system/agentlite-version.txt"
-if [[ -f /etc/openEuler-release ]]; then
-  cat /etc/openEuler-release > "$RUN_ROOT/system/openeuler-release.txt"
+    "$PREREG" "$A_TASKS" "$B_TASKS" "$A_AGENTS" "$B_AGENTS" \
+    > "$RUN_ROOT/system/frozen-inputs.sha256"
+  (
+    cd "$RUN_ROOT/system/frozen-inputs"
+    sha256sum \
+      preregistration.json \
+      "$A_TASKS_COPY_NAME" \
+      "$B_TASKS_COPY_NAME" \
+      agent_config_A.json \
+      agent_config_B.json
+  ) > "$RUN_ROOT/system/frozen-input-copies.sha256"
+  git rev-parse HEAD > "$RUN_ROOT/system/git-commit.txt"
+  git status --short --untracked-files=no > "$RUN_ROOT/system/git-status.txt"
+  python --version > "$RUN_ROOT/system/python-version.txt" 2>&1
+  python -m pip freeze > "$RUN_ROOT/system/pip-freeze.txt"
+  agentlite version > "$RUN_ROOT/system/agentlite-version.txt"
+  if [[ -f /etc/openEuler-release ]]; then
+    cat /etc/openEuler-release > "$RUN_ROOT/system/openeuler-release.txt"
+  fi
+  uname -a > "$RUN_ROOT/system/uname.txt"
 fi
-uname -a > "$RUN_ROOT/system/uname.txt"
+
+group_is_complete() {
+  local group_root="$1"
+  local agentlite_mode="$2"
+  [[ -f "$group_root/experiment_result.json" ]] \
+    && [[ -f "$group_root/sequence_result.json" ]] \
+    && [[ -f "$group_root/llm_usage_summary.json" ]] \
+    && (
+      [[ "$agentlite_mode" == "native" ]] \
+      || [[ -f "$group_root/agentlite_session_report.json" ]]
+    )
+}
+
+archive_incomplete_group() {
+  local label="$1"
+  local group="$2"
+  local scenario_root="$RUN_ROOT/$label"
+  local scenario_trace_root="$TRACE_ROOT/$label"
+  local stamp
+  stamp="$(date +%Y%m%d-%H%M%S)-$$"
+
+  if [[ -e "$scenario_root/$group" ]]; then
+    mkdir -p "$RUN_ROOT/interrupted/$label"
+    mv \
+      "$scenario_root/$group" \
+      "$RUN_ROOT/interrupted/$label/${group}-${stamp}"
+  fi
+  if [[ -e "$scenario_trace_root/$group" ]]; then
+    mkdir -p "$TRACE_ROOT/interrupted/$label"
+    mv \
+      "$scenario_trace_root/$group" \
+      "$TRACE_ROOT/interrupted/$label/${group}-${stamp}"
+  fi
+}
 
 run_scenario() {
   local label="$1"
@@ -120,43 +196,67 @@ run_scenario() {
 
   mkdir -p "$scenario_root/reports"
 
-  echo "[$label 1/8] Native：原生 AutoGen"
-  python "$APP" \
-    --question-sequence-file "$tasks" \
-    --agent-config "$agents" \
-    --temperature "$TEMPERATURE" \
-    --max-turns "$MAX_TURNS" \
-    --experiment-mode native \
-    --output-dir "$scenario_root/native"
-
-  echo "[$label 2/8] Observed：AgentLite 只观察，不改写"
-  agentlite autogen \
-    --data-dir "$trace_root/observed" \
-    --experiment-dir "$scenario_root/observed" \
-    --rewrite off \
-    --broadcast-mode shadow-only \
-    -- python "$APP" \
+  if [[ "$RESUME" == "1" ]] \
+    && group_is_complete "$scenario_root/native" "native"; then
+    echo "[$label 1/8] Native 已完整，续跑跳过"
+  else
+    if [[ "$RESUME" == "1" ]]; then
+      archive_incomplete_group "$label" "native"
+    fi
+    echo "[$label 1/8] Native：原生 AutoGen"
+    python "$APP" \
       --question-sequence-file "$tasks" \
       --agent-config "$agents" \
       --temperature "$TEMPERATURE" \
       --max-turns "$MAX_TURNS" \
-      --experiment-mode observed \
-      --output-dir "$scenario_root/observed"
+      --experiment-mode native \
+      --output-dir "$scenario_root/native"
+  fi
 
-  echo "[$label 3/8] Managed：AgentLite 正式接管"
-  export AGENTLITE_MEMORY_SCOPE="${MEMORY_SCOPE_PREFIX}-${label}-${EXP_ID}"
-  agentlite autogen \
-    --data-dir "$trace_root/managed" \
-    --experiment-dir "$scenario_root/managed" \
-    --rewrite all \
-    -- python "$APP" \
-      --question-sequence-file "$tasks" \
-      --agent-config "$agents" \
-      --temperature "$TEMPERATURE" \
-      --max-turns "$MAX_TURNS" \
-      --experiment-mode managed \
-      --output-dir "$scenario_root/managed"
-  unset AGENTLITE_MEMORY_SCOPE
+  if [[ "$RESUME" == "1" ]] \
+    && group_is_complete "$scenario_root/observed" "observed"; then
+    echo "[$label 2/8] Observed 已完整且绑定，续跑跳过"
+  else
+    if [[ "$RESUME" == "1" ]]; then
+      archive_incomplete_group "$label" "observed"
+    fi
+    echo "[$label 2/8] Observed：AgentLite 只观察，不改写"
+    agentlite autogen \
+      --data-dir "$trace_root/observed" \
+      --experiment-dir "$scenario_root/observed" \
+      --rewrite off \
+      --broadcast-mode shadow-only \
+      -- python "$APP" \
+        --question-sequence-file "$tasks" \
+        --agent-config "$agents" \
+        --temperature "$TEMPERATURE" \
+        --max-turns "$MAX_TURNS" \
+        --experiment-mode observed \
+        --output-dir "$scenario_root/observed"
+  fi
+
+  if [[ "$RESUME" == "1" ]] \
+    && group_is_complete "$scenario_root/managed" "managed"; then
+    echo "[$label 3/8] Managed 已完整且绑定，续跑跳过"
+  else
+    if [[ "$RESUME" == "1" ]]; then
+      archive_incomplete_group "$label" "managed"
+    fi
+    echo "[$label 3/8] Managed：AgentLite 正式接管"
+    export AGENTLITE_MEMORY_SCOPE="${MEMORY_SCOPE_PREFIX}-${label}-${EXP_ID}"
+    agentlite autogen \
+      --data-dir "$trace_root/managed" \
+      --experiment-dir "$scenario_root/managed" \
+      --rewrite all \
+      -- python "$APP" \
+        --question-sequence-file "$tasks" \
+        --agent-config "$agents" \
+        --temperature "$TEMPERATURE" \
+        --max-turns "$MAX_TURNS" \
+        --experiment-mode managed \
+        --output-dir "$scenario_root/managed"
+    unset AGENTLITE_MEMORY_SCOPE
+  fi
 
   echo "[$label 4/8] 校验三组不可变绑定并生成匿名候选"
   python "$COMPARE" \
@@ -175,25 +275,35 @@ run_scenario() {
     --format json \
     --output "$scenario_root/reports/managed-agentlite.json"
 
-  echo "[$label 6/8] 冻结匿名综合质量评分"
-  python "$PRIMARY_JUDGE" \
-    --batch "$scenario_root/comparison/quality_blind_batch.json" \
-    --output "$scenario_root/comparison/quality_blind_scores.json" \
-    --config configs/llm.mimo.example.json \
-    --temperature 0 \
-    --timeout-seconds "$OPENAI_TIMEOUT_SECONDS" \
-    --max-retries "$OPENAI_MAX_RETRIES" \
-    --format-retries 2
+  if [[ "$RESUME" == "1" ]] \
+    && [[ -f "$scenario_root/comparison/quality_blind_scores.json" ]]; then
+    echo "[$label 6/8] 匿名综合质量评分已存在，续跑跳过"
+  else
+    echo "[$label 6/8] 冻结匿名综合质量评分"
+    python "$PRIMARY_JUDGE" \
+      --batch "$scenario_root/comparison/quality_blind_batch.json" \
+      --output "$scenario_root/comparison/quality_blind_scores.json" \
+      --config configs/llm.mimo.example.json \
+      --temperature 0 \
+      --timeout-seconds "$OPENAI_TIMEOUT_SECONDS" \
+      --max-retries "$OPENAI_MAX_RETRIES" \
+      --format-retries 2
+  fi
 
-  echo "[$label 7/8] 冻结匿名技术质量评分"
-  python "$TECHNICAL_JUDGE" \
-    --batch "$scenario_root/comparison/quality_blind_batch.json" \
-    --output "$scenario_root/comparison/quality_blind_technical_scores.json" \
-    --config configs/llm.mimo.example.json \
-    --temperature 0 \
-    --timeout-seconds "$OPENAI_TIMEOUT_SECONDS" \
-    --max-retries "$OPENAI_MAX_RETRIES" \
-    --format-retries 2
+  if [[ "$RESUME" == "1" ]] \
+    && [[ -f "$scenario_root/comparison/quality_blind_technical_scores.json" ]]; then
+    echo "[$label 7/8] 匿名技术质量评分已存在，续跑跳过"
+  else
+    echo "[$label 7/8] 冻结匿名技术质量评分"
+    python "$TECHNICAL_JUDGE" \
+      --batch "$scenario_root/comparison/quality_blind_batch.json" \
+      --output "$scenario_root/comparison/quality_blind_technical_scores.json" \
+      --config configs/llm.mimo.example.json \
+      --temperature 0 \
+      --timeout-seconds "$OPENAI_TIMEOUT_SECONDS" \
+      --max-retries "$OPENAI_MAX_RETRIES" \
+      --format-retries 2
+  fi
 
   echo "[$label 8/8] 解盲并汇总双重质量结果"
   python "$SUMMARIZE" \

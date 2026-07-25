@@ -43,6 +43,21 @@ bash experiments/v5.14f-formal-scale-acceptance/run_openeuler.sh
 完整实验包含 60 次任务执行和 40 次匿名评审调用，耗时会明显高于三任务预检。
 即使验收失败，runner 也会先打包完整证据再以非零状态退出。
 
+## Provider 中断后续跑
+
+如果 Provider 在某个组中连续重试后仍断开，runner 不会生成最终报告。不要删除已完成
+的 Native 或 Observed，也不要换实验编号。同步包含续跑支持的版本后，使用原实验编号：
+
+```bash
+export AGENTLITE_V514F_EXP_ID='<原实验编号>'
+export AGENTLITE_V514F_RESUME=1
+bash experiments/v5.14f-formal-scale-acceptance/run_openeuler.sh
+```
+
+续跑会校验当前输入与原冻结副本完全一致，跳过已完整绑定的组，把失败组和 trace
+移入 `interrupted/` 后重新执行，并在 `system/resume-history.txt` 记录续跑提交。
+已有匿名评分文件也会跳过。正式归档存在时禁止续跑覆盖。
+
 ## 输出
 
 ```text
