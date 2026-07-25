@@ -57,7 +57,7 @@ for input_path in "$PREREG" "$A_TASKS" "$B_TASKS" "$A_AGENTS" "$B_AGENTS"; do
 done
 
 if ! git diff --quiet || ! git diff --cached --quiet; then
-  echo "错误：存在已跟踪但未提交的修改，拒绝开始正式$PHASE_LABEL。" >&2
+  echo "错误：存在已跟踪但未提交的修改，拒绝开始$PHASE_LABEL。" >&2
   echo "请先提交、还原或另存这些修改，再重新运行。" >&2
   exit 2
 fi
