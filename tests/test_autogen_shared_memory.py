@@ -642,7 +642,11 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
 
                 self.assertEqual(len(rewritten_args[0]), 1)
                 rewritten = rewritten_args[0][0]["content"]
-                self.assertEqual(rewritten.count("CURRENT_USER_TASK"), 1)
+                self.assertGreaterEqual(
+                    rewritten.count("CURRENT_USER_TASK")
+                    + rewritten.count("CURRENT_TASK_CONTEXT"),
+                    1,
+                )
                 self.assertIn(current_task, rewritten)
                 self.assertIn(
                     "Only USER_REQUEST_HISTORY can establish what the user explicitly confirmed.",
@@ -667,6 +671,11 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                 self.assertEqual(
                     rewrite["payload"]["model_visible_protocol_marker_count"],
                     0,
+                )
+                self.assertTrue(
+                    rewrite["payload"]["rewrite_safety"][
+                        "current_task_units_preserved"
+                    ]
                 )
                 self.assertGreater(
                     rewrite["payload"]["native_input_tokens"],
@@ -816,6 +825,16 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                 self.assertGreater(
                     payload["current_task_role_view_reduction_ratio"],
                     0,
+                )
+                self.assertEqual(
+                    payload["current_task_fidelity_failure_count"],
+                    0,
+                )
+                self.assertTrue(
+                    all(
+                        item["current_task_units_preserved"]
+                        for item in payload["receiver_plans"]
+                    )
                 )
                 self.assertEqual(payload["memory_candidate_count"], 1)
                 self.assertEqual(payload["memory_retained_count"], 0)

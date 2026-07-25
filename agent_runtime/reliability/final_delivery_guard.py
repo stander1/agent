@@ -46,6 +46,30 @@ _PRIOR_ARTIFACT_REFERENCE_RE = re.compile(
     r"|artifact_state\s*:"
     r")"
 )
+_SUBMITTED_ARTIFACT_REFERENCE_RE = re.compile(
+    r"(?is)(?:"
+    r"(?:writer|author|specialist|撰写者|执行者).{0,40}"
+    r"(?:提交|产出|成果|草稿|报告|artifact|draft|output)"
+    r"|(?:团队消息|当前消息|本轮).{0,80}"
+    r"(?:writer|author|撰写者).{0,40}(?:提交|产出|成果|草稿|报告)"
+    r"|(?:已)?对[^。\n]{1,120}(?:提交的?|产出的?|成果|草稿|报告)"
+    r")"
+)
+_REVIEW_PROCESS_SIGNAL_RE = re.compile(
+    r"(?is)(?:"
+    r"作为.{0,40}(?:验收|审查|审核|评审)(?:专家|角色|人员)"
+    r"|对.{0,100}(?:提交|产出|成果|草稿|报告).{0,50}"
+    r"(?:进行|完成).{0,8}(?:审查|验收|审核|评审|检查)"
+    r"|检查重点|验收检查|产物验收|所有产出.{0,24}通过验收"
+    r")"
+)
+_INTEGRATED_FINAL_ARTIFACT_RE = re.compile(
+    r"(?is)(?:"
+    r"以下(?:为|给出).{0,28}(?:整合后|修订后|纠正后|重写后).{0,24}"
+    r"(?:完整|最终)?(?:成果|方案|报告|答案|交付物)"
+    r"|已完成必要修正.{0,40}(?:完整|最终)(?:成果|方案|报告|答案)"
+    r")"
+)
 _PRIOR_ARTIFACT_APPROVAL_RE = re.compile(
     r"(?is)(?:"
     r"\u9a8c\u6536|\u6279\u51c6|\u901a\u8fc7|\u7b26\u5408\u89c4\u8303|"
@@ -55,8 +79,12 @@ _PRIOR_ARTIFACT_APPROVAL_RE = re.compile(
 )
 _REVISION_REQUIRED_RE = re.compile(
     r"(?is)(?:"
-    r"\u4fee\u8ba2|\u4fee\u6539|\u91cd\u5199|\u8865\u5145|"
-    r"\u4e0d\u5408\u683c|\u672a\u901a\u8fc7|\u5c1a\u672a|"
+    r"(?:\u8bf7|(?<!\u65e0)(?<!\u4e0d)\u9700|\u9700\u8981|\u5fc5\u987b|\u5f85)"
+    r".{0,24}(?:\u4fee\u8ba2|\u4fee\u6539|\u91cd\u5199|\u8865\u5145|\u8865\u9f50)"
+    r"|(?:\u4fee\u8ba2|\u4fee\u6539|\u91cd\u5199|\u8865\u5145|\u8865\u9f50)"
+    r"(?:\s*(?:\u8981\u6c42|\u6e05\u5355|\u6307\u4ee4)|"
+    r".{0,6}(?:\u540e\u518d|\u540e\u91cd\u65b0))"
+    r"|\u4e0d\u5408\u683c|\u672a\u901a\u8fc7|\u5c1a\u672a|"
     r"revise|revision|required\s+changes?|repair|failed?"
     r")"
 )
@@ -190,12 +218,19 @@ def has_explicit_delivery_boundary(content: str) -> bool:
 
 def is_prior_artifact_approval(content: str) -> bool:
     body = str(content or "").strip()
-    if not body or len(body) > 900:
+    if not body or len(body) > 2600:
         return False
     if _REVISION_REQUIRED_RE.search(body):
         return False
+    if _INTEGRATED_FINAL_ARTIFACT_RE.search(body):
+        return False
+    prior_reference = bool(_PRIOR_ARTIFACT_REFERENCE_RE.search(body))
+    submitted_artifact_reference = bool(
+        _SUBMITTED_ARTIFACT_REFERENCE_RE.search(body)
+        and _REVIEW_PROCESS_SIGNAL_RE.search(body)
+    )
     return bool(
-        _PRIOR_ARTIFACT_REFERENCE_RE.search(body)
+        (prior_reference or submitted_artifact_reference)
         and _PRIOR_ARTIFACT_APPROVAL_RE.search(body)
     )
 

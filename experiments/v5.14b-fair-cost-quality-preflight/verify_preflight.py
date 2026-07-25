@@ -327,13 +327,23 @@ def evaluate(
                     category="evidence",
                 ),
                 _check(
-                    f"{scenario_id}:managed_rewrite_and_memory_observed",
+                    f"{scenario_id}:managed_rewrite_and_memory_path_observed",
                     rows[-1]["rewrite"]["managed_applied_count"] > 0
                     and rows[-1]["memory"]["query_count"] > 0
-                    and rows[-1]["memory"]["injected_count"] > 0,
+                    and (
+                        (
+                            rows[-1]["memory"]["hit_count"] == 0
+                            and rows[-1]["memory"]["injected_count"] == 0
+                        )
+                        or (
+                            rows[-1]["memory"]["hit_count"] > 0
+                            and rows[-1]["memory"]["injected_count"] > 0
+                        )
+                    ),
                     (
                         f"rewrite={rows[-1]['rewrite']['managed_applied_count']}, "
                         f"queries={rows[-1]['memory']['query_count']}, "
+                        f"hits={rows[-1]['memory']['hit_count']}, "
                         f"injected={rows[-1]['memory']['injected_count']}"
                     ),
                     category="evidence",

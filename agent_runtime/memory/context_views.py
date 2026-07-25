@@ -376,6 +376,13 @@ _CHINESE_RUN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]{2,}")
 _VIEW_ID_RE = re.compile(r"\[memory_view:([^\]]+)\]")
 _SLOT_RE = re.compile(r"\bslot=([^;]+)")
 _CLAIM_RE = re.compile(r"\bclaim=([^;]+)")
+_CURRENT_USER_TASK_BLOCK_RE = re.compile(
+    r"(?ms)^CURRENT_USER_TASK(?: \(highest priority\))?:\s*\n"
+    r"(?P<body>.*?)"
+    r"(?=^(?:GROUNDING_RULE|USER_REQUEST_HISTORY|LATEST_UPSTREAM_MESSAGE|"
+    r"PRIOR_UPSTREAM_DIGEST|CAPABILITY_PROMPT_VIEW|CURRENT_TASK_CONTEXT)"
+    r"(?:\s*\[[^\]]+\])?(?:\s*\([^)]*\))?:|\Z)"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -409,6 +416,8 @@ class MinimalRoleView:
     selected_chars: int
     target_budget_chars: int
     target_budget_exceeded: bool
+    current_task_unit_count: int
+    current_task_units_preserved: bool
 
     @property
     def reduction_ratio(self) -> float:
@@ -427,6 +436,7 @@ class _ViewUnit:
     text: str
     fields: tuple[str, ...]
     mandatory: bool = False
+    current_task_protected: bool = False
 
 
 def infer_collaboration_role(*parts: str) -> str:
@@ -644,6 +654,10 @@ def build_minimal_context_view(
         field_name for field_name in requested_fields if field_name not in covered_fields
     )
     source_chars = len("\n".join(source_views))
+    current_task_units = [unit for unit in units if unit.current_task_protected]
+    unique_current_task_units = {
+        _normalize_unit(unit.text) for unit in current_task_units
+    }
     return MinimalRoleView(
         role=consumer.consumer_id,
         consumer_id=consumer.consumer_id,
@@ -662,6 +676,11 @@ def build_minimal_context_view(
         selected_chars=len(rendered),
         target_budget_chars=target_budget,
         target_budget_exceeded=len(rendered) > target_budget,
+        current_task_unit_count=len(unique_current_task_units),
+        current_task_units_preserved=all(
+            unit_text in selected_texts
+            for unit_text in unique_current_task_units
+        ),
     )
 
 
@@ -700,34 +719,57 @@ def _collect_units(prompt_views: list[str]) -> list[_ViewUnit]:
         slot_id = _match_or_default(_SLOT_RE, view, "unresolved")
         claim_id = _match_or_default(_CLAIM_RE, view, "unknown")
         body = _memory_view_body(view)
-        parts = re.split(r"(?:\r?\n)+|(?<=[。！？!?；;])\s*", body)
         source_order = 0
-        for part in parts:
-            text = part.strip(" \t\r\n-;；")
-            if len(text) < 3:
-                continue
-            fields = tuple(
-                field_name
-                for field_name, cues in FIELD_CUES.items()
-                if any(cue.casefold() in text.casefold() for cue in cues)
-            )
-            mandatory = text.startswith("[revision_guard")
-            if mandatory and "revisions" not in fields:
-                fields = (*fields, "revisions")
-            units.append(
-                _ViewUnit(
-                    source_index=source_index,
-                    source_order=source_order,
-                    view_id=view_id,
-                    slot_id=slot_id,
-                    claim_id=claim_id,
-                    text=text,
-                    fields=fields,
-                    mandatory=mandatory,
+        for region, current_task_protected in _view_regions(body):
+            parts = re.split(r"(?:\r?\n)+|(?<=[。！？!?；;])\s*", region)
+            for part in parts:
+                text = part.strip(" \t\r\n-;；")
+                if len(text) < 3:
+                    continue
+                fields = tuple(
+                    field_name
+                    for field_name, cues in FIELD_CUES.items()
+                    if any(cue.casefold() in text.casefold() for cue in cues)
                 )
-            )
-            source_order += 1
+                mandatory = current_task_protected or text.startswith(
+                    "[revision_guard"
+                )
+                if text.startswith("[revision_guard") and "revisions" not in fields:
+                    fields = (*fields, "revisions")
+                units.append(
+                    _ViewUnit(
+                        source_index=source_index,
+                        source_order=source_order,
+                        view_id=view_id,
+                        slot_id=slot_id,
+                        claim_id=claim_id,
+                        text=text,
+                        fields=fields,
+                        mandatory=mandatory,
+                        current_task_protected=current_task_protected,
+                    )
+                )
+                source_order += 1
     return units
+
+
+def _view_regions(body: str) -> list[tuple[str, bool]]:
+    """Keep the current user task exact while allowing history compaction."""
+
+    match = _CURRENT_USER_TASK_BLOCK_RE.search(body)
+    if match is None:
+        return [(body, False)]
+    regions: list[tuple[str, bool]] = []
+    prefix = body[: match.start()].strip()
+    if prefix:
+        regions.append((prefix, False))
+    current_task = match.group("body").strip()
+    if current_task:
+        regions.append((current_task, True))
+    suffix = body[match.end() :].strip()
+    if suffix:
+        regions.append((suffix, False))
+    return regions
 
 
 def _memory_view_body(view: str) -> str:

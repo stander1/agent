@@ -333,6 +333,7 @@ class AutoGenSessionReportTest(unittest.TestCase):
         self.assertEqual(summary["current_task_no_expansion_fallback_count"], 1)
         self.assertEqual(summary["current_task_role_view_saved_tokens"], 60)
         self.assertEqual(summary["current_task_role_view_reduction_ratio"], 0.6)
+        self.assertEqual(summary["current_task_fidelity_failure_count"], 0)
         self.assertEqual(summary["final_delivery_assessed_count"], 1)
         self.assertEqual(summary["final_delivery_valid_count"], 1)
         self.assertEqual(summary["final_delivery_invalid_count"], 0)

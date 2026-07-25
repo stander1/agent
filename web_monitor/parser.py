@@ -666,6 +666,7 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "current_task_no_expansion_fallback_count": 0,
         "current_task_role_view_saved_tokens": 0,
         "current_task_role_view_reduction_ratio": 0.0,
+        "current_task_fidelity_failure_count": 0,
         "final_delivery_assessed_count": 0,
         "final_delivery_valid_count": 0,
         "final_delivery_invalid_count": 0,
@@ -736,6 +737,7 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
     current_task_role_view_tokens = 0
     current_task_role_view_candidate_tokens = 0
     current_task_no_expansion_fallback_count = 0
+    current_task_fidelity_failure_count = 0
     final_delivery_assessed = 0
     final_delivery_valid = 0
     registered_business_profile_ids: set[str] = set()
@@ -992,6 +994,9 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         current_task_role_view_tokens += _int(
             payload.get("current_task_role_view_tokens")
         )
+        current_task_fidelity_failure_count += _int(
+            payload.get("current_task_fidelity_failure_count")
+        )
         rewrite_safety = (
             payload.get("rewrite_safety")
             if isinstance(payload.get("rewrite_safety"), dict)
@@ -999,6 +1004,12 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         )
         if applied and rewrite_safety.get("team_receiver_role_view_hydration"):
             receiver_role_view_hydrations += 1
+        if (
+            applied
+            and "current_task_units_preserved" in rewrite_safety
+            and not bool(rewrite_safety.get("current_task_units_preserved"))
+        ):
+            current_task_fidelity_failure_count += 1
         receiver_entries = payload.get("receiver_plans") or []
         if isinstance(receiver_entries, list):
             breakdown["capability_context_view_count"] += sum(
@@ -1125,6 +1136,9 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         )
         if current_task_source_tokens > 0
         else 0.0
+    )
+    breakdown["current_task_fidelity_failure_count"] = (
+        current_task_fidelity_failure_count
     )
     breakdown["final_delivery_assessed_count"] = final_delivery_assessed
     breakdown["final_delivery_valid_count"] = final_delivery_valid

@@ -4801,3 +4801,37 @@ Reviewer 仅批准前序成果时选错最终正文、AutoGen 路由控制对象
 
 详细说明：
 `docs/experiments/v5.14d-final-artifact-resolution-and-routing-hygiene.md`。
+
+## 68. v5.14e：当前任务精确保真与最终成果提升
+
+v5.14e 根据 v5.14d 真实 Provider 归档修复两类通用质量缺陷：当前用户任务被
+最小能力视图错误裁剪，以及 Reviewer 的验收摘要被当作最终交付正文。该阶段
+继续复用 v5.14b 冻结的 A/B 三组实验、模型参数、轮次、双盲评分和成本阈值。
+
+实现映射：
+
+- `agent_runtime/memory/context_views.py`：区分当前任务与历史上下文；当前任务
+  语义单元强制保留，历史与记忆仍按动态能力画像裁剪；
+- `agent_runtime/drivers/autogen.py`：把原始用户任务放入最高优先级保真区域，
+  为每个接收者记录 `current_task_units_preserved`，并汇总保真失败数；
+- `agent_runtime/reliability/final_delivery_guard.py`：识别任意角色名称下的
+  验收过程描述、修订结论和前序成果批准，不把审批摘要伪装成最终正文；
+- `experiments/v5.14b-fair-cost-quality-preflight/verify_preflight.py`：
+  区分“查询无命中所以不注入”与“有命中却未注入”；
+- `web_monitor/parser.py` 与
+  `agent_runtime/eval/autogen_session_report.py`：报告当前任务保真失败数；
+- `experiments/v5.14e-current-task-fidelity-acceptance/`：复用冻结实验并追加
+  trace、会话报告、记忆无命中语义和最终成果谱系验收。
+
+通用边界：
+
+```text
+当前用户任务不因单条消息 Token 门禁丢失事实；
+历史上下文和已准入记忆继续生成最小角色视图；
+机制不依赖 Planner、Writer、Reviewer 固定名称；
+运行时代码不识别 Question A/B、旅游目的地或审计样例值；
+成本结论按端到端协作 Token 与 Provider Token 联合判断。
+```
+
+详细说明：
+`docs/experiments/v5.14e-current-task-fidelity-and-artifact-promotion.md`。

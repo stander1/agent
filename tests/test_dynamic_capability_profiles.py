@@ -182,6 +182,45 @@ class DynamicCapabilityProfileTest(unittest.TestCase):
         self.assertNotIn("writer", view.text.casefold())
         self.assertNotIn("reviewer", view.text.casefold())
 
+    def test_current_user_structured_facts_are_never_compacted_away(self) -> None:
+        profiles = CapabilityProfileManagerLite([])
+        profile = profiles.register_or_update(
+            agent_id="EvidenceAssembler42",
+            role="Evidence synthesis specialist",
+            role_description="Analyze structured evidence and prepare a report.",
+        )
+        consumer = consumer_context_from_profile(
+            profile,
+            consumer_id="EvidenceAssembler42",
+        )
+        current_task = (
+            "CURRENT_USER_TASK (highest priority):\n"
+            "Analyze both evidence rows without inventing fields.\n"
+            "- row_8402: token=PX42; device=device_17; "
+            "accounts=[acct_902,acct_911]; confidence=0.86\n"
+            "- row_11904: token=PX42; device=device_17; "
+            "accounts=[acct_911]; confidence=0.79\n"
+            "LATEST_UPSTREAM_MESSAGE [coordinator] (use in full):\n"
+            + ("Historical discussion that may be compacted. " * 30)
+        )
+
+        view = build_minimal_context_view(
+            query="Analyze both evidence rows and preserve exact source fields.",
+            prompt_views=[current_task],
+            consumer=consumer,
+            action="ANALYZE_DATA",
+            budget_chars=160,
+        )
+
+        self.assertIn("row_8402", view.text)
+        self.assertIn("device=device_17", view.text)
+        self.assertIn("accounts=[acct_902,acct_911]", view.text)
+        self.assertIn("confidence=0.86", view.text)
+        self.assertIn("row_11904", view.text)
+        self.assertIn("accounts=[acct_911]", view.text)
+        self.assertIn("confidence=0.79", view.text)
+        self.assertTrue(view.target_budget_exceeded)
+
     def test_execution_load_and_memory_locality_drive_equivalent_tie_break(self) -> None:
         profiles = CapabilityProfileManagerLite([])
         for agent_id in ("ComposerEast", "ComposerWest"):

@@ -3118,6 +3118,16 @@ class AutoGenHookManager:
         receiver_chronology_view = (
             chronology_selection.text or chronology_view
         )
+        chronology_safety = {
+            "current_task_unit_count": minimal_chronology.current_task_unit_count,
+            "current_task_units_preserved": (
+                chronology_selection.selection_mode == "source_no_expansion"
+                or minimal_chronology.current_task_units_preserved
+            ),
+            "current_task_view_selection_mode": (
+                chronology_selection.selection_mode
+            ),
+        }
         state_refs = self._safe_kernel_call(
             "write_autogen_real_rewrite_input_state",
             lambda: self.kernel.write_agent_state(
@@ -3262,6 +3272,7 @@ class AutoGenHookManager:
                     self.token_counter,
                     "\n".join(memory_selection.deduplicated_views),
                 ),
+                rewrite_safety=chronology_safety,
                 role_memory_selection=memory_selection,
                 continuity_cost_override=continuity_cost_override,
             )
@@ -3298,6 +3309,7 @@ class AutoGenHookManager:
                 self.token_counter,
                 "\n".join(memory_selection.deduplicated_views),
             ),
+            rewrite_safety=chronology_safety,
             role_memory_selection=memory_selection,
             continuity_cost_override=continuity_cost_override,
         )
@@ -3431,6 +3443,9 @@ class AutoGenHookManager:
                 rewrite_safety={
                     "team_receiver_context_view_hydration": True,
                     "team_receiver_role_view_hydration": True,
+                    "current_task_units_preserved": bool(
+                        receiver_view.get("current_task_units_preserved")
+                    ),
                 },
                 continuity_cost_override=continuity_cost_override,
             )
@@ -3462,6 +3477,9 @@ class AutoGenHookManager:
             rewrite_safety={
                 "team_receiver_context_view_hydration": True,
                 "team_receiver_role_view_hydration": True,
+                "current_task_units_preserved": bool(
+                    receiver_view.get("current_task_units_preserved")
+                ),
             },
             continuity_cost_override=continuity_cost_override,
         )
@@ -4205,6 +4223,10 @@ class AutoGenHookManager:
             int(bool(entry.get("current_task_no_expansion_fallback")))
             for entry in receiver_entries
         )
+        current_task_fidelity_failure_count = sum(
+            int(not bool(entry.get("current_task_units_preserved")))
+            for entry in receiver_entries
+        )
         memory_candidate_count = max(
             (
                 int(entry.get("memory_candidate_count", 0) or 0)
@@ -4343,6 +4365,9 @@ class AutoGenHookManager:
                     )
                     if current_task_source_tokens
                     else 0.0
+                ),
+                "current_task_fidelity_failure_count": (
+                    current_task_fidelity_failure_count
                 ),
                 "retrieved_memory_tokens": retrieved_memory_tokens,
                 "receiver_count": len(receiver_entries),
@@ -4670,7 +4695,9 @@ class AutoGenHookManager:
         memory_prompt_views = memory_selection.prompt_views
         current_task_view = build_minimal_context_view(
             query=current_task,
-            prompt_views=[current_task],
+            prompt_views=[
+                "CURRENT_USER_TASK (highest priority):\n" + current_task
+            ],
             consumer=consumer,
             action=memory_selection.semantic_action,
         )
@@ -4766,6 +4793,10 @@ class AutoGenHookManager:
                 current_task_selection.no_expansion_fallback
             ),
             "current_task_role_view_reduction_ratio": current_task_selection.reduction_ratio,
+            "current_task_units_preserved": (
+                current_task_selection.selection_mode == "source_no_expansion"
+                or current_task_view.current_task_units_preserved
+            ),
             "shadow_wire_envelope": wire_envelope,
             "schema_valid": schema_valid,
             "shadow_wire_tokens": _count_tokens(
@@ -7616,6 +7647,9 @@ def _build_team_real_rewrite_content(
                 ),
                 "capabilities": entry.get("capabilities", []) or [],
                 "information_fields": entry.get("information_fields", []) or [],
+                "current_task_units_preserved": bool(
+                    entry.get("current_task_units_preserved")
+                ),
             }
             for entry in receiver_entries
         ],
@@ -7750,6 +7784,9 @@ def _extract_team_receiver_context_view(
         "memory_prompt_view": memory_prompt_view,
         "wire_envelope": dict(receiver_wire.get("shp_wire", {}) or {}),
         "memory_refs": list(receiver_wire.get("memory_refs", []) or []),
+        "current_task_units_preserved": bool(
+            receiver_wire.get("current_task_units_preserved")
+        ),
     }
 
 
@@ -7863,6 +7900,9 @@ def _team_rewrite_receiver_audit(
                 "current_task_role_view_reduction_ratio": float(
                     entry.get("current_task_role_view_reduction_ratio", 0.0)
                     or 0.0
+                ),
+                "current_task_units_preserved": bool(
+                    entry.get("current_task_units_preserved")
                 ),
                 "prompt_view_preview": entry.get("prompt_view_preview", ""),
             }

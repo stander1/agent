@@ -195,6 +195,28 @@ FINAL_ANSWER_READY"""
         self.assertTrue(assessment.approved_prior_artifact)
         self.assertIn("review_feedback_not_final_artifact", assessment.reasons)
 
+    def test_marks_mislabeled_generic_agent_acceptance_summary_as_review_only(self) -> None:
+        content = """## 最终可交付成果
+
+作为证据验收专家，我对 EvidenceAssembler42 提交的报告进行了验收检查。
+检查重点为证据血缘、字段完整性和不确定性说明，所有产出均通过验收，
+符合当前协作阶段要求。
+FINAL_ANSWER_READY"""
+
+        assessment = assess_final_delivery(
+            request="Analyze both evidence rows and deliver a report.",
+            content=content,
+            source="reviewer",
+            expected_source="reviewer",
+            marker="FINAL_ANSWER_READY",
+            require_marker=True,
+        )
+
+        self.assertFalse(assessment.valid)
+        self.assertTrue(assessment.review_only)
+        self.assertTrue(assessment.approved_prior_artifact)
+        self.assertIn("review_feedback_not_final_artifact", assessment.reasons)
+
     def test_rejects_budget_total_above_explicit_upper_bound(self) -> None:
         content = """## 最终可交付方案
 

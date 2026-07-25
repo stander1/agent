@@ -231,6 +231,43 @@ class ReviewerFinalTextTerminationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("完整审计报告", self.condition.last_resolved_artifact.content)
 
+    async def test_promotes_arbitrary_agent_artifact_when_review_summary_is_mislabeled(self) -> None:
+        artifact = (
+            "## Evidence report\n\n"
+            "row_8402 resolves to device_17 and accounts acct_902 and acct_911. "
+            "row_11904 resolves to device_17 and account acct_911. "
+            "The report preserves both source rows and their confidence values."
+        )
+        await self.condition(
+            [TextMessage(content=artifact, source="EvidenceAssembler42")]
+        )
+
+        result = await self.condition(
+            [
+                TextMessage(
+                    content=(
+                        "## 最终可交付成果\n\n"
+                        "作为证据验收专家，我对 EvidenceAssembler42 提交的报告"
+                        "进行了验收检查。检查重点为证据血缘和字段完整性，"
+                        "所有产出均通过验收，符合当前协作阶段要求。\n"
+                        f"{MARKER}"
+                    ),
+                    source="reviewer",
+                )
+            ]
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            self.condition.last_resolved_artifact.resolution_kind,
+            "prior_artifact_approved",
+        )
+        self.assertEqual(
+            self.condition.last_resolved_artifact.origin_source,
+            "EvidenceAssembler42",
+        )
+        self.assertIn("row_11904", self.condition.last_resolved_artifact.content)
+
     async def test_rejects_numeric_upper_bound_violation(self) -> None:
         await self.condition(
             [TextMessage(content="请生成完整方案，总预算 3000 元以内。", source="user")]

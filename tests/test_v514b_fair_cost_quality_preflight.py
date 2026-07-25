@@ -225,6 +225,27 @@ class FairCostQualityPreflightTest(unittest.TestCase):
         )
         self.assertFalse(report["summary"]["evidence_pipeline_passed"])
 
+    def test_no_memory_hit_does_not_require_artificial_injection(self) -> None:
+        evidence = copy.deepcopy(self._passing_evidence())
+        tokens = evidence["A-preflight"]["managed_report"]["token_summary"]
+        tokens["memory_hit_count"] = 0
+        tokens["memory_injected_count"] = 0
+        tokens["useful_memory_hit_count"] = 0
+        tokens["unassessed_memory_hit_count"] = 0
+
+        report = self.verify.evaluate(
+            preregistration=self.preregistration,
+            evidence_by_scenario=evidence,
+        )
+        checks = {item["name"]: item for item in report["checks"]}
+
+        self.assertTrue(
+            checks[
+                "A-preflight:managed_rewrite_and_memory_path_observed"
+            ]["passed"]
+        )
+        self.assertTrue(report["summary"]["evidence_pipeline_passed"])
+
     def test_missing_reliability_metric_is_not_treated_as_zero(self) -> None:
         evidence = copy.deepcopy(self._passing_evidence())
         del evidence["A-preflight"]["managed_report"]["token_summary"][

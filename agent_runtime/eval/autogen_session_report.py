@@ -477,6 +477,9 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
     current_task_role_view_reduction_ratio = float(
         token_summary.get("current_task_role_view_reduction_ratio", 0.0) or 0.0
     )
+    current_task_fidelity_failure_count = _int(
+        token_summary.get("current_task_fidelity_failure_count")
+    )
     final_delivery_assessed_count = _int(
         token_summary.get("final_delivery_assessed_count")
     )
@@ -723,6 +726,11 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
             "current_task_role_view_reduction_ratio",
             current_task_role_view_reduction_ratio,
             "当前任务按角色裁剪后的缩减比例",
+        ),
+        _row(
+            "current_task_fidelity_failure_count",
+            current_task_fidelity_failure_count,
+            "当前用户任务受保护语义单元未完整保留的次数",
         ),
         _row(
             "final_delivery_assessed_count",
