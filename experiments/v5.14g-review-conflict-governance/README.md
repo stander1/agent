@@ -22,8 +22,7 @@ unset AGENTLITE_V514G_RUN_ROOT
 unset AGENTLITE_V514G_EXPORT_BASE
 export AGENTLITE_V514G_EXP_ID="$(date +%Y%m%d-%H%M%S)"
 
-chmod +x experiments/v5.14g-review-conflict-governance/run_openeuler.sh
-bash experiments/v5.14g-review-conflict-governance/run_openeuler.sh
+experiments/v5.14g-review-conflict-governance/run_openeuler.sh
 ```
 
 本阶段不调用 LLM Provider，因此不需要 API Key。验收通过后再进入正式
