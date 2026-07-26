@@ -873,6 +873,9 @@ class V0Runtime:
                 memory_evidence_reference_merge_count=(
                     admission_report.evidence_reference_merge_count
                 ),
+                memory_epistemic_deferred_count=(
+                    admission_report.epistemic_deferred_count
+                ),
             )
             self.metrics.record_memory_write(
                 task_id=result.task_id,

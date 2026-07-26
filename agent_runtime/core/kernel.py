@@ -638,6 +638,58 @@ class CollaborationKernel:
                 )
             ]
 
+        structured_state_refs: list[StateRef] = []
+        structured_payloads = output.metadata.get(
+            "structured_state_payloads",
+            [],
+        )
+        if isinstance(structured_payloads, list):
+            for item in structured_payloads:
+                if not isinstance(item, dict):
+                    continue
+                state_type = str(item.get("state_type") or "")
+                payload = item.get("payload")
+                if state_type not in {"retrieval_state", "embedding_state"}:
+                    continue
+                if not isinstance(payload, dict) or not payload:
+                    continue
+                structured_state_refs.append(
+                    commit_state(
+                        state_type=state_type,
+                        payload=payload,
+                        summary=str(
+                            item.get("summary")
+                            or f"{agent.agent_id} {state_type}"
+                        ),
+                        usage_hint=str(
+                            item.get("usage_hint")
+                            or "summary_context_selection"
+                        ),
+                        contains_embedding_refs=bool(
+                            item.get("contains_embedding_refs", False)
+                        ),
+                        tier=str(item.get("tier") or "hot"),
+                        access_policy=str(
+                            item.get("access_policy")
+                            or "prompt_view_only"
+                        ),
+                        audit_payload={
+                            "content": output.content,
+                            "content_chars": len(output.content),
+                            "framework": output.metadata.get(
+                                "framework",
+                                "",
+                            ),
+                            "semantic_action": output.metadata.get(
+                                "semantic_action",
+                                "",
+                            ),
+                        },
+                    )
+                )
+        if structured_state_refs:
+            return structured_state_refs
+
         if agent.agent_id == "retriever":
             embedding_payload = build_embedding_state_payload(task)
             embedding_ref = commit_state(
@@ -812,6 +864,9 @@ class CollaborationKernel:
             memory_evidence_reference_merge_count=(
                 admission_report.evidence_reference_merge_count
             ),
+            memory_epistemic_deferred_count=(
+                admission_report.epistemic_deferred_count
+            ),
         )
         self.metrics.record_memory_write(
             task_id=task.task_id,
@@ -844,6 +899,9 @@ class CollaborationKernel:
                 ),
                 "evidence_reference_merge_count": (
                     admission_report.evidence_reference_merge_count
+                ),
+                "epistemic_deferred_count": (
+                    admission_report.epistemic_deferred_count
                 ),
                 "candidate_id": admission_report.candidate_id,
                 "memory_ref": (

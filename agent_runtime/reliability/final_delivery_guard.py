@@ -6,6 +6,11 @@ import re
 from dataclasses import dataclass
 from typing import Sequence
 
+from agent_runtime.reliability.quantities import (
+    parse_quantities,
+    semantic_clauses,
+)
+
 
 _REVIEW_HEADING_RE = re.compile(
     r"(?im)^\s*(?:[#>*-]+\s*)?(?:reviewer(?:\s*agent)?\s*)?(?:最终)?"
@@ -69,6 +74,12 @@ _INTEGRATED_FINAL_ARTIFACT_RE = re.compile(
     r"(?:完整|最终)?(?:成果|方案|报告|答案|交付物)"
     r"|已完成必要修正.{0,40}(?:完整|最终)(?:成果|方案|报告|答案)"
     r")"
+)
+_CORRECTION_COMPLETED_RE = re.compile(
+    r"(?is)(?:(?:已|已经|以下已).{0,16}"
+    r"(?:完成|整合|落实).{0,12}(?:修正|修订|修改|纠正)"
+    r"|(?:修正|修订|修改|纠正)(?:后|完成).{0,16}"
+    r"(?:完整|最终)(?:成果|方案|报告|答案|交付物))"
 )
 _PRIOR_ARTIFACT_APPROVAL_RE = re.compile(
     r"(?is)(?:"
@@ -197,9 +208,25 @@ def assess_final_delivery(
     review_only_signal = bool(_REVIEW_ONLY_SIGNAL_RE.search(body))
     delivery_boundary = has_explicit_delivery_boundary(body)
     approved_prior_artifact = is_prior_artifact_approval(body)
-    review_only = approved_prior_artifact or (
-        not delivery_boundary
-        and (review_heading or delegated_revision or review_only_signal)
+    integrated_final_artifact = bool(
+        _INTEGRATED_FINAL_ARTIFACT_RE.search(body)
+        or (
+            delivery_boundary
+            and _CORRECTION_COMPLETED_RE.search(body)
+        )
+    )
+    unresolved_review = (
+        delegated_revision
+        or review_only_signal
+        or (
+            review_heading
+            and bool(_REVISION_REQUIRED_RE.search(body))
+        )
+    ) and not integrated_final_artifact
+    review_only = (
+        approved_prior_artifact
+        or unresolved_review
+        or (not delivery_boundary and review_heading)
     )
     if review_only:
         reasons.append("review_feedback_not_final_artifact")
@@ -287,12 +314,12 @@ def _numeric_upper_bound_violations(
     body: str,
 ) -> tuple[str, ...]:
     budget_bounds: list[float] = []
-    for line in str(grounding_text or "").splitlines():
-        if not _BUDGET_CONTEXT_RE.search(line):
+    for clause in semantic_clauses(grounding_text):
+        if not _BUDGET_CONTEXT_RE.search(clause):
             continue
-        if not _UPPER_BOUND_SIGNAL_RE.search(line):
+        if not _UPPER_BOUND_SIGNAL_RE.search(clause):
             continue
-        values = _line_numbers(line)
+        values = _budget_values(clause)
         if values:
             budget_bounds.append(max(values))
     if not budget_bounds:
@@ -300,15 +327,15 @@ def _numeric_upper_bound_violations(
 
     active_bound = budget_bounds[-1]
     violations: list[str] = []
-    for line in str(body or "").splitlines():
-        if not _BUDGET_RESULT_RE.search(line):
+    for clause in semantic_clauses(body):
+        if not _BUDGET_RESULT_RE.search(clause):
             continue
         values = [
             value
-            for value in _line_numbers(line)
+            for value in _budget_values(clause)
             if not (
                 1900 <= value <= 2100
-                and re.search(r"(?i)(?:year|date|\u5e74|\u65e5\u671f)", line)
+                and re.search(r"(?i)(?:year|date|\u5e74|\u65e5\u671f)", clause)
             )
         ]
         observed = max(values, default=0.0)
@@ -397,6 +424,22 @@ def _normalize_requirement_text(text: str) -> str:
 
 def _line_numbers(text: str) -> list[float]:
     return [float(match.group(1)) for match in _NUMBER_RE.finditer(text)]
+
+
+def _budget_values(text: str) -> list[float]:
+    quantities = parse_quantities(text)
+    monetary = [
+        quantity.value
+        for quantity in quantities
+        if quantity.dimension == "money"
+    ]
+    if monetary:
+        return monetary
+    return [
+        quantity.value
+        for quantity in quantities
+        if quantity.dimension == "scalar"
+    ]
 
 
 def _format_number(value: float) -> str:

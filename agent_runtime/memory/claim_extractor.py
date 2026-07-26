@@ -90,7 +90,7 @@ def normalize_claim_cards(
             unit=str(item.get("unit") or ""),
             raw_text=raw_text,
             summary=str(item.get("summary") or raw_text),
-            certainty=str(item.get("certainty") or "asserted"),
+            certainty=str(item.get("certainty") or _infer_certainty(raw_text)),
             modality=str(item.get("modality") or item.get("claim_type") or "asserted"),
             polarity=str(item.get("polarity") or _polarity(raw_text)),
             confidence=_bounded_float(item.get("confidence"), default_confidence),
@@ -477,7 +477,7 @@ def _claim(
         unit=unit,
         raw_text=raw_text,
         summary=raw_text,
-        certainty="asserted",
+        certainty=_infer_certainty(raw_text),
         modality=modality,
         polarity=polarity,
         confidence=confidence,
@@ -552,6 +552,38 @@ def _clean_markup(text: str) -> str:
 
 def _polarity(text: str) -> str:
     return "negative" if _NEGATION_RE.search(text) else "positive"
+
+
+def _infer_certainty(text: str) -> str:
+    value = str(text or "")
+    if re.search(
+        r"(?:假设|假定|示例|模拟|预期(?:返回|结果|输出)|可能(?:是|为)?|"
+        r"尚未(?:验证|确认)|待确认|无法确认|"
+        r"\bhypothetical\b|\bassum(?:e|ed|ption)\b|\bexample\b|"
+        r"\bexpected\s+(?:(?:query|tool|model)\s+)?"
+        r"(?:return|result|output)\b|\bpossibly\b|\bmaybe\b|"
+        r"\bunverified\b|\bto\s+be\s+confirmed\b)",
+        value,
+        re.IGNORECASE,
+    ):
+        return "uncertain"
+    if re.search(
+        r"(?:据此推断|推测|倾向于|表明可能|可推导|"
+        r"\binfer(?:red|ence)?\b|\blikely\b|\bsuggests?\s+that\b)",
+        value,
+        re.IGNORECASE,
+    ):
+        return "inferred"
+    if re.search(
+        r"(?:资料快照|观测(?:到|结果)|工具(?:返回|结果)|查询(?:返回|结果)|"
+        r"日志(?:显示|记录)|证据(?:显示|表明)|"
+        r"\bobserved\b|\btool\s+result\b|\bquery\s+returned\b|"
+        r"\bevidence\s+(?:shows?|confirms?)\b)",
+        value,
+        re.IGNORECASE,
+    ):
+        return "observed"
+    return "asserted"
 
 
 def _currency_unit(text: str) -> str:

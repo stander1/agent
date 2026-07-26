@@ -5017,3 +5017,38 @@ v5.14h 结果只作为诊断参考，不替代本次预注册的绝对通过门�
 
 详细说明：
 `docs/experiments/v5.14j-semantic-fidelity-formal-regression.md`。
+
+## 74. v5.14k：类型化可靠性、认识状态准入与真实结构状态
+
+v5.14k 根据 v5.14j 正式回归暴露出的通用根因修复数量量纲混淆、
+Reviewer 阻断意见误交付、假设内容误入正式记忆和盲评历史证据误归因。
+该阶段不修改 A/B 任务、领域 Agent 提示词、预注册轮次或成本质量阈值。
+
+实现映射：
+
+- `agent_runtime/reliability/quantities.py`：将金额、时间、计数、比例与无单位
+  标量类型化，最终交付守卫只比较同一量纲；
+- `agent_runtime/reliability/final_delivery_guard.py`：修订清单和未闭环审查意见
+  不得成为最终成果；已整合修正的完整成果仍可交付；
+- `agent_runtime/memory/claim_extractor.py` 与 `memory_store.py`：识别
+  observed/asserted/inferred/uncertain，未确认事实留在候选池；
+- `agent_runtime/state/structured_output.py` 与 AutoGen 驱动：只从框架实际
+  输出提取检索和向量引用，生成真实 `retrieval_state`/`embedding_state`，
+  缺少引用时不伪造状态；
+- 两个匿名盲评器：历史答案仅作连续性背景，当前答案 finding 的证据必须
+  能在当前答案中定位；
+- `experiments/v5.14k-typed-reliability-acceptance/`：提供不调用 Provider
+  的 openEuler 机制验收和不可变证据打包。
+
+通用边界：
+
+```text
+生产运行时不识别 Question A/B、旅游地点、审计实体或固定 Agent 名称；
+Reviewer 阻断后只在原预注册轮次内继续，不增加隐藏 LLM 调用；
+不确定事实保留审计证据但不得进入正式共享记忆；
+非文本状态必须源于框架真实返回的 ID、分数或维度，不生成伪向量；
+机制验收通过后仍需以单一新提交重新运行正式 Provider 回归。
+```
+
+详细说明：`docs/experiments/v5.14k-typed-reliability-acceptance.md`。
+工程验收：`experiments/v5.14k-typed-reliability-acceptance/README.md`。

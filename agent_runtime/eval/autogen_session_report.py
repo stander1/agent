@@ -530,6 +530,9 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
     memory_evidence_reference_merge_count = _int(
         token_summary.get("memory_evidence_reference_merge_count")
     )
+    memory_epistemic_deferred_count = _int(
+        token_summary.get("memory_epistemic_deferred_count")
+    )
     model_visible_protocol_marker_count = _int(
         token_summary.get("model_visible_protocol_marker_count")
     )
@@ -876,6 +879,11 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
             "agentlite_memory_evidence_reference_merge_count",
             memory_evidence_reference_merge_count,
             "新证据谱系合并到已有记忆对象的次数",
+        ),
+        _row(
+            "agentlite_memory_epistemic_deferred_count",
+            memory_epistemic_deferred_count,
+            "认识状态为推断或未确认、因此留在候选池的 Claim 数量",
         ),
         _row(
             "agentlite_model_visible_protocol_marker_count",

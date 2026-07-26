@@ -96,7 +96,7 @@ def build_prompt(
 1. 逐项检查命令、SQL、代码、配置参数、单位换算、并发模型、生命周期、恢复流程和验收标准是否可执行且相互一致。
 2. 主动检查技术方言混用、参数单位误解、先后顺序错误、数据破坏风险、没有证据的保证、前后轮结论冲突和遗漏硬约束。
 3. 不因回答很长、术语很多或结构漂亮而加技术分；也不能为了拉开差距而臆造错误。
-4. finding 的 evidence 必须引用候选中的短文本，issue 必须解释具体错误，repair 给出通用修正方向。
+4. finding 的 evidence 必须逐字引用该候选的“当前交付物”；“上一轮交付物”只用于连续性核对，绝不能作为当前 finding 的直接证据。issue 必须解释具体错误，repair 给出通用修正方向。
 5. severity 只能是 critical、high、medium、low。critical/high 表示会导致核心方案不可执行、数据错误或违反硬约束；medium 表示局部命令、配置或论证需要修正；low 表示不阻断使用的小问题。
 6. 有 critical/high finding 时 delivery_usable 必须为 false；存在任何明确 finding 时不得给 10 分。
 7. 分项为：约束忠实度 0-2、技术正确性 0-4、内部一致性 0-2、可执行性 0-2。
@@ -138,7 +138,11 @@ JSON 结构：
 
 
 def normalize_result(
-    parsed: dict[str, Any], *, task_id: str, candidate_ids: list[str]
+    parsed: dict[str, Any],
+    *,
+    task_id: str,
+    candidate_ids: list[str],
+    candidate_answers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     if str(parsed.get("task_id")) != task_id:
         raise ValueError(f"Unexpected task_id: {parsed.get('task_id')!r}")
@@ -160,7 +164,16 @@ def normalize_result(
                 raise ValueError(f"{candidate_id} {field} out of range: {value}")
             normalized[field] = value
             raw_total += value
-        findings = _normalize_findings(row.get("findings"), candidate_id)
+        findings = _normalize_findings(
+            row.get("findings"),
+            candidate_id,
+            current_answer=(
+                str(candidate_answers.get(candidate_id) or "")
+                if candidate_answers is not None
+                else ""
+            ),
+            enforce_current_answer=candidate_answers is not None,
+        )
         score_cap = min(
             (SEVERITY_CAPS[item["severity"]] for item in findings),
             default=10,
@@ -198,7 +211,13 @@ def normalize_result(
     }
 
 
-def _normalize_findings(value: Any, candidate_id: str) -> list[dict[str, str]]:
+def _normalize_findings(
+    value: Any,
+    candidate_id: str,
+    *,
+    current_answer: str = "",
+    enforce_current_answer: bool = False,
+) -> list[dict[str, str]]:
     if value is None:
         return []
     if not isinstance(value, list):
@@ -215,6 +234,14 @@ def _normalize_findings(value: Any, candidate_id: str) -> list[dict[str, str]]:
         repair = str(item.get("repair") or "").strip()
         if not evidence or not issue or not repair:
             raise ValueError(f"{candidate_id} finding lacks evidence/issue/repair")
+        if enforce_current_answer and not _evidence_in_current_answer(
+            evidence,
+            current_answer,
+        ):
+            raise ValueError(
+                f"{candidate_id} finding evidence is not present in the "
+                "current answer"
+            )
         findings.append(
             {
                 "severity": severity,
@@ -224,6 +251,19 @@ def _normalize_findings(value: Any, candidate_id: str) -> list[dict[str, str]]:
             }
         )
     return findings
+
+
+def _evidence_in_current_answer(evidence: str, answer: str) -> bool:
+    normalized_evidence = _normalize_evidence_text(evidence)
+    normalized_answer = _normalize_evidence_text(answer)
+    return bool(
+        normalized_evidence
+        and normalized_evidence in normalized_answer
+    )
+
+
+def _normalize_evidence_text(text: str) -> str:
+    return " ".join(str(text or "").split()).casefold()
 
 
 def write_checkpoint(
@@ -264,7 +304,7 @@ def load_checkpoint_results(
 
     task_candidates = {
         str(task["task_id"]): {
-            str(item["candidate_id"])
+            str(item["candidate_id"]): str(item.get("answer") or "")
             for item in task.get("candidates", [])
         }
         for task in tasks
@@ -285,9 +325,17 @@ def load_checkpoint_results(
             for item in result.get("evaluations", [])
             if isinstance(item, dict)
         }
-        if candidate_ids != task_candidates[task_id]:
+        if candidate_ids != set(task_candidates[task_id]):
             raise ValueError(
                 f"Candidate mismatch in technical checkpoint task {task_id}"
+            )
+        for row in result.get("evaluations", []):
+            candidate_id = str(row.get("candidate_id") or "")
+            _normalize_findings(
+                row.get("findings"),
+                candidate_id,
+                current_answer=task_candidates[task_id][candidate_id],
+                enforce_current_answer=True,
             )
         seen.add(task_id)
         validated.append(result)
@@ -328,6 +376,10 @@ def main() -> int:
             continue
         candidates = list(task.get("candidates") or [])
         candidate_ids = [str(item["candidate_id"]) for item in candidates]
+        candidate_answers = {
+            str(item["candidate_id"]): str(item.get("answer") or "")
+            for item in candidates
+        }
         prompt = build_prompt(
             task_id=task_id,
             task_history=history,
@@ -344,23 +396,39 @@ def main() -> int:
                 )
                 user_prompt = prompt
             elif format_attempt == 1:
-                retry_mode = "pruned_format_repair"
-                system_prompt = (
-                    "你是同一个匿名技术审查员，只修复上一响应的 JSON 合同。"
+                evidence_mismatch = (
+                    "evidence is not present in the current answer"
+                    in str(last_error or "")
                 )
-                user_prompt = render_pruned_json_retry_prompt(
-                    task_id=task_id,
-                    candidate_ids=candidate_ids,
-                    invalid_response=last_response,
-                    validation_error=str(last_error or ""),
-                    evaluation_fields=[
-                        *SCORE_LIMITS,
-                        "delivery_usable",
-                        "findings",
-                        "strengths",
-                    ],
-                    response_kind="technical_blind_audit",
-                )
+                if evidence_mismatch:
+                    retry_mode = "current_answer_evidence_reaudit"
+                    system_prompt = (
+                        "你是同一个匿名技术审查员。重新审查当前交付物，"
+                        "每条 evidence 必须逐字来自当前交付物，只输出合法 JSON。"
+                    )
+                    user_prompt = prompt + concise_reaudit_suffix(
+                        validation_error=str(last_error or ""),
+                        candidate_ids=candidate_ids,
+                        technical=True,
+                    )
+                else:
+                    retry_mode = "pruned_format_repair"
+                    system_prompt = (
+                        "你是同一个匿名技术审查员，只修复上一响应的 JSON 合同。"
+                    )
+                    user_prompt = render_pruned_json_retry_prompt(
+                        task_id=task_id,
+                        candidate_ids=candidate_ids,
+                        invalid_response=last_response,
+                        validation_error=str(last_error or ""),
+                        evaluation_fields=[
+                            *SCORE_LIMITS,
+                            "delivery_usable",
+                            "findings",
+                            "strengths",
+                        ],
+                        response_kind="technical_blind_audit",
+                    )
             else:
                 retry_mode = "concise_full_reaudit"
                 system_prompt = (
@@ -399,6 +467,7 @@ def main() -> int:
                     guard.parsed,
                     task_id=task_id,
                     candidate_ids=candidate_ids,
+                    candidate_answers=candidate_answers,
                 )
                 attempt_record["status"] = "valid"
                 judge_attempts.append(attempt_record)

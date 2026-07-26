@@ -683,6 +683,7 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "memory_admission_deduplicated_claim_count": 0,
         "memory_admission_deduplicated_memory_count": 0,
         "memory_evidence_reference_merge_count": 0,
+        "memory_epistemic_deferred_count": 0,
         "model_visible_protocol_marker_count": 0,
         "model_visible_input_protocol_marker_count": 0,
         "model_visible_agent_output_protocol_marker_count": 0,
@@ -900,6 +901,9 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
             )
             breakdown["memory_evidence_reference_merge_count"] += _int(
                 payload.get("evidence_reference_merge_count")
+            )
+            breakdown["memory_epistemic_deferred_count"] += _int(
+                payload.get("epistemic_deferred_count")
             )
             continue
         if event_type == "autogen_review_conflict_governance":

@@ -102,6 +102,12 @@ SLOT_POLICIES = {
 }
 
 PROMPT_VIEW_MEMORY_STATUSES = {"active", "provisional_active"}
+REUSABLE_CLAIM_CERTAINTIES = {
+    "observed",
+    "asserted",
+    "confirmed",
+    "verified",
+}
 DORMANT_MEMORY_STATUSES = {"dormant"}
 BLOCKED_MEMORY_STATUSES = {
     "deprecated",
@@ -313,6 +319,7 @@ class MemoryAdmissionReport:
     deduplicated_claim_count: int = 0
     deduplicated_memory_count: int = 0
     evidence_reference_merge_count: int = 0
+    epistemic_deferred_count: int = 0
 
 
 @dataclass(slots=True)
@@ -690,6 +697,16 @@ class MemoryStoreLite:
             default_confidence=confidence,
             source_pointer=",".join(evidence_refs),
         )
+        reusable_claim_candidates = [
+            claim
+            for claim in claim_candidates
+            if claim.certainty.casefold() in REUSABLE_CLAIM_CERTAINTIES
+        ]
+        epistemic_deferred = [
+            claim
+            for claim in claim_candidates
+            if claim.certainty.casefold() not in REUSABLE_CLAIM_CERTAINTIES
+        ]
         resolved = self._resolve_slot(candidate.slot_hint)
         if resolved.unresolved:
             claim_resolutions = [
@@ -708,11 +725,18 @@ class MemoryStoreLite:
         if status == "admitted" and not claim_candidates:
             status = "audit_only"
             reasons = ["no_structured_claims"]
+        elif status == "admitted" and not reusable_claim_candidates:
+            status = "audit_only"
+            reasons = ["epistemic_confirmation_required"]
         candidate.admission_status = status
         candidate.admission_reasons = reasons
         self._memory_candidates[candidate_id] = candidate
         for claim in claim_candidates:
-            claim.admission_status = status
+            claim.admission_status = (
+                "pending_confirmation"
+                if claim in epistemic_deferred
+                else status
+            )
             self._claim_candidates[claim.candidate_id] = claim
 
         report = MemoryAdmissionReport(
@@ -728,6 +752,7 @@ class MemoryStoreLite:
             admission_unresolved_slot_count=int(status == "unresolved_slot"),
             alias_mapping_hit_count=int(resolved.alias_hit),
             unresolved_slot_count=int(resolved.unresolved),
+            epistemic_deferred_count=len(epistemic_deferred),
         )
 
         if status != "admitted":
@@ -746,7 +771,7 @@ class MemoryStoreLite:
         affected_view_ids: set[str] = set()
         newly_written_memory_ids: set[str] = set()
         successful_mapping_count = 0
-        for claim_candidate in claim_candidates:
+        for claim_candidate in reusable_claim_candidates:
             memory, alias_hit, unresolved, unresolved_scope, deduplicated = (
                 self._write_admitted_claim_candidate(
                 candidate=claim_candidate,

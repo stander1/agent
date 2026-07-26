@@ -60,6 +60,7 @@ from agent_runtime.reliability.review_conflict_guard import (
     evaluate_review_conflict,
 )
 from agent_runtime.state.state_pool import StatePoolLite, StateRef
+from agent_runtime.state.structured_output import structured_state_payloads
 
 if TYPE_CHECKING:
     from agent_runtime.bootstrap.startup import BootstrapContext
@@ -89,7 +90,7 @@ MEMORY_SCOPE_ENV = "AGENTLITE_MEMORY_SCOPE"
 FINAL_DELIVERY_MARKER_ENV = "AGENTLITE_AUTOGEN_FINAL_MARKER"
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
 CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
-DRIVER_PHASE = "v5.14g"
+DRIVER_PHASE = "v5.14k"
 _AUTOGEN_REPEATED_INSTANCE_ID_RE = re.compile(
     r"^(?P<logical>.+)_(?P<run>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
     r"[0-9a-f]{4}-[0-9a-f]{12})_(?P=run)$",
@@ -1502,6 +1503,21 @@ class AutoGenHookManager:
         }
         state_refs: list[Any] = []
         if _has_semantic_payload(decoded_messages, text):
+            semantic_state_text = _semantic_autogen_state_text(
+                decoded_messages,
+                text,
+            )
+            extracted_state_payloads = (
+                structured_state_payloads(
+                    semantic_state_text,
+                    semantic_action=context.semantic_action,
+                )
+                if (
+                    context.target_kind == "agentchat_team"
+                    and context.method_name == "run_stream"
+                )
+                else []
+            )
             written_state_refs = self._safe_kernel_call(
                 "write_agent_state",
                 lambda: self.kernel.write_agent_state(
@@ -1511,10 +1527,7 @@ class AutoGenHookManager:
                     agent=context.agent,
                     output=AgentOutput(
                         agent_id=context.agent.agent_id,
-                        content=_semantic_autogen_state_text(
-                            decoded_messages,
-                            text,
-                        ),
+                        content=semantic_state_text,
                         metadata={
                             "framework": "autogen",
                             "target_kind": context.target_kind,
@@ -1522,6 +1535,10 @@ class AutoGenHookManager:
                             "native_result_type": type(result).__name__,
                             "memory_adoption_guard": guard_metadata,
                             "memory_adoption_original_text": adoption_audit_text,
+                            "semantic_action": context.semantic_action,
+                            "structured_state_payloads": (
+                                extracted_state_payloads
+                            ),
                             "autogen_decoded_messages": [
                                 message.to_dict() for message in decoded_messages
                             ],
