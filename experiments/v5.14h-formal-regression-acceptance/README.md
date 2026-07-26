@@ -51,6 +51,9 @@ export AGENTLITE_V514H_RESUME=1
 experiments/v5.14h-formal-regression-acceptance/run_openeuler.sh
 ```
 
+续跑会跳过已经完整的运行组及其比较、报告和双重质量评分；不完整的运行组或
+后处理目录会先移动到 `runs/.../interrupted/`，随后重建，不会覆盖旧证据。
+
 完成后会生成：
 
 ```text

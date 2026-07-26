@@ -187,6 +187,35 @@ archive_incomplete_group() {
   fi
 }
 
+scenario_postprocess_is_complete() {
+  local scenario_root="$1"
+  [[ -f "$scenario_root/comparison/stateful_comparison.json" ]] \
+    && [[ -f "$scenario_root/comparison/quality_blind_batch.json" ]] \
+    && [[ -f "$scenario_root/comparison/quality_blind_mapping.json" ]] \
+    && [[ -f "$scenario_root/comparison/quality_blind_scores.json" ]] \
+    && [[ -f "$scenario_root/comparison/quality_blind_technical_scores.json" ]] \
+    && [[ -f "$scenario_root/comparison/quality_blind_summary.json" ]] \
+    && [[ -f "$scenario_root/reports/observed-agentlite.json" ]] \
+    && [[ -f "$scenario_root/reports/managed-agentlite.json" ]]
+}
+
+archive_incomplete_postprocess() {
+  local label="$1"
+  local scenario_root="$RUN_ROOT/$label"
+  local stamp
+  local archive_root
+  stamp="$(date +%Y%m%d-%H%M%S)-$$"
+  archive_root="$RUN_ROOT/interrupted/$label/postprocess-$stamp"
+
+  for directory in comparison reports; do
+    if [[ -e "$scenario_root/$directory" ]]; then
+      mkdir -p "$archive_root"
+      mv "$scenario_root/$directory" "$archive_root/$directory"
+    fi
+  done
+  mkdir -p "$scenario_root/reports"
+}
+
 run_scenario() {
   local label="$1"
   local tasks="$2"
@@ -260,6 +289,15 @@ run_scenario() {
         --experiment-mode managed \
         --output-dir "$scenario_root/managed"
     unset AGENTLITE_MEMORY_SCOPE
+  fi
+
+  if [[ "$RESUME" == "1" ]] \
+    && scenario_postprocess_is_complete "$scenario_root"; then
+    echo "[$label 4/8-8/8] 比较、报告与双重质量评分已完整，续跑跳过"
+    return
+  fi
+  if [[ "$RESUME" == "1" ]]; then
+    archive_incomplete_postprocess "$label"
   fi
 
   echo "[$label 4/8] 校验三组不可变绑定并生成匿名候选"

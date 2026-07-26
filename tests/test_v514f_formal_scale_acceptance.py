@@ -349,6 +349,12 @@ class FormalScaleAcceptanceTest(unittest.TestCase):
         self.assertIn('RESUME="${AGENTLITE_V514B_RESUME:-0}"', base_runner)
         self.assertIn("group_is_complete()", base_runner)
         self.assertIn("archive_incomplete_group()", base_runner)
+        self.assertIn("scenario_postprocess_is_complete()", base_runner)
+        self.assertIn("archive_incomplete_postprocess()", base_runner)
+        self.assertIn(
+            "比较、报告与双重质量评分已完整，续跑跳过",
+            base_runner,
+        )
         self.assertIn("resume-history.txt", base_runner)
         self.assertIn("judge_resume_args", base_runner)
 
