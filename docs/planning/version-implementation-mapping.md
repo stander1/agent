@@ -5052,3 +5052,37 @@ Reviewer 阻断后只在原预注册轮次内继续，不增加隐藏 LLM 调用
 
 详细说明：`docs/experiments/v5.14k-typed-reliability-acceptance.md`。
 工程验收：`experiments/v5.14k-typed-reliability-acceptance/README.md`。
+
+## 75. v5.14l：类型化可靠性正式 Provider 回归
+
+v5.14l 不新增生产运行时机制，而是把 v5.14k 已通过确定性验收的通用修复
+放回真实 MiMo Provider、A1-A10/B1-B10 完整连续任务和 Native、
+Observed、Managed 三组公平对照。任务、Agent、模型、温度、最大轮次、
+盲评规则及 v5.14j 原成本质量阈值全部保持不变。
+
+实现映射：
+
+- `experiments/v5.14l-typed-reliability-formal-regression/preregistration.json`：
+  绑定 v5.14j 预注册、v5.14k 机制验收器和机制发布提交，冻结任务、Agent、
+  Provider 参数、旧阈值及新增可靠性门禁；
+- `run_openeuler.sh`：复用 v5.14b 的三组真实运行、盲评、中断续跑和不可变
+  归档基础设施，直接使用 v5.14f 正式任务；
+- `verify_acceptance.py`：继承 v5.14j 全部验收，再检查数量量纲、Reviewer
+  闭环、认识状态候选准入、真实检索/向量状态及原文哈希；
+- `tests/test_v514l_typed_reliability_formal_regression.py`：构造与真实运行同形
+  的状态池、候选池和审计文件，证明错误准入、伪来源、审查意见误交付和
+  跨量纲错误都会使验收失败。
+
+公平性边界：
+
+```text
+生产运行时不识别 Question A/B、旅游地点、审计实体或固定 Agent 名称；
+焦点任务编号只存在于预注册和实验验收层；
+不修改问题、角色提示词、轮次和输出长度来制造改善；
+不确定事实必须保留候选池证据，但不要求模型故意产生更多不确定事实；
+结构化状态必须由冻结任务中的真实字段自然触发，不能由验收器伪造；
+旧成本、质量、交付和记忆门槛一项也不放宽。
+```
+
+详细说明：
+`docs/experiments/v5.14l-typed-reliability-formal-regression.md`。
