@@ -4979,3 +4979,37 @@ Agent 名称不参与输出保真和冲突身份判断；
 
 详细说明：
 `docs/experiments/v5.14i-semantic-fidelity-conflict-identity.md`。
+
+openEuler 机制验收结果：
+`docs/experiments/v5.14i-semantic-fidelity-results-20260726.md`。
+
+## 73. v5.14j：冻结口径语义保真正式回归
+
+v5.14j 不增加生产运行时机制，而是把 v5.14i 已通过确定性验收的通用修复
+放回 v5.14h 的真实 Provider、A1-A10/B1-B10 完整任务矩阵。任务、Agent
+配置、模型、温度、最大轮次、匿名质量评估和旧成本/质量阈值全部保持不变。
+
+实现映射：
+
+- `experiments/v5.14j-semantic-fidelity-formal-regression/preregistration.json`：
+  绑定 v5.14h 预注册文件、v5.14f 正式任务和 A/B Agent 配置 SHA-256，
+  并预先声明 A2/A4/A10/B10 根因回归观察点；
+- `run_openeuler.sh`：继续调用 v5.14b 的不可变归档和中断续跑基础设施，
+  直接复用 v5.14f 任务与 v5.14h Agent 配置；
+- `verify_acceptance.py`：继承 v5.14h 全部旧门禁，再增加模型输入、Agent
+  输出和最终输出三表面协议隔离、逐场景错误记忆命中、结果类型保持及焦点
+  任务逐项盲评门禁；
+- `tests/test_v514j_semantic_fidelity_formal_regression.py`：验证协议泄漏、
+  盲评不完整和 Agent 配置漂移均会使正式验收失败。
+
+公平性边界：
+
+```text
+焦点任务编号仅属于实验预注册与验收层，不进入生产运行时；
+运行时不识别 Question A/B、旅游地点、预算数值或安全审计实体；
+v5.14h 结果只作为诊断参考，不替代本次预注册的绝对通过门槛；
+一次正式回归不能估计跨重复实验的方差与置信区间。
+```
+
+详细说明：
+`docs/experiments/v5.14j-semantic-fidelity-formal-regression.md`。

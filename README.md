@@ -2,10 +2,10 @@
 
 本仓库用于迭代实现一个面向多 Agent 协作的跨框架运行时工具层，目标是在多 Agent 任务中通过结构化通信、非文本状态传递和共享记忆复用降低协作开销。
 
-当前开发版本：`v5.14h formal regression acceptance`
+当前开发版本：`v5.14j semantic fidelity formal regression`
 
-v5.14h 真实 AutoGen/openEuler 验收步骤：
-[experiments/v5.14h-formal-regression-acceptance/README.md](experiments/v5.14h-formal-regression-acceptance/README.md)
+v5.14j 真实 AutoGen/openEuler 验收步骤：
+[experiments/v5.14j-semantic-fidelity-formal-regression/README.md](experiments/v5.14j-semantic-fidelity-formal-regression/README.md)
 
 最新发行包门禁版本：`v5.13h package release gate`
 
@@ -72,7 +72,19 @@ v5.14h 真实 AutoGen/openEuler 验收步骤：
 - [docs/experiments/v5.13s-dynamic-capability-profiles.md](docs/experiments/v5.13s-dynamic-capability-profiles.md)
 - [docs/experiments/v5.14g-review-conflict-governance.md](docs/experiments/v5.14g-review-conflict-governance.md)
 - [docs/experiments/v5.14h-formal-regression-acceptance.md](docs/experiments/v5.14h-formal-regression-acceptance.md)
+- [docs/experiments/v5.14i-semantic-fidelity-conflict-identity.md](docs/experiments/v5.14i-semantic-fidelity-conflict-identity.md)
+- [docs/experiments/v5.14i-semantic-fidelity-results-20260726.md](docs/experiments/v5.14i-semantic-fidelity-results-20260726.md)
+- [docs/experiments/v5.14j-semantic-fidelity-formal-regression.md](docs/experiments/v5.14j-semantic-fidelity-formal-regression.md)
 - [docs/release/v5.12z-final-release-notes.md](docs/release/v5.12z-final-release-notes.md)
+
+## v5.14j Current Note
+
+`v5.14j` reuses the exact v5.14h A1-A10/B1-B10 tasks, Agent profiles, Provider
+settings, turn budget, blind-quality method, and legacy thresholds. It adds
+preregistered regression gates for the four tasks that exposed the v5.14h root
+causes, per-scenario wrong-memory checks, result-type preservation, and separate
+protocol-hygiene counters for model input, Agent output, and final Team output.
+No A/B task content or domain entity is added to `agent_runtime`.
 
 ## v5.14h Current Note
 
