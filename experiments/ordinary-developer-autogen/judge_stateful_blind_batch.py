@@ -39,6 +39,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout-seconds", type=float, default=300.0)
     parser.add_argument("--max-retries", type=int, default=6)
     parser.add_argument("--format-retries", type=int, default=2)
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Reuse validated per-task checkpoints already present in --output.",
+    )
     return parser.parse_args()
 
 
@@ -178,6 +183,49 @@ def write_checkpoint(
     output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def load_checkpoint_results(
+    output: Path,
+    *,
+    tasks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not output.is_file():
+        return []
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    results = payload.get("results")
+    if not isinstance(results, list):
+        raise ValueError(f"Invalid judge checkpoint results: {output}")
+
+    task_candidates = {
+        str(task["task_id"]): {
+            str(item["candidate_id"])
+            for item in task.get("candidates", [])
+        }
+        for task in tasks
+    }
+    seen: set[str] = set()
+    validated: list[dict[str, Any]] = []
+    for result in results:
+        if not isinstance(result, dict):
+            raise ValueError(f"Invalid judge checkpoint row: {output}")
+        task_id = str(result.get("task_id") or "")
+        if task_id not in task_candidates or task_id in seen:
+            raise ValueError(
+                f"Unexpected or duplicate task in judge checkpoint: {task_id}"
+            )
+        candidate_ids = {
+            str(item.get("candidate_id") or "")
+            for item in result.get("evaluations", [])
+            if isinstance(item, dict)
+        }
+        if candidate_ids != task_candidates[task_id]:
+            raise ValueError(
+                f"Candidate mismatch in judge checkpoint task {task_id}"
+            )
+        seen.add(task_id)
+        validated.append(result)
+    return validated
+
+
 def main() -> int:
     args = parse_args()
     batch = json.loads(args.batch.read_text(encoding="utf-8"))
@@ -192,11 +240,24 @@ def main() -> int:
         max_retries=args.max_retries,
     )
     client = OpenAICompatibleChatClient(config)
-    results: list[dict[str, Any]] = []
+    results = (
+        load_checkpoint_results(args.output, tasks=tasks)
+        if args.resume
+        else []
+    )
+    completed_task_ids = {
+        str(item.get("task_id") or "") for item in results
+    }
     history: list[dict[str, str]] = []
     for index, task in enumerate(tasks, start=1):
         task_id = str(task["task_id"])
         history.append({"task_id": task_id, "question": str(task["question"])})
+        if task_id in completed_task_ids:
+            print(
+                f"[{index}/{len(tasks)}] {task_id} checkpoint reused",
+                flush=True,
+            )
+            continue
         candidates = task.get("candidates", [])
         candidate_ids = [str(item["candidate_id"]) for item in candidates]
         prompt = build_prompt(

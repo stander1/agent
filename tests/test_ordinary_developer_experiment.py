@@ -76,6 +76,69 @@ class _FakeResponse:
 
 
 class OrdinaryDeveloperExperimentTests(unittest.TestCase):
+    def test_blind_judges_validate_and_reuse_task_checkpoints(self) -> None:
+        tasks = [
+            {
+                "task_id": "T1",
+                "question": "first",
+                "candidates": [
+                    {"candidate_id": "c1"},
+                    {"candidate_id": "c2"},
+                ],
+            },
+            {
+                "task_id": "T2",
+                "question": "second",
+                "candidates": [
+                    {"candidate_id": "d1"},
+                    {"candidate_id": "d2"},
+                ],
+            },
+        ]
+        checkpoint = {
+            "results": [
+                {
+                    "task_id": "T1",
+                    "evaluations": [
+                        {"candidate_id": "c1"},
+                        {"candidate_id": "c2"},
+                    ],
+                }
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "scores.json"
+            output.write_text(
+                json.dumps(checkpoint),
+                encoding="utf-8",
+            )
+            for globals_ in (
+                JUDGE_GLOBALS,
+                TECHNICAL_JUDGE_GLOBALS,
+            ):
+                loaded = globals_["load_checkpoint_results"](
+                    output,
+                    tasks=tasks,
+                )
+                self.assertEqual(
+                    [item["task_id"] for item in loaded],
+                    ["T1"],
+                )
+
+            checkpoint["results"][0]["evaluations"] = [
+                {"candidate_id": "wrong"}
+            ]
+            output.write_text(
+                json.dumps(checkpoint),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "Candidate mismatch"):
+                JUDGE_GLOBALS["load_checkpoint_results"](
+                    output,
+                    tasks=tasks,
+                )
+
     def test_technical_judge_caps_scores_and_blocks_high_severity(self) -> None:
         normalize_result = TECHNICAL_JUDGE_GLOBALS["normalize_result"]
         parsed = {

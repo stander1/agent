@@ -350,6 +350,7 @@ class FormalScaleAcceptanceTest(unittest.TestCase):
         self.assertIn("group_is_complete()", base_runner)
         self.assertIn("archive_incomplete_group()", base_runner)
         self.assertIn("resume-history.txt", base_runner)
+        self.assertIn("judge_resume_args", base_runner)
 
 
 if __name__ == "__main__":

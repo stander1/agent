@@ -56,7 +56,8 @@ bash experiments/v5.14f-formal-scale-acceptance/run_openeuler.sh
 
 续跑会校验当前输入与原冻结副本完全一致，跳过已完整绑定的组，把失败组和 trace
 移入 `interrupted/` 后重新执行，并在 `system/resume-history.txt` 记录续跑提交。
-已有匿名评分文件也会跳过。正式归档存在时禁止续跑覆盖。
+匿名评分按任务检查点续跑，已完成的评分任务不会再次调用模型。正式归档存在时禁止
+续跑覆盖。
 
 ## 输出
 

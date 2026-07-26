@@ -193,6 +193,10 @@ run_scenario() {
   local agents="$3"
   local scenario_root="$RUN_ROOT/$label"
   local trace_root="$TRACE_ROOT/$label"
+  local -a judge_resume_args=()
+  if [[ "$RESUME" == "1" ]]; then
+    judge_resume_args+=(--resume)
+  fi
 
   mkdir -p "$scenario_root/reports"
 
@@ -275,35 +279,27 @@ run_scenario() {
     --format json \
     --output "$scenario_root/reports/managed-agentlite.json"
 
-  if [[ "$RESUME" == "1" ]] \
-    && [[ -f "$scenario_root/comparison/quality_blind_scores.json" ]]; then
-    echo "[$label 6/8] 匿名综合质量评分已存在，续跑跳过"
-  else
-    echo "[$label 6/8] 冻结匿名综合质量评分"
-    python "$PRIMARY_JUDGE" \
-      --batch "$scenario_root/comparison/quality_blind_batch.json" \
-      --output "$scenario_root/comparison/quality_blind_scores.json" \
-      --config configs/llm.mimo.example.json \
-      --temperature 0 \
-      --timeout-seconds "$OPENAI_TIMEOUT_SECONDS" \
-      --max-retries "$OPENAI_MAX_RETRIES" \
-      --format-retries 2
-  fi
+  echo "[$label 6/8] 冻结匿名综合质量评分"
+  python "$PRIMARY_JUDGE" \
+    --batch "$scenario_root/comparison/quality_blind_batch.json" \
+    --output "$scenario_root/comparison/quality_blind_scores.json" \
+    --config configs/llm.mimo.example.json \
+    --temperature 0 \
+    --timeout-seconds "$OPENAI_TIMEOUT_SECONDS" \
+    --max-retries "$OPENAI_MAX_RETRIES" \
+    --format-retries 2 \
+    "${judge_resume_args[@]}"
 
-  if [[ "$RESUME" == "1" ]] \
-    && [[ -f "$scenario_root/comparison/quality_blind_technical_scores.json" ]]; then
-    echo "[$label 7/8] 匿名技术质量评分已存在，续跑跳过"
-  else
-    echo "[$label 7/8] 冻结匿名技术质量评分"
-    python "$TECHNICAL_JUDGE" \
-      --batch "$scenario_root/comparison/quality_blind_batch.json" \
-      --output "$scenario_root/comparison/quality_blind_technical_scores.json" \
-      --config configs/llm.mimo.example.json \
-      --temperature 0 \
-      --timeout-seconds "$OPENAI_TIMEOUT_SECONDS" \
-      --max-retries "$OPENAI_MAX_RETRIES" \
-      --format-retries 2
-  fi
+  echo "[$label 7/8] 冻结匿名技术质量评分"
+  python "$TECHNICAL_JUDGE" \
+    --batch "$scenario_root/comparison/quality_blind_batch.json" \
+    --output "$scenario_root/comparison/quality_blind_technical_scores.json" \
+    --config configs/llm.mimo.example.json \
+    --temperature 0 \
+    --timeout-seconds "$OPENAI_TIMEOUT_SECONDS" \
+    --max-retries "$OPENAI_MAX_RETRIES" \
+    --format-retries 2 \
+    "${judge_resume_args[@]}"
 
   echo "[$label 8/8] 解盲并汇总双重质量结果"
   python "$SUMMARIZE" \
