@@ -684,6 +684,9 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "memory_admission_deduplicated_memory_count": 0,
         "memory_evidence_reference_merge_count": 0,
         "model_visible_protocol_marker_count": 0,
+        "model_visible_input_protocol_marker_count": 0,
+        "model_visible_agent_output_protocol_marker_count": 0,
+        "model_visible_final_output_protocol_marker_count": 0,
         "state_memory_bridge_event_count": 0,
         "raw_claim_count": 0,
         "provisional_claim_count": 0,
@@ -994,6 +997,20 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
             breakdown["llm_total_tokens"] += total
             breakdown["llm_call_count"] += 1
             continue
+        if event_type == "autogen_agent_output":
+            marker_count = _int(
+                payload.get("model_visible_protocol_marker_count")
+            )
+            breakdown["model_visible_protocol_marker_count"] += marker_count
+            if str(payload.get("model_visible_surface") or "") == "final_output":
+                breakdown[
+                    "model_visible_final_output_protocol_marker_count"
+                ] += marker_count
+            else:
+                breakdown[
+                    "model_visible_agent_output_protocol_marker_count"
+                ] += marker_count
+            continue
         if event_type in shadow_event_types:
             native, runtime, _, _, _ = _autogen_event_cost(payload)
             if native > 0 or runtime > 0:
@@ -1016,9 +1033,15 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         if applied:
             rewrite_applied_events += 1
             if event_type == "autogen_agent_input_real_rewrite":
-                breakdown["model_visible_protocol_marker_count"] += _int(
+                input_marker_count = _int(
                     payload.get("model_visible_protocol_marker_count")
                 )
+                breakdown[
+                    "model_visible_protocol_marker_count"
+                ] += input_marker_count
+                breakdown[
+                    "model_visible_input_protocol_marker_count"
+                ] += input_marker_count
             if (
                 event_type == "autogen_agent_input_real_rewrite"
                 and continuity_required

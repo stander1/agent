@@ -533,6 +533,15 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
     model_visible_protocol_marker_count = _int(
         token_summary.get("model_visible_protocol_marker_count")
     )
+    model_visible_input_protocol_marker_count = _int(
+        token_summary.get("model_visible_input_protocol_marker_count")
+    )
+    model_visible_agent_output_protocol_marker_count = _int(
+        token_summary.get("model_visible_agent_output_protocol_marker_count")
+    )
+    model_visible_final_output_protocol_marker_count = _int(
+        token_summary.get("model_visible_final_output_protocol_marker_count")
+    )
     state_memory_bridge_event_count = _int(
         token_summary.get("state_memory_bridge_event_count")
     )
@@ -871,7 +880,22 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
         _row(
             "agentlite_model_visible_protocol_marker_count",
             model_visible_protocol_marker_count,
-            "改写后的 Agent 模型输入中残留的 AgentLite 传输协议标记数",
+            "模型输入、Agent 输出和最终输出中残留的 AgentLite 协议标记总数",
+        ),
+        _row(
+            "agentlite_model_visible_input_protocol_marker_count",
+            model_visible_input_protocol_marker_count,
+            "改写后的 Agent 模型输入中残留的 AgentLite 协议标记数",
+        ),
+        _row(
+            "agentlite_model_visible_agent_output_protocol_marker_count",
+            model_visible_agent_output_protocol_marker_count,
+            "业务 Agent 输出中残留的 AgentLite 协议标记数",
+        ),
+        _row(
+            "agentlite_model_visible_final_output_protocol_marker_count",
+            model_visible_final_output_protocol_marker_count,
+            "团队最终交付输出中残留的 AgentLite 协议标记数",
         ),
         _row(
             "agentlite_state_memory_bridge_event_count",

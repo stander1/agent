@@ -12,6 +12,7 @@ from agent_runtime.drivers.autogen import (
     AutoGenHookManager,
     HookCallContext,
     _InjectedMemoryRecord,
+    _structured_memory_adoption_evidence,
 )
 from agent_runtime.memory.memory_store import MemoryRef, MemoryStoreLite
 from agent_runtime.reliability.memory_adoption_guard import (
@@ -28,6 +29,81 @@ class ArbitraryTextMessage:
 
 
 class MemoryAdoptionGuardTest(unittest.TestCase):
+    def test_identical_active_and_historical_facts_are_not_a_conflict(self) -> None:
+        evidence = _structured_memory_adoption_evidence(
+            revision_guard={
+                "subject": "project:generic",
+                "semantic_key": (
+                    "project:generic|slot.runtime.config|config.alert_id"
+                ),
+                "active_facts": [
+                    {
+                        "slot_id": "slot.runtime.config",
+                        "scope": "config.alert_id",
+                        "value": "alert_071",
+                        "value_type": "string",
+                        "unit": "",
+                        "polarity": "positive",
+                    }
+                ],
+                "historical_facts": [
+                    {
+                        "slot_id": "slot.runtime.config",
+                        "scope": "config.alert_id",
+                        "value": "alert_071",
+                        "value_type": "string",
+                        "unit": "",
+                        "polarity": "positive",
+                    }
+                ],
+            },
+            current_task_text="Publish the current alert configuration.",
+            output_text="Use alert_id=alert_071 in the final configuration.",
+            explicit_reference=False,
+        )
+
+        self.assertEqual(evidence["status"], "useful")
+        self.assertEqual(evidence["historical_fact_count"], 0)
+        self.assertEqual(evidence["matched_historical_fact_count"], 0)
+
+    def test_guard_ignores_unsafe_row_when_historical_value_equals_active(self) -> None:
+        decision = guard_memory_adoption_output(
+            output_text="Use alert_id=alert_071.",
+            evidence_rows=[
+                self._structured_row(
+                    status="mixed",
+                    active_value="alert_071",
+                    historical_values=["alert_071"],
+                    historical_spans=["Use alert_id=alert_071."],
+                )
+            ],
+        )
+
+        self.assertEqual(decision.status, "safe")
+        self.assertEqual(decision.output_text, "Use alert_id=alert_071.")
+
+    def test_partial_span_repair_is_blocked(self) -> None:
+        decision = guard_memory_adoption_output(
+            output_text=(
+                "Apply service.capacity=20. "
+                "Keep the legacy backlog at thirty."
+            ),
+            evidence_rows=[
+                self._structured_row(
+                    status="mixed",
+                    active_value="50",
+                    historical_values=["20", "30"],
+                    historical_spans=[
+                        "Apply service.capacity=20.",
+                        "Keep the legacy backlog at thirty.",
+                    ],
+                )
+            ],
+        )
+
+        self.assertEqual(decision.status, "blocked")
+        self.assertIn("incomplete_historical_span_repair", decision.reasons)
+
     def test_rule_repair_replaces_only_the_historical_value_in_matched_span(
         self,
     ) -> None:
@@ -88,8 +164,12 @@ class MemoryAdoptionGuardTest(unittest.TestCase):
         )
 
         self.assertEqual(decision.status, "blocked")
-        self.assertIn("AGENTLITE_MEMORY_CONFLICT v1", decision.output_text)
-        self.assertIn("review_or_retry_only", decision.output_text)
+        self.assertIn("Runtime safety hold", decision.output_text)
+        self.assertNotIn("AGENTLITE_", decision.output_text)
+        self.assertEqual(
+            decision.to_dict()["allowed_next_step"],
+            "review_or_retry_only",
+        )
         self.assertNotIn("confidential body", decision.output_text)
 
     def test_arbitrary_agent_output_is_repaired_before_it_is_recorded(
@@ -214,7 +294,8 @@ class MemoryAdoptionGuardTest(unittest.TestCase):
                     ),
                 )
 
-                self.assertIn("AGENTLITE_MEMORY_CONFLICT v1", guarded.content)
+                self.assertIn("Runtime safety hold", guarded.content)
+                self.assertNotIn("AGENTLITE_", guarded.content)
                 manager.record_call_end(context, guarded)
                 events = self._events(manager.output_dir / "trace.jsonl")
                 output = next(

@@ -81,6 +81,13 @@ class AutoGenSessionReportTest(unittest.TestCase):
                         "model_visible_protocol_marker_count": 0,
                     },
                 },
+                {
+                    "event_type": "autogen_agent_output",
+                    "payload": {
+                        "model_visible_protocol_marker_count": 1,
+                        "model_visible_surface": "agent_output",
+                    },
+                },
             ]
         )
 
@@ -93,7 +100,15 @@ class AutoGenSessionReportTest(unittest.TestCase):
             2,
         )
         self.assertEqual(summary["memory_evidence_reference_merge_count"], 2)
-        self.assertEqual(summary["model_visible_protocol_marker_count"], 0)
+        self.assertEqual(summary["model_visible_protocol_marker_count"], 1)
+        self.assertEqual(
+            summary["model_visible_agent_output_protocol_marker_count"],
+            1,
+        )
+        self.assertEqual(
+            summary["model_visible_input_protocol_marker_count"],
+            0,
+        )
 
     def test_review_governance_trace_is_aggregated_with_safety_failures(self) -> None:
         summary = _autogen_token_summary(

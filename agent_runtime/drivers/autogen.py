@@ -1567,6 +1567,14 @@ class AutoGenHookManager:
                 "method": context.method_name,
                 "output_chars": len(text),
                 "output_preview": _preview(text),
+                "model_visible_protocol_marker_count": (
+                    _protocol_marker_count(text)
+                ),
+                "model_visible_surface": (
+                    "final_output"
+                    if context.target_kind == "agentchat_team"
+                    else "agent_output"
+                ),
                 "state_refs": state_ref_payload,
                 "memory_refs": admitted_memory_refs,
                 "memory_admission_status": getattr(
@@ -7165,9 +7173,16 @@ def _structured_memory_adoption_evidence(
     active_facts = _unique_structured_facts(
         revision_guard.get("active_facts", [])
     )
-    historical_facts = _unique_structured_facts(
-        revision_guard.get("historical_facts", [])
-    )
+    active_fact_identities = {
+        _structured_fact_value_identity(fact) for fact in active_facts
+    }
+    historical_facts = [
+        fact
+        for fact in _unique_structured_facts(
+            revision_guard.get("historical_facts", [])
+        )
+        if _structured_fact_value_identity(fact) not in active_fact_identities
+    ]
 
     matched_active: list[tuple[dict[str, Any], dict[str, Any]]] = []
     matched_historical: list[tuple[dict[str, Any], dict[str, Any]]] = []
@@ -7303,6 +7318,21 @@ def _unique_structured_facts(value: Any) -> list[dict[str, Any]]:
         )
         unique[key] = fact
     return list(unique.values())
+
+
+def _structured_fact_value_identity(
+    fact: Mapping[str, Any],
+) -> tuple[str, str, str, str]:
+    return (
+        str(fact.get("slot_id") or ""),
+        str(fact.get("scope") or "general"),
+        normalized_value(
+            fact.get("value"),
+            str(fact.get("value_type") or "string"),
+            str(fact.get("unit") or ""),
+        ),
+        str(fact.get("polarity") or "positive"),
+    )
 
 
 def _matching_structured_claim(

@@ -106,6 +106,39 @@ _BUDGET_RESULT_RE = re.compile(
     r")"
 )
 _NUMBER_RE = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)(?![\w.])")
+_INTERNAL_PROTOCOL_MARKER_RE = re.compile(
+    r"(?im)^\s*(?:"
+    r"AGENTLITE_MEMORY_CONFLICT|"
+    r"AGENTLITE_TEAM_REAL_REWRITE|"
+    r"AGENTLITE_SHARED_MEMORY|"
+    r"AGENTLITE_MEMORY_VIEW"
+    r")\b"
+)
+_RUNTIME_SAFETY_HOLD_RE = re.compile(
+    r"(?i)runtime\s+safety\s+hold:.{0,320}"
+    r"(?:not\s+a\s+final\s+deliverable|draft\s+was\s+withheld)"
+)
+_REQUIREMENT_SIGNAL_RE = re.compile(
+    r"(?i)(?:必须|务必|需要|应当|应包含|包含|输出|交付|"
+    r"must|required?|include|contain|output|deliver)"
+)
+_NEGATED_REQUIREMENT_RE = re.compile(
+    r"(?i)(?:不要|不得|禁止|无需|不需要|可选|"
+    r"do\s+not|must\s+not|without|optional|if\s+needed)"
+)
+_MACHINE_IDENTIFIER_RE = re.compile(
+    r"(?<![A-Za-z0-9_])"
+    r"([A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+)"
+    r"(?![A-Za-z0-9_])"
+)
+_COMPARE_ALL_RE = re.compile(
+    r"(?i)(?:全部|所有|逐一|每个|三个|3\s*个).{0,20}(?:候选|选项|方案)"
+    r"|(?:候选|选项|方案).{0,20}(?:全部|所有|逐一|每个|三个|3\s*个)"
+    r"|compare\s+(?:all|every)|all\s+(?:candidates?|options?)"
+)
+_ENUMERATED_ITEM_RE = re.compile(
+    r"(?m)^\s*(?:\d{1,2}\s*[.)、．]|[-*•])\s*(.+?)\s*$"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +187,10 @@ def assess_final_delivery(
         reasons.append("empty_final_body")
     if len(body) < max(0, minimum_body_chars):
         reasons.append("final_body_too_short")
+    if _INTERNAL_PROTOCOL_MARKER_RE.search(body):
+        reasons.append("internal_protocol_message_not_deliverable")
+    if _RUNTIME_SAFETY_HOLD_RE.search(body):
+        reasons.append("runtime_safety_hold_not_deliverable")
 
     review_heading = bool(_REVIEW_HEADING_RE.search(body))
     delegated_revision = bool(_DELEGATED_REVISION_RE.search(body))
@@ -183,13 +220,22 @@ def assess_final_delivery(
     )
     if numeric_violations:
         reasons.append("numeric_upper_bound_violation")
+    task_missing = _current_task_missing_requirements(
+        request=request,
+        body=body,
+    )
+    if task_missing:
+        reasons.append("current_task_requirements_missing")
 
     unique_reasons = tuple(dict.fromkeys(reasons))
+    missing_requirements = tuple(
+        dict.fromkeys((*numeric_violations, *task_missing))
+    )
     return FinalDeliveryAssessment(
         valid=not unique_reasons,
         status="validated_final_artifact" if not unique_reasons else "degraded_fallback",
         reasons=unique_reasons,
-        missing_requirements=numeric_violations,
+        missing_requirements=missing_requirements,
         review_only=review_only,
         approved_prior_artifact=approved_prior_artifact,
         body=body,
@@ -274,6 +320,79 @@ def _numeric_upper_bound_violations(
                 f"{_format_number(observed)}"
             )
     return tuple(dict.fromkeys(violations))
+
+
+def _current_task_missing_requirements(
+    *,
+    request: str,
+    body: str,
+) -> tuple[str, ...]:
+    current_request = str(request or "").strip()
+    if not current_request:
+        return ()
+    normalized_body = _normalize_requirement_text(body)
+    required: list[str] = []
+
+    for match in _MACHINE_IDENTIFIER_RE.finditer(current_request):
+        clause = _requirement_clause(
+            current_request,
+            start=match.start(),
+            end=match.end(),
+        )
+        if not _REQUIREMENT_SIGNAL_RE.search(clause):
+            continue
+        if _NEGATED_REQUIREMENT_RE.search(clause):
+            continue
+        required.append(match.group(1))
+
+    if _COMPARE_ALL_RE.search(current_request):
+        items = [
+            _candidate_item_anchor(item)
+            for item in _ENUMERATED_ITEM_RE.findall(current_request)
+        ]
+        required.extend(item for item in items if item)
+
+    missing = [
+        anchor
+        for anchor in dict.fromkeys(required)
+        if _normalize_requirement_text(anchor) not in normalized_body
+    ]
+    return tuple(missing)
+
+
+def _candidate_item_anchor(item: str) -> str:
+    candidate = re.split(r"[:：；;（(]", str(item or ""), maxsplit=1)[0]
+    candidate = candidate.strip(" \t-–—|`*_")
+    if len(candidate) < 2 or len(candidate) > 80:
+        return ""
+    if _REQUIREMENT_SIGNAL_RE.fullmatch(candidate):
+        return ""
+    return candidate
+
+
+def _requirement_clause(text: str, *, start: int, end: int) -> str:
+    left = max(
+        (
+            text.rfind(separator, 0, start)
+            for separator in ("\n", "。", "！", "？", "；", ";")
+        ),
+        default=-1,
+    )
+    right_positions = [
+        position
+        for separator in ("\n", "。", "！", "？", "；", ";")
+        if (position := text.find(separator, end)) >= 0
+    ]
+    right = min(right_positions) if right_positions else len(text)
+    return text[left + 1 : right]
+
+
+def _normalize_requirement_text(text: str) -> str:
+    return re.sub(
+        r"[\s`*_\"'“”‘’：:，,。.!！?？()（）\[\]【】]+",
+        "",
+        str(text or "").casefold(),
+    )
 
 
 def _line_numbers(text: str) -> list[float]:

@@ -25,17 +25,38 @@ from agent_runtime.reliability.review_conflict_guard import (
 class ReviewConflictGuardTest(unittest.TestCase):
     def test_budget_extraction_prefers_currency_amount_over_party_count(self) -> None:
         cases = (
-            ("预算：两人所有费用总计不超过3000元。", "3000", "CNY"),
-            ("总预算：两人合计2600元。", "2600", "CNY"),
-            ("budget for 2 people is USD 500.", "500", "USD"),
-            ("预算为3000。", "3000", ""),
+            (
+                "预算：两人所有费用总计不超过3000元。",
+                "3000",
+                "CNY",
+                "constraint.budget_upper_bound",
+            ),
+            (
+                "总预算：两人合计2600元。",
+                "2600",
+                "CNY",
+                "estimate.budget_total",
+            ),
+            (
+                "budget for 2 people is USD 500.",
+                "500",
+                "USD",
+                "constraint.budget_upper_bound",
+            ),
+            (
+                "预算为3000。",
+                "3000",
+                "",
+                "constraint.budget_upper_bound",
+            ),
         )
-        for text, expected_value, expected_unit in cases:
+        for text, expected_value, expected_unit, expected_scope in cases:
             with self.subTest(text=text):
                 claims = self._budget_claims(text)
                 self.assertEqual(len(claims), 1)
                 self.assertEqual(claims[0]["value"], expected_value)
                 self.assertEqual(claims[0]["unit"], expected_unit)
+                self.assertEqual(claims[0]["scope"], expected_scope)
 
         self.assertFalse(self._budget_claims("预算需要两人共同确认。"))
 
@@ -45,7 +66,7 @@ class ReviewConflictGuardTest(unittest.TestCase):
             store,
             task_id="T1",
             slot_id="slot.project.requirement",
-            scope="constraint.budget",
+            scope="constraint.budget_upper_bound",
             value="2",
             value_type="number",
             unit="CNY",
@@ -54,7 +75,7 @@ class ReviewConflictGuardTest(unittest.TestCase):
             store,
             task_id="T2",
             slot_id="slot.project.requirement",
-            scope="constraint.budget",
+            scope="constraint.budget_upper_bound",
             value="3000",
             value_type="number",
             unit="CNY",
@@ -318,7 +339,7 @@ class ReviewConflictGuardTest(unittest.TestCase):
         return [
             claim
             for claim in extract_claim_cards(text, subject="project:demo")
-            if claim["scope"] == "constraint.budget"
+            if "budget" in str(claim["scope"])
         ]
 
     @staticmethod

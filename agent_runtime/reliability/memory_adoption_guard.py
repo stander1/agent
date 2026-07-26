@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
@@ -56,11 +54,14 @@ def guard_memory_adoption_output(
 ) -> MemoryAdoptionGuardDecision:
     """Repair exact structured conflicts or replace the output with a safe alert."""
 
-    unsafe_rows = [
-        dict(row)
-        for row in evidence_rows
-        if str(row.get("status") or "") in _UNSAFE_STATUSES
-    ]
+    unsafe_rows: list[dict[str, Any]] = []
+    for source_row in evidence_rows:
+        row = dict(source_row)
+        if str(row.get("status") or "") not in _UNSAFE_STATUSES:
+            continue
+        if _is_duplicate_only_structured_conflict(row):
+            continue
+        unsafe_rows.append(row)
     if not unsafe_rows:
         return MemoryAdoptionGuardDecision(status="safe", output_text=output_text)
 
@@ -110,7 +111,7 @@ def guard_memory_adoption_output(
             reasons.append("historical_output_span_missing")
             continue
 
-        row_repaired, replacement_count = _repair_matched_spans(
+        row_repaired, replacement_count, repaired_span_count = _repair_matched_spans(
             text=repaired,
             spans=matched_spans,
             historical_values=historical_values,
@@ -118,6 +119,9 @@ def guard_memory_adoption_output(
         )
         if replacement_count <= 0:
             reasons.append("exact_historical_value_not_replaceable")
+            continue
+        if repaired_span_count < len(tuple(dict.fromkeys(matched_spans))):
+            reasons.append("incomplete_historical_span_repair")
             continue
         repaired = row_repaired
         repaired_count += replacement_count
@@ -156,9 +160,10 @@ def _repair_matched_spans(
     spans: list[str],
     historical_values: list[Any],
     active_value: Any,
-) -> tuple[str, int]:
+) -> tuple[str, int, int]:
     repaired = text
     replacement_count = 0
+    repaired_span_count = 0
     for span in dict.fromkeys(spans):
         if span not in repaired:
             continue
@@ -175,7 +180,8 @@ def _repair_matched_spans(
             continue
         repaired = repaired.replace(span, repaired_span)
         replacement_count += span_replacements
-    return repaired, replacement_count
+        repaired_span_count += 1
+    return repaired, replacement_count, repaired_span_count
 
 
 def _replace_scalar(
@@ -206,23 +212,12 @@ def _conflict_alert(
     conflict_count: int,
     output_text: str,
 ) -> str:
-    payload = {
-        "protocol": "agentlite.memory_adoption_guard.v1",
-        "message_type": "conflict_alert",
-        "contract_status": "degraded_fallback",
-        "action": "REFRESH_AND_REVIEW",
-        "active_facts": [dict(item) for item in active_facts],
-        "conflict_count": conflict_count,
-        "reasons": list(reasons),
-        "rejected_output_fingerprint": hashlib.sha256(
-            output_text.encode("utf-8")
-        ).hexdigest()[:16],
-        "allowed_next_step": "review_or_retry_only",
-        "safe_to_continue": False,
-    }
+    del active_facts, reasons, conflict_count, output_text
     return (
-        "AGENTLITE_MEMORY_CONFLICT v1\n"
-        + json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        "Runtime safety hold: the generated draft used a memory fact that "
+        "could not be reconciled safely. The draft was withheld and is not a "
+        "final deliverable. Revision is required from the current task and "
+        "admitted active facts only."
     )
 
 
@@ -238,6 +233,23 @@ def _is_numeric_scalar(value: Any) -> bool:
 
 def _normalized_scalar(value: Any) -> str:
     return str(value).strip().casefold()
+
+
+def _is_duplicate_only_structured_conflict(row: Mapping[str, Any]) -> bool:
+    if str(row.get("attribution_mode") or "") != _STRUCTURED_ATTRIBUTION_MODE:
+        return False
+    active_value = row.get("active_value")
+    historical_values = [
+        value for value in row.get("historical_values", []) if _is_scalar(value)
+    ]
+    return bool(
+        _is_scalar(active_value)
+        and historical_values
+        and all(
+            _normalized_scalar(value) == _normalized_scalar(active_value)
+            for value in historical_values
+        )
+    )
 
 
 def _deduplicate_active_facts(

@@ -173,7 +173,7 @@ def evaluate(
                     else True
                 ),
                 "conflict_alert_observed": (
-                    "AGENTLITE_MEMORY_CONFLICT" in downstream_managed
+                    _runtime_conflict_hold_observed(downstream_managed)
                 ),
                 "compensation_event_count": int(
                     guard_payload.get("compensation_event_count", 0) or 0
@@ -514,7 +514,7 @@ def _managed_success(
         return False
     if expected_action == "blocked":
         return (
-            "AGENTLITE_MEMORY_CONFLICT" in downstream_text
+            _runtime_conflict_hold_observed(downstream_text)
             and not downstream_semantics["historical_positive"]
         )
     if expected_action == "rule_repaired":
@@ -531,6 +531,14 @@ def _managed_success(
     return (
         downstream_semantics["active_positive"]
         and not downstream_semantics["historical_positive"]
+    )
+
+
+def _runtime_conflict_hold_observed(text: str) -> bool:
+    normalized = str(text or "").casefold()
+    return (
+        "agentlite_memory_conflict" in normalized
+        or "runtime safety hold" in normalized
     )
 
 

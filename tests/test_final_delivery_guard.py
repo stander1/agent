@@ -6,6 +6,120 @@ from agent_runtime.reliability.final_delivery_guard import assess_final_delivery
 
 
 class FinalDeliveryGuardTests(unittest.TestCase):
+    def test_rejects_internal_memory_conflict_packet_as_final_delivery(self) -> None:
+        assessment = assess_final_delivery(
+            request="Deliver the final implementation report.",
+            content=(
+                "AGENTLITE_MEMORY_CONFLICT v1\n"
+                '{"protocol":"agentlite.memory_adoption_guard.v1"}\n'
+                "FINAL_ANSWER_READY"
+            ),
+            source="reviewer",
+            marker="FINAL_ANSWER_READY",
+            require_marker=True,
+        )
+
+        self.assertFalse(assessment.valid)
+        self.assertIn(
+            "internal_protocol_message_not_deliverable",
+            assessment.reasons,
+        )
+
+    def test_rejects_runtime_safety_hold_as_final_delivery(self) -> None:
+        assessment = assess_final_delivery(
+            request="Deliver the final implementation report.",
+            content=(
+                "Runtime safety hold: the generated draft used a memory fact "
+                "that could not be reconciled safely. The draft was withheld "
+                "and is not a final deliverable. Revision is required.\n"
+                "FINAL_ANSWER_READY"
+            ),
+            source="reviewer",
+            marker="FINAL_ANSWER_READY",
+            require_marker=True,
+        )
+
+        self.assertFalse(assessment.valid)
+        self.assertIn(
+            "runtime_safety_hold_not_deliverable",
+            assessment.reasons,
+        )
+
+    def test_rejects_output_missing_explicit_machine_deliverable_anchors(self) -> None:
+        assessment = assess_final_delivery(
+            request=(
+                "必须输出 evidence_chain_state，并包含 hop_path、target "
+                "和 evidence_refs 字段。"
+            ),
+            content=(
+                "## 最终可交付方案\n"
+                "已完成证据复核，并给出风险说明和后续建议。\n"
+                "FINAL_ANSWER_READY"
+            ),
+            source="reviewer",
+            marker="FINAL_ANSWER_READY",
+            require_marker=True,
+        )
+
+        self.assertFalse(assessment.valid)
+        self.assertIn("current_task_requirements_missing", assessment.reasons)
+        self.assertIn("evidence_chain_state", assessment.missing_requirements)
+
+    def test_optional_machine_identifier_is_not_required(self) -> None:
+        assessment = assess_final_delivery(
+            request=(
+                "必须输出 final_report。"
+                "debug_trace 为可选诊断信息，不需要包含。"
+            ),
+            content=(
+                "## Final result\n"
+                "The final_report contains the complete implementation result.\n"
+                "FINAL_ANSWER_READY"
+            ),
+            source="reviewer",
+            marker="FINAL_ANSWER_READY",
+            require_marker=True,
+        )
+
+        self.assertTrue(assessment.valid)
+        self.assertNotIn("debug_trace", assessment.missing_requirements)
+
+    def test_rejects_stale_output_missing_explicit_candidate_set(self) -> None:
+        request = (
+            "请比较下面全部三个候选并选出推荐方案：\n"
+            "1. Alpha Ridge\n"
+            "2. Beta Harbor\n"
+            "3. Gamma Valley"
+        )
+        assessment = assess_final_delivery(
+            request=request,
+            content=(
+                "## 最终可交付方案\n"
+                "需求已经整理完成，后续应先确认预算和时间，再开始比较候选。\n"
+                "FINAL_ANSWER_READY"
+            ),
+            source="reviewer",
+            marker="FINAL_ANSWER_READY",
+            require_marker=True,
+        )
+
+        self.assertFalse(assessment.valid)
+        self.assertIn("current_task_requirements_missing", assessment.reasons)
+        self.assertIn("Alpha Ridge", assessment.missing_requirements)
+
+        corrected = assess_final_delivery(
+            request=request,
+            content=(
+                "## 最终可交付方案\n"
+                "Alpha Ridge 交通最慢，Beta Harbor 成本最高，"
+                "Gamma Valley 在成本和时长之间最均衡，因此推荐 Gamma Valley。\n"
+                "FINAL_ANSWER_READY"
+            ),
+            source="reviewer",
+            marker="FINAL_ANSWER_READY",
+            require_marker=True,
+        )
+        self.assertTrue(corrected.valid)
     def test_rejects_reviewer_revision_shape(self) -> None:
         content = """**ReviewerAgent 审查意见（第一轮）**
 

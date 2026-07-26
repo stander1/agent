@@ -4940,3 +4940,42 @@ v5.14f 的真实 Provider、A1-A10/B1-B10 完整任务矩阵。任务、Agent �
 ```
 
 详细说明：`docs/experiments/v5.14h-formal-regression-acceptance.md`。
+
+## 72. v5.14i：语义保真、冲突身份与协议隔离
+
+v5.14i 根据 v5.14h 的真实 Provider 归档修复三个通用根因：预算事实身份折叠、
+相同 active/historical 值误报冲突，以及最终产物只通过结构门禁却偏离当前任务。
+该阶段不修改冻结任务、领域 Agent 提示词、轮次或评分口径。
+
+实现映射：
+
+- `agent_runtime/memory/claim_extractor.py`：将预算上限、估算总额和预算分项拆为
+  独立 scope，并从 Markdown 预算表确定性提取分项事实；
+- `agent_runtime/memory/schema_registry.py`：保留动态 scope 中的 Unicode 语义，
+  防止不同中文分项折叠为同一身份；
+- `agent_runtime/drivers/autogen.py`：结构化归因前排除与 active 完全相同的历史
+  事实，并在 Agent/团队输出 trace 中记录协议标记；
+- `agent_runtime/reliability/memory_adoption_guard.py`：要求所有历史命中跨度完整
+  修复，阻断时不向模型暴露内部 JSON 或原错误正文；
+- `agent_runtime/reliability/final_delivery_guard.py`：拒绝内部控制包和安全暂缓，
+  校验最新任务的强交付标识与明确候选集合；
+- `agent_runtime/adapters/autogen_termination.py`：最新用户任务作为当前 request，
+  更早任务只作为 grounding contexts；
+- `web_monitor/parser.py` 与 `autogen_session_report.py`：协议卫生从输入扩展到
+  Agent 输出和最终输出；
+- `experiments/v5.14i-semantic-fidelity-conflict-identity/`：提供不调用 Provider
+  的 openEuler 机制验收和不可变证据打包。
+
+通用边界：
+
+```text
+生产运行时不识别 Question A/B、旅游地点或实验数值；
+Agent 名称不参与输出保真和冲突身份判断；
+开放式任务不因没有强交付锚点被误拒绝；
+规则修复必须覆盖全部已识别冲突跨度；
+内部控制证据保留在 trace/failure_state，不成为业务交付内容；
+机制验收通过后仍需正式 Provider 回归证明真实质量恢复。
+```
+
+详细说明：
+`docs/experiments/v5.14i-semantic-fidelity-conflict-identity.md`。

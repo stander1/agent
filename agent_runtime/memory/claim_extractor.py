@@ -115,7 +115,12 @@ def extract_claim_cards(
     source_pointer: str = "",
     default_confidence: float = 0.78,
 ) -> list[dict[str, Any]]:
-    claims: list[ExtractedClaim] = []
+    claims: list[ExtractedClaim] = _extract_budget_table_claims(
+        text,
+        subject=subject,
+        source_pointer=source_pointer,
+        confidence=min(0.98, default_confidence + 0.06),
+    )
     for raw_sentence in _sentences(text):
         sentence = _clean_markup(raw_sentence)
         if len(sentence) < 3:
@@ -356,17 +361,20 @@ def _extract_known_claims(
     budget_amount = _extract_budget_amount(sentence)
     if budget_amount is not None:
         budget_value, budget_unit = budget_amount
+        budget_scope, budget_label, budget_modality = _budget_claim_shape(
+            sentence
+        )
         rows.append(
             _claim(
                 subject,
-                "budget",
+                budget_label,
                 "slot.project.requirement",
-                "constraint.budget",
+                budget_scope,
                 budget_value,
                 "number",
                 budget_unit,
                 sentence,
-                "requirement",
+                budget_modality,
                 polarity,
                 confidence,
                 revision_kind,
@@ -515,7 +523,7 @@ def _architecture_value(sentence: str) -> str:
 def _scope_from_label(label: str) -> str:
     normalized = _normalize_key(label)
     aliases = {
-        "budget": "constraint.budget",
+        "budget": "constraint.budget_upper_bound",
         "peak_concurrency": "constraint.peak_concurrency",
         "concurrency": "constraint.peak_concurrency",
         "audit_retention": "constraint.audit_retention_days",
@@ -554,8 +562,177 @@ def _currency_unit(text: str) -> str:
     return ""
 
 
+def _budget_claim_shape(sentence: str) -> tuple[str, str, str]:
+    lowered = sentence.casefold()
+    if re.search(
+        r"(?:上限|红线|不(?:得|可|能)?超过|至多|最多|"
+        r"\b(?:cap|maximum|max|at\s+most|no\s+more\s+than)\b|<=|≤)",
+        sentence,
+        re.IGNORECASE,
+    ):
+        return "constraint.budget_upper_bound", "budget_upper_bound", "requirement"
+
+    if re.search(
+        r"(?:总预算|整体预算|项目预算|\btotal\s+budget\b)",
+        sentence,
+        re.IGNORECASE,
+    ):
+        return "estimate.budget_total", "budget_total", "estimate"
+
+    component_match = re.search(
+        r"(?P<label>[A-Za-z\u3400-\u4dbf\u4e00-\u9fff]"
+        r"[A-Za-z0-9_\-\u3400-\u4dbf\u4e00-\u9fff]{0,23})"
+        r"\s*(?:预算|budget)",
+        sentence,
+        re.IGNORECASE,
+    )
+    component_label = (
+        component_match.group("label").strip() if component_match else ""
+    )
+    generic_labels = {
+        "总",
+        "总计",
+        "整体",
+        "项目",
+        "本次",
+        "旅行",
+        "total",
+        "overall",
+    }
+    if component_label and component_label.casefold() not in generic_labels:
+        component_key = _normalize_key(component_label)
+        return (
+            f"allocation.budget.{component_key}",
+            f"{component_label}_budget",
+            "allocation",
+        )
+
+    if re.search(
+        r"(?:预计|估算|测算|总计|合计|总额|总费用|"
+        r"\b(?:estimate|estimated|total(?:\s+cost)?)\b)",
+        lowered,
+        re.IGNORECASE,
+    ):
+        return "estimate.budget_total", "budget_total", "estimate"
+    return "constraint.budget_upper_bound", "budget_upper_bound", "requirement"
+
+
+def _extract_budget_table_claims(
+    text: str,
+    *,
+    subject: str,
+    source_pointer: str,
+    confidence: float,
+) -> list[ExtractedClaim]:
+    lines = str(text or "").splitlines()
+    claims: list[ExtractedClaim] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index].strip()
+        if "|" not in line or not re.search(
+            r"(?:预算|金额|费用|budget|amount|cost)",
+            line,
+            re.IGNORECASE,
+        ):
+            index += 1
+            continue
+        headers = _markdown_cells(line)
+        amount_index = next(
+            (
+                position
+                for position, header in enumerate(headers)
+                if re.search(
+                    r"(?:预算|金额|budget|amount|cost)",
+                    header,
+                    re.IGNORECASE,
+                )
+            ),
+            -1,
+        )
+        label_index = next(
+            (
+                position
+                for position, header in enumerate(headers)
+                if position != amount_index
+                and re.search(
+                    r"(?:类别|项目|科目|类型|category|item)",
+                    header,
+                    re.IGNORECASE,
+                )
+            ),
+            0 if amount_index != 0 else 1,
+        )
+        if amount_index < 0 or label_index >= len(headers):
+            index += 1
+            continue
+
+        table_unit = _currency_unit(line)
+        row_index = index + 1
+        while row_index < len(lines) and "|" in lines[row_index]:
+            raw_row = lines[row_index].strip()
+            cells = _markdown_cells(raw_row)
+            row_index += 1
+            if not cells or all(re.fullmatch(r":?-{2,}:?", cell) for cell in cells):
+                continue
+            if max(amount_index, label_index) >= len(cells):
+                continue
+            label = cells[label_index].strip()
+            amount_cell = cells[amount_index].strip()
+            amount_match = re.fullmatch(
+                rf"\s*(?:{_CURRENCY_PREFIX}\s*)?"
+                rf"(?P<value>{_NUMBER_TOKEN})"
+                rf"(?:\s*{_CURRENCY_SUFFIX})?\s*",
+                amount_cell,
+                re.IGNORECASE,
+            )
+            if not label or amount_match is None:
+                continue
+            value = _parse_number_text(amount_match.group("value"))
+            unit = _currency_unit(amount_cell) or table_unit
+            if re.fullmatch(
+                r"(?:总计|合计|总额|总费用|total(?:\s+cost)?)",
+                label,
+                re.IGNORECASE,
+            ):
+                scope = "estimate.budget_total"
+                raw_slot_text = "budget_total"
+                modality = "estimate"
+            else:
+                scope = f"allocation.budget.{_normalize_key(label)}"
+                raw_slot_text = f"{label}_budget"
+                modality = "allocation"
+            claims.append(
+                _claim(
+                    subject,
+                    raw_slot_text,
+                    "slot.project.requirement",
+                    scope,
+                    value,
+                    "number",
+                    unit,
+                    raw_row,
+                    modality,
+                    "positive",
+                    confidence,
+                    "asserted",
+                    source_pointer,
+                )
+            )
+        index = max(index + 1, row_index)
+    return claims
+
+
+def _markdown_cells(line: str) -> list[str]:
+    stripped = str(line or "").strip().strip("|")
+    return [cell.strip() for cell in stripped.split("|")] if stripped else []
+
+
 def _extract_budget_amount(sentence: str) -> tuple[str, str] | None:
-    label = re.search(r"(?:预算|budget)", sentence, re.IGNORECASE)
+    label = re.search(
+        r"(?:预算|总费用|总金额|合计|budget|total\s+cost)",
+        sentence,
+        re.IGNORECASE,
+    )
     if label is None:
         return None
     tail = sentence[label.end() : label.end() + 120]
@@ -655,7 +832,11 @@ def _bounded_float(value: Any, default: float) -> float:
 
 
 def _normalize_key(text: str) -> str:
-    normalized = re.sub(r"[^a-z0-9_.]+", "_", text.lower()).strip("_")
+    normalized = re.sub(
+        r"[^\w\u3400-\u4dbf\u4e00-\u9fff.]+",
+        "_",
+        text.casefold(),
+    ).strip("_")
     if normalized:
         return normalized
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]

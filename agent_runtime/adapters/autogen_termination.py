@@ -117,15 +117,16 @@ class ReviewerFinalTextTermination(
                 message.content
             ):
                 continue
+            current_request, prior_contexts = self._current_request_context()
             assessment = assess_final_delivery(
-                request="",
+                request=current_request,
                 content=message.content,
                 source=message.source,
                 expected_source=self._source,
                 marker=self._marker,
                 require_marker=marker_present,
                 minimum_body_chars=0 if marker_present else 80,
-                grounding_contexts=self._grounding_contexts,
+                grounding_contexts=prior_contexts,
             )
             self._last_assessment = assessment
             if assessment.valid or not self._semantic_guard:
@@ -149,11 +150,11 @@ class ReviewerFinalTextTermination(
             ):
                 candidate_source, candidate_content = self._latest_candidate
                 candidate_assessment = assess_final_delivery(
-                    request="",
+                    request=current_request,
                     content=candidate_content,
                     source=candidate_source,
                     minimum_body_chars=0,
-                    grounding_contexts=self._grounding_contexts,
+                    grounding_contexts=prior_contexts,
                 )
                 if candidate_assessment.valid:
                     self._last_resolved_artifact = ResolvedFinalArtifact(
@@ -186,6 +187,14 @@ class ReviewerFinalTextTermination(
             source="ReviewerFinalTextTermination",
         )
 
+    def _current_request_context(self) -> tuple[str, tuple[str, ...]]:
+        if not self._grounding_contexts:
+            return "", ()
+        return (
+            self._grounding_contexts[-1],
+            tuple(self._grounding_contexts[:-1]),
+        )
+
     def _to_config(self) -> ReviewerFinalTextTerminationConfig:
         return ReviewerFinalTextTerminationConfig(
             marker=self._marker,
@@ -212,6 +221,11 @@ def resolve_final_artifact(
     reviewer_source: str = "reviewer",
     grounding_contexts: Sequence[str] = (),
 ) -> ResolvedFinalArtifact | None:
+    contexts = tuple(
+        str(item).strip() for item in grounding_contexts if str(item).strip()
+    )
+    current_request = contexts[-1] if contexts else ""
+    prior_contexts = contexts[:-1]
     latest_candidate: tuple[str, str] | None = None
     for message in messages:
         if not isinstance(message, TextMessage):
@@ -226,14 +240,14 @@ def resolve_final_artifact(
         if not marker_present and not has_explicit_delivery_boundary(content):
             continue
         assessment = assess_final_delivery(
-            request="",
+            request=current_request,
             content=content,
             source=message.source,
             expected_source=reviewer_source,
             marker=marker,
             require_marker=marker_present,
             minimum_body_chars=0 if marker_present else 80,
-            grounding_contexts=grounding_contexts,
+            grounding_contexts=prior_contexts,
         )
         if assessment.valid:
             return ResolvedFinalArtifact(
@@ -248,11 +262,11 @@ def resolve_final_artifact(
         if assessment.approved_prior_artifact and latest_candidate is not None:
             candidate_source, candidate_content = latest_candidate
             candidate_assessment = assess_final_delivery(
-                request="",
+                request=current_request,
                 content=candidate_content,
                 source=candidate_source,
                 minimum_body_chars=0,
-                grounding_contexts=grounding_contexts,
+                grounding_contexts=prior_contexts,
             )
             if candidate_assessment.valid:
                 return ResolvedFinalArtifact(

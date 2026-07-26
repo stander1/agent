@@ -301,7 +301,7 @@ def _budget_claims(text: str) -> list[dict[str, Any]]:
     return [
         claim
         for claim in extract_claim_cards(text, subject="project:demo")
-        if claim["scope"] == "constraint.budget"
+        if "budget" in str(claim["scope"])
     ]
 
 

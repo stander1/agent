@@ -64,6 +64,52 @@ class ReviewerFinalTextTerminationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
         self.assertFalse(self.condition.terminated)
 
+    async def test_latest_user_task_drives_final_output_fidelity(self) -> None:
+        await self.condition(
+            [
+                TextMessage(
+                    content=(
+                        "请比较全部三个候选并给出最终选择：\n"
+                        "1. Alpha Ridge\n2. Beta Harbor\n3. Gamma Valley"
+                    ),
+                    source="user",
+                )
+            ]
+        )
+
+        stale = await self.condition(
+            [
+                TextMessage(
+                    content=(
+                        "## 最终可交付方案\n"
+                        "已整理需求，建议后续再收集候选项。\n"
+                        f"{MARKER}"
+                    ),
+                    source="reviewer",
+                )
+            ]
+        )
+        self.assertIsNone(stale)
+        self.assertIn(
+            "current_task_requirements_missing",
+            self.condition.last_assessment.reasons,
+        )
+
+        corrected = await self.condition(
+            [
+                TextMessage(
+                    content=(
+                        "## 最终可交付方案\n"
+                        "Alpha Ridge 距离最远，Beta Harbor 成本最高，"
+                        "Gamma Valley 综合最优，因此推荐 Gamma Valley。\n"
+                        f"{MARKER}"
+                    ),
+                    source="reviewer",
+                )
+            ]
+        )
+        self.assertIsNotNone(corrected)
+
     async def test_ignores_review_feedback_that_only_mentions_marker(self) -> None:
         result = await self.condition(
             [

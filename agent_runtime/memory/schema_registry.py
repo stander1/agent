@@ -126,5 +126,13 @@ class SchemaRegistryLite:
 
     @classmethod
     def normalize_scope(cls, text: str) -> str:
-        normalized = cls.normalize(text)
+        normalized = re.sub(
+            r"[^\w\u3400-\u4dbf\u4e00-\u9fff.]+",
+            "_",
+            str(text or "").casefold(),
+        ).strip("_")
+        aliases = {
+            "constraint.budget": "constraint.budget_upper_bound",
+        }
+        normalized = aliases.get(normalized, normalized)
         return normalized or "general"

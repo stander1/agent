@@ -137,7 +137,7 @@ class RealMemoryFaultInjectionExperimentTest(unittest.TestCase):
             "structured_unrelated_same_number": (
                 "service.capacity=50; ticket_count=20"
             ),
-            "legacy_unstructured_historical": "AGENTLITE_MEMORY_CONFLICT v1",
+            "legacy_unstructured_historical": "Runtime safety hold",
         }
         native_rows: list[dict[str, object]] = []
         managed_rows: list[dict[str, object]] = []
