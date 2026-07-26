@@ -4872,3 +4872,38 @@ v5.14f 不增加生产运行时机制，而是把 v5.14e 已通过的成本、�
 
 详细说明：
 `docs/experiments/v5.14f-formal-scale-acceptance.md`。
+
+## 70. v5.14g：动态审查冲突治理与数值归因修复
+
+v5.14g 根据 v5.14f 正式归档修复两个通用缺陷：人数等计数被误识别为预算金额，
+以及具备审查能力的 Agent 已判定 active 事实违反硬约束后，该事实仍继续污染
+后续任务。该阶段不修改 A/B 任务、领域 Agent 提示词、轮次或输出长度。
+
+实现映射：
+
+- `agent_runtime/memory/claim_extractor.py`：金额单位优先、非货币计数单位排除，
+  修复“两人总计 3000 元”被抽取成预算 `2` 的问题；
+- `agent_runtime/reliability/review_conflict_guard.py`：依据动态能力画像和语义动作
+  判定审查权限，识别明确阻断结论，并只定位审查文本涉及的 active 事实；
+- `agent_runtime/memory/memory_store.py`：状态迁移后同步刷新 MemoryView，
+  deprecated/superseded Claim 不再作为 active 事实进入 Prompt View；
+- `agent_runtime/core/kernel.py`：允许 State-to-Memory Bridge 接收显式 CCF v2
+  Claim，阻断结论仍经过候选池和规则准入；
+- `agent_runtime/drivers/autogen.py`：在 Agent 输出落盘后执行定向软废弃、补偿事件
+  和阻断候选记忆提升，并写入完整治理 trace；
+- `experiments/v5.14g-review-conflict-governance/`：提供不调用 Provider 的 openEuler
+  机制验收和不可变证据打包。
+
+通用边界：
+
+```text
+生产运行时不识别 Question A/B 或旅游地点；
+审查权限不依赖 Reviewer 固定名称；
+只有可由阻断语句定位的 active 事实会被软废弃；
+无法定位时保留审计结论，但不批量废弃其他记忆；
+阻断结论必须经过候选池、规则准入和 MemoryView；
+机制验收通过后仍需重新运行正式 Provider 实验验证真实质量。
+```
+
+详细说明：
+`docs/experiments/v5.14g-review-conflict-governance.md`。

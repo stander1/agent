@@ -747,7 +747,13 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                 )
 
                 rewritten = rewritten_args[0][0]["content"]
-                self.assertIn(latest_writer, rewritten)
+                for expected_fact in (
+                    "最新完整草案：总预算为2800元。",
+                    "第一天安排自然步道和本地餐饮",
+                    "第二天安排轻徒步并避开拥挤景点",
+                    "第三天返程。",
+                ):
+                    self.assertIn(expected_fact, rewritten)
                 self.assertNotIn(SHARED_MEMORY_MARKER, rewritten)
                 self.assertNotIn("mem_duplicate", rewritten)
                 events = self._events(manager.output_dir / "trace.jsonl")

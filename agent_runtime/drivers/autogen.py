@@ -55,6 +55,10 @@ from agent_runtime.reliability.final_delivery_guard import assess_final_delivery
 from agent_runtime.reliability.memory_adoption_guard import (
     guard_memory_adoption_output,
 )
+from agent_runtime.reliability.review_conflict_guard import (
+    build_review_blocker_claim,
+    evaluate_review_conflict,
+)
 from agent_runtime.state.state_pool import StatePoolLite, StateRef
 
 if TYPE_CHECKING:
@@ -85,7 +89,7 @@ MEMORY_SCOPE_ENV = "AGENTLITE_MEMORY_SCOPE"
 FINAL_DELIVERY_MARKER_ENV = "AGENTLITE_AUTOGEN_FINAL_MARKER"
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
 CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
-DRIVER_PHASE = "v5.13z"
+DRIVER_PHASE = "v5.14g"
 _AUTOGEN_REPEATED_INSTANCE_ID_RE = re.compile(
     r"^(?P<logical>.+)_(?P<run>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
     r"[0-9a-f]{4}-[0-9a-f]{12})_(?P=run)$",
@@ -924,6 +928,135 @@ class AutoGenHookManager:
             },
         )
 
+    def _apply_review_conflict_governance(
+        self,
+        *,
+        context: HookCallContext,
+        output_text: str,
+        state_refs: list[StateRef],
+        injected_records: list[_InjectedMemoryRecord],
+    ) -> Any | None:
+        if context.target_kind != "agentchat_agent":
+            return None
+        if context.method_name not in {"on_messages", "on_messages_stream"}:
+            return None
+
+        profile = self.kernel.capability_profiles.get(
+            context.agent.agent_id
+        )
+        capabilities = tuple(
+            dict.fromkeys(
+                [
+                    *context.agent.capabilities,
+                    *(
+                        tuple(getattr(profile, "capabilities", ()) or ())
+                        if profile is not None
+                        else ()
+                    ),
+                ]
+            )
+        )
+        decision = evaluate_review_conflict(
+            output_text=output_text,
+            semantic_action=context.semantic_action,
+            capabilities=capabilities,
+            memory_rows=[
+                {
+                    "memory_id": record.ref.memory_id,
+                    "revision_guard": record.revision_guard,
+                }
+                for record in injected_records
+            ],
+        )
+        if not decision.authoritative:
+            return None
+
+        deprecation_event_ids: list[str] = []
+        deprecated_memory_ids: list[str] = []
+        if decision.blocking:
+            for memory_id in decision.targeted_memory_ids:
+                resolved_ref = self.kernel.memory_store.resolve_ref(memory_id)
+                if resolved_ref is None or resolved_ref.status not in {
+                    "active",
+                    "provisional_active",
+                }:
+                    continue
+                event = self._safe_kernel_call(
+                    "autogen_review_soft_deprecate",
+                    lambda ref=resolved_ref: (
+                        self.kernel.memory_store.soft_deprecate(
+                            ref,
+                            reason=(
+                                f"authoritative_review_blocked;"
+                                f"task={context.task.task_id};"
+                                f"call={context.call_id};"
+                                f"summary={decision.blocking_summary[:240]}"
+                            ),
+                            created_by=context.agent.agent_id,
+                        )
+                    ),
+                )
+                event_id = str(getattr(event, "event_id", "") or "")
+                if event_id:
+                    deprecation_event_ids.append(event_id)
+                    deprecated_memory_ids.append(memory_id)
+
+        admission_report = None
+        if decision.blocking and state_refs:
+            source_pointer = ",".join(ref.state_id for ref in state_refs)
+            subject = f"collaboration:{context.task.group_id}"
+            claim_card = build_review_blocker_claim(
+                decision,
+                subject=subject,
+                source_pointer=source_pointer,
+            )
+            admission_report = self._safe_kernel_call(
+                "autogen_promote_review_blocker",
+                lambda: self.kernel.promote_memory_candidate(
+                    task=context.task,
+                    round_id=1,
+                    mode="runtime_lite",
+                    agent=context.agent,
+                    summary=decision.blocking_summary,
+                    state_refs=state_refs,
+                    slot_hint="slot.system.failure_pattern",
+                    task_topic=(
+                        f"autogen.{_safe_identifier(context.task.group_id)}."
+                        "slot.system.failure_pattern"
+                    ),
+                    candidate_kind="autogen_review_blocker",
+                    confidence=0.94,
+                    importance_hint=0.90,
+                    coverage_score=0.76,
+                    claim_cards=[claim_card],
+                ),
+            )
+
+        self.trace.write(
+            "autogen_review_conflict_governance",
+            {
+                "call_id": context.call_id,
+                "task_id": context.task.task_id,
+                "group_id": context.task.group_id,
+                "agent_id": context.agent.agent_id,
+                "semantic_action": context.semantic_action,
+                "capabilities": list(capabilities),
+                **decision.to_dict(),
+                "deprecated_memory_ids": deprecated_memory_ids,
+                "deprecation_event_ids": deprecation_event_ids,
+                "blocker_admission_status": getattr(
+                    admission_report,
+                    "admission_status",
+                    "",
+                ),
+                "blocker_memory_refs": [
+                    _memory_ref_payload(ref)
+                    for ref in _admission_memory_refs(admission_report)
+                ],
+            },
+        )
+        return admission_report
+
     def _promote_autogen_output_to_memory(
         self,
         *,
@@ -1350,6 +1483,10 @@ class AutoGenHookManager:
     def record_call_end(self, context: HookCallContext, result: Any) -> None:
         decoded_messages = self.codec.decode_many(result)
         text = self.codec.render_text(decoded_messages) or _extract_text(result)
+        with self._memory_lock:
+            injected_records = list(
+                self._memory_injections_by_call.get(context.call_id, ())
+            )
         adoption_audit_text = "\n".join(
             dict.fromkeys(context.memory_adoption_audit_texts)
         )
@@ -1402,12 +1539,19 @@ class AutoGenHookManager:
                 state_ref_payload.append(ref_payload)
         admission_report = None
         if not guard_blocked:
-            admission_report = self._promote_autogen_output_to_memory(
+            admission_report = self._apply_review_conflict_governance(
                 context=context,
-                decoded_messages=decoded_messages,
-                text=text,
+                output_text=text,
                 state_refs=list(state_refs),
+                injected_records=injected_records,
             )
+            if admission_report is None:
+                admission_report = self._promote_autogen_output_to_memory(
+                    context=context,
+                    decoded_messages=decoded_messages,
+                    text=text,
+                    state_refs=list(state_refs),
+                )
         admitted_refs = _admission_memory_refs(admission_report)
         admitted_memory_refs = [
             _memory_ref_payload(ref) for ref in admitted_refs

@@ -40,6 +40,12 @@ _REVISION_RE = re.compile(
     r"change(?:d)?\s+to|revis(?:e|ed)\s+to|increase(?:d)?\s+to|replace(?:d)?)",
     re.IGNORECASE,
 )
+_NUMBER_TOKEN = r"(?:\d+(?:\.\d+)?|[零〇一二两三四五六七八九十百千万]+)"
+_CURRENCY_PREFIX = r"(?:人民币|CNY|RMB|USD|美元|¥|￥|\$)"
+_CURRENCY_SUFFIX = r"(?:元|人民币|CNY|RMB|USD|美元)"
+_NON_MONETARY_COUNT_UNIT = (
+    r"(?:人|位|名|天|晚|次|个|组|张|辆|间|份|项|轮|小时|分钟|岁)"
+)
 
 
 def normalize_claim_cards(
@@ -347,14 +353,9 @@ def _extract_known_claims(
             )
         )
 
-    budget_match = re.search(
-        r"(?:预算|budget)(?:\s*(?:为|只有|调整为|=|:|：))?\s*[¥￥$]?\s*"
-        r"(\d+(?:\.\d+)?|[零〇一二两三四五六七八九十百千万]+)",
-        sentence,
-        re.IGNORECASE,
-    )
-    if budget_match:
-        budget_value = _parse_number_text(budget_match.group(1))
+    budget_amount = _extract_budget_amount(sentence)
+    if budget_amount is not None:
+        budget_value, budget_unit = budget_amount
         rows.append(
             _claim(
                 subject,
@@ -363,7 +364,7 @@ def _extract_known_claims(
                 "constraint.budget",
                 budget_value,
                 "number",
-                _currency_unit(sentence),
+                budget_unit,
                 sentence,
                 "requirement",
                 polarity,
@@ -551,6 +552,48 @@ def _currency_unit(text: str) -> str:
     if "$" in text or "USD" in text.upper():
         return "USD"
     return ""
+
+
+def _extract_budget_amount(sentence: str) -> tuple[str, str] | None:
+    label = re.search(r"(?:预算|budget)", sentence, re.IGNORECASE)
+    if label is None:
+        return None
+    tail = sentence[label.end() : label.end() + 120]
+
+    currency_patterns = (
+        re.compile(
+            rf"(?P<prefix>{_CURRENCY_PREFIX})\s*"
+            rf"(?P<value>{_NUMBER_TOKEN})(?:\s*{_CURRENCY_SUFFIX})?",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            rf"(?P<value>{_NUMBER_TOKEN})\s*(?P<suffix>{_CURRENCY_SUFFIX})",
+            re.IGNORECASE,
+        ),
+    )
+    currency_matches = [
+        match
+        for pattern in currency_patterns
+        if (match := pattern.search(tail)) is not None
+    ]
+    if currency_matches:
+        match = min(currency_matches, key=lambda item: item.start())
+        matched_text = match.group(0)
+        return _parse_number_text(match.group("value")), _currency_unit(
+            matched_text
+        )
+
+    fallback = re.match(
+        rf"\s*(?:(?:为|只有|调整为|上限(?:为)?|不超过|=|:|：|≤|<=)\s*)*"
+        rf"(?P<value>{_NUMBER_TOKEN})(?!\s*{_NON_MONETARY_COUNT_UNIT})",
+        tail,
+        re.IGNORECASE,
+    )
+    if fallback is None:
+        return None
+    return _parse_number_text(fallback.group("value")), _currency_unit(
+        fallback.group(0)
+    )
 
 
 def _infer_value_type(value: str) -> str:

@@ -1194,6 +1194,22 @@ class MemoryStoreLite:
         claim = self._claims.get(memory.claim_id)
         if claim is not None:
             claim.status = new_status
+        view = self._views.get(memory.memory_view_id)
+        if view is not None and claim is not None:
+            if new_status in PROMPT_VIEW_MEMORY_STATUSES:
+                if claim.claim_id not in view.active_claim_ids:
+                    view.active_claim_ids.append(claim.claim_id)
+                if claim.claim_id in view.historical_claim_ids:
+                    view.historical_claim_ids.remove(claim.claim_id)
+            else:
+                if claim.claim_id in view.active_claim_ids:
+                    view.active_claim_ids.remove(claim.claim_id)
+                if (
+                    claim.claim_id not in view.historical_claim_ids
+                    and claim.claim_id not in view.conflicting_claim_ids
+                ):
+                    view.historical_claim_ids.append(claim.claim_id)
+            self._refresh_memory_view(view)
         if new_status in BLOCKED_MEMORY_STATUSES:
             self.reference_manager.tombstone_memory(
                 memory.memory_id, reason=f"memory_status:{new_status}"
@@ -1256,7 +1272,7 @@ class MemoryStoreLite:
         *,
         reason: str,
         replacement_ref: MemoryRef | None = None,
-        created_by: str = "ReviewerAgent",
+        created_by: str = "ReviewCapability",
     ) -> CompensatingEvent:
         memory = self._memories[memory_ref.memory_id]
         self.transition_memory_status(memory_ref, "deprecated")
@@ -1374,6 +1390,7 @@ class MemoryStoreLite:
             self._claims[claim_id]
             for claim_id in view.active_claim_ids
             if claim_id in self._claims
+            and self._claims[claim_id].status in PROMPT_VIEW_MEMORY_STATUSES
         ]
         historical_claims = [
             self._claims[claim_id]

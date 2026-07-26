@@ -737,6 +737,7 @@ class CollaborationKernel:
         confidence: float,
         importance_hint: float,
         coverage_score: float,
+        claim_cards: list[dict[str, Any]] | None = None,
     ) -> MemoryAdmissionReport:
         """Pass a framework output through the canonical rules-first admission path."""
         self._ensure_open()
@@ -764,7 +765,10 @@ class CollaborationKernel:
             source_state_ids=source_state_ids,
             evidence_refs=evidence_refs,
             reuse_intent=f"供 {task.group_id} 后续 AutoGen 任务复用",
-            control={"memory_card": memory_card},
+            control={
+                "memory_card": memory_card,
+                "claim_cards": list(claim_cards or []),
+            },
             degraded=False,
         )
         self.metrics.record_memory_admission(
