@@ -1041,6 +1041,7 @@ class AutoGenHookManager:
                 "agent_id": context.agent.agent_id,
                 "semantic_action": context.semantic_action,
                 "capabilities": list(capabilities),
+                "state_ref_count": len(state_refs),
                 **decision.to_dict(),
                 "deprecated_memory_ids": deprecated_memory_ids,
                 "deprecation_event_ids": deprecation_event_ids,

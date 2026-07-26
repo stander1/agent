@@ -85,6 +85,7 @@ def build_autogen_session_report(request: SessionReportRequest) -> dict[str, Any
     summary = snapshot.get("summary", {})
     rows = _metric_rows(token_summary)
     state_summary = _state_summary(snapshot)
+    review_governance_summary = _review_governance_summary(token_summary)
     native = _int(token_summary.get("native_baseline_tokens"))
     runtime = _int(token_summary.get("end_to_end_collaboration_tokens"))
     savings = native - runtime if native else 0
@@ -121,6 +122,7 @@ def build_autogen_session_report(request: SessionReportRequest) -> dict[str, Any
             "agentlite_token_savings_ratio": round(ratio, 6),
         },
         "state_summary": state_summary,
+        "review_governance_summary": review_governance_summary,
         "metric_rows": rows,
         "notes": [
             "actual_* 仅汇总真实改写审计事件；改写回退时按原生传输成本计入，不能记作节省。",
@@ -172,6 +174,7 @@ def build_autogen_run_report(request: RunReportRequest) -> dict[str, Any]:
     )
     summary = snapshot.get("summary", {})
     state_summary = _state_summary(snapshot)
+    review_governance_summary = _review_governance_summary(token_summary)
     return {
         "session_id": resolved_session_id,
         "framework_run_id": run_id,
@@ -194,6 +197,7 @@ def build_autogen_run_report(request: RunReportRequest) -> dict[str, Any]:
         ),
         "token_summary": token_summary,
         "state_summary": state_summary,
+        "review_governance_summary": review_governance_summary,
         "metric_rows": _metric_rows(token_summary),
         "notes": [
             "本报告只汇总 framework_run_id 对应的 Trace 事件，不包含同一 Studio 进程中的其他网页 Run。",
@@ -557,6 +561,7 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
     active_memory_value_selection_count = _int(
         token_summary.get("active_memory_value_selection_count")
     )
+    review_governance = _review_governance_summary(token_summary)
     shadow_savings = shadow_native - shadow_candidate if shadow_native else 0
     shadow_ratio = shadow_savings / shadow_native if shadow_native > 0 else 0.0
     savings = native - runtime if native else _int(token_summary.get("token_savings"))
@@ -918,6 +923,66 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
             active_memory_value_selection_count,
             "MemoryView 最终选出的当前有效事实值数量",
         ),
+        _row(
+            "agentlite_review_governance_event_count",
+            review_governance["event_count"],
+            "Authoritative semantic review decisions observed in the runtime trace.",
+        ),
+        _row(
+            "agentlite_review_governance_blocking_count",
+            review_governance["blocking_count"],
+            "Authoritative review decisions that explicitly blocked an active result.",
+        ),
+        _row(
+            "agentlite_review_governance_positive_count",
+            review_governance["positive_count"],
+            "Authoritative positive review decisions with no lifecycle side effect.",
+        ),
+        _row(
+            "agentlite_review_governance_targeted_memory_count",
+            review_governance["targeted_memory_count"],
+            "Active memories explicitly matched by blocking review evidence.",
+        ),
+        _row(
+            "agentlite_review_governance_deprecated_memory_count",
+            review_governance["deprecated_memory_count"],
+            "Matched active memories soft-deprecated after blocking review.",
+        ),
+        _row(
+            "agentlite_review_governance_blocker_admitted_count",
+            review_governance["blocker_admitted_count"],
+            "Blocking review conclusions admitted through the normal candidate pipeline.",
+        ),
+        _row(
+            "agentlite_review_governance_targeted_without_deprecation_count",
+            review_governance["targeted_without_deprecation_count"],
+            "Matched memories that remained active after a blocking review.",
+        ),
+        _row(
+            "agentlite_review_governance_unexpected_deprecation_count",
+            review_governance["unexpected_deprecation_count"],
+            "Deprecated memories that were not explicitly targeted by review evidence.",
+        ),
+        _row(
+            "agentlite_review_governance_blocking_without_admitted_blocker_count",
+            review_governance["blocking_without_admitted_blocker_count"],
+            "Blocking reviews whose blocker conclusion did not enter admitted memory.",
+        ),
+        _row(
+            "agentlite_review_governance_nonblocking_side_effect_count",
+            review_governance["nonblocking_side_effect_count"],
+            "Positive reviews that unexpectedly changed memory lifecycle state.",
+        ),
+        _row(
+            "agentlite_review_governance_failure_event_count",
+            review_governance["failure_event_count"],
+            "Review governance events with incomplete or over-broad lifecycle effects.",
+        ),
+        _row(
+            "agentlite_review_governance_safe_event_count",
+            review_governance["safe_event_count"],
+            "Review governance events whose authority and lifecycle effects were consistent.",
+        ),
         _row("agentlite_control_llm_tokens", control, "控制模块 LLM 成本"),
         _row("agentlite_retry_tokens", retry, "重试带来的额外成本"),
         _row("actual_agentlite_transport_tokens", runtime, "真实应用或回退后的 AgentLite 传输成本"),
@@ -928,6 +993,63 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
         _row("shadow_potential_token_savings", shadow_savings, "影子方案的理论节省量"),
         _row("shadow_potential_token_savings_ratio", round(shadow_ratio, 6), "影子方案理论节省比例，不代表真实收益"),
     ]
+
+
+def _review_governance_summary(
+    token_summary: dict[str, Any],
+) -> dict[str, int]:
+    return {
+        "event_count": _int(
+            token_summary.get("review_governance_event_count")
+        ),
+        "authoritative_count": _int(
+            token_summary.get("review_governance_authoritative_count")
+        ),
+        "blocking_count": _int(
+            token_summary.get("review_governance_blocking_count")
+        ),
+        "positive_count": _int(
+            token_summary.get("review_governance_positive_count")
+        ),
+        "targeted_memory_count": _int(
+            token_summary.get("review_governance_targeted_memory_count")
+        ),
+        "deprecated_memory_count": _int(
+            token_summary.get("review_governance_deprecated_memory_count")
+        ),
+        "blocker_admitted_count": _int(
+            token_summary.get("review_governance_blocker_admitted_count")
+        ),
+        "blocker_memory_count": _int(
+            token_summary.get("review_governance_blocker_memory_count")
+        ),
+        "targeted_without_deprecation_count": _int(
+            token_summary.get(
+                "review_governance_targeted_without_deprecation_count"
+            )
+        ),
+        "unexpected_deprecation_count": _int(
+            token_summary.get(
+                "review_governance_unexpected_deprecation_count"
+            )
+        ),
+        "blocking_without_admitted_blocker_count": _int(
+            token_summary.get(
+                "review_governance_blocking_without_admitted_blocker_count"
+            )
+        ),
+        "nonblocking_side_effect_count": _int(
+            token_summary.get(
+                "review_governance_nonblocking_side_effect_count"
+            )
+        ),
+        "failure_event_count": _int(
+            token_summary.get("review_governance_failure_event_count")
+        ),
+        "safe_event_count": _int(
+            token_summary.get("review_governance_safe_event_count")
+        ),
+    }
 
 
 def _state_summary(snapshot: dict[str, Any]) -> dict[str, Any]:

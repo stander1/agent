@@ -694,6 +694,20 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "memory_conflict_resolved_count": 0,
         "memory_unresolved_conflict_count": 0,
         "active_memory_value_selection_count": 0,
+        "review_governance_event_count": 0,
+        "review_governance_authoritative_count": 0,
+        "review_governance_blocking_count": 0,
+        "review_governance_positive_count": 0,
+        "review_governance_targeted_memory_count": 0,
+        "review_governance_deprecated_memory_count": 0,
+        "review_governance_blocker_admitted_count": 0,
+        "review_governance_blocker_memory_count": 0,
+        "review_governance_targeted_without_deprecation_count": 0,
+        "review_governance_unexpected_deprecation_count": 0,
+        "review_governance_blocking_without_admitted_blocker_count": 0,
+        "review_governance_nonblocking_side_effect_count": 0,
+        "review_governance_failure_event_count": 0,
+        "review_governance_safe_event_count": 0,
         "shadow_native_tokens": 0,
         "shadow_candidate_tokens": 0,
         "shadow_potential_savings": 0,
@@ -883,6 +897,83 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
             )
             breakdown["memory_evidence_reference_merge_count"] += _int(
                 payload.get("evidence_reference_merge_count")
+            )
+            continue
+        if event_type == "autogen_review_conflict_governance":
+            breakdown["review_governance_event_count"] += 1
+            authoritative = bool(payload.get("authoritative"))
+            blocking = bool(payload.get("blocking"))
+            targeted = {
+                str(value)
+                for value in (payload.get("targeted_memory_ids") or [])
+                if str(value)
+            }
+            deprecated = {
+                str(value)
+                for value in (payload.get("deprecated_memory_ids") or [])
+                if str(value)
+            }
+            blocker_refs = [
+                value
+                for value in (payload.get("blocker_memory_refs") or [])
+                if isinstance(value, dict)
+            ]
+            blocker_admitted = (
+                str(payload.get("blocker_admission_status") or "")
+                == "admitted"
+            )
+            targeted_without_deprecation = targeted - deprecated
+            unexpected_deprecation = deprecated - targeted
+            blocking_without_blocker = blocking and not blocker_admitted
+            nonblocking_side_effect = not blocking and bool(
+                deprecated
+                or blocker_refs
+                or payload.get("blocker_admission_status")
+            )
+            governance_failed = (
+                not authoritative
+                or bool(targeted_without_deprecation)
+                or bool(unexpected_deprecation)
+                or blocking_without_blocker
+                or nonblocking_side_effect
+            )
+
+            breakdown["review_governance_authoritative_count"] += int(
+                authoritative
+            )
+            breakdown["review_governance_blocking_count"] += int(blocking)
+            breakdown["review_governance_positive_count"] += int(
+                authoritative and not blocking
+            )
+            breakdown["review_governance_targeted_memory_count"] += len(
+                targeted
+            )
+            breakdown["review_governance_deprecated_memory_count"] += len(
+                deprecated
+            )
+            breakdown["review_governance_blocker_admitted_count"] += int(
+                blocker_admitted
+            )
+            breakdown["review_governance_blocker_memory_count"] += len(
+                blocker_refs
+            )
+            breakdown[
+                "review_governance_targeted_without_deprecation_count"
+            ] += len(targeted_without_deprecation)
+            breakdown[
+                "review_governance_unexpected_deprecation_count"
+            ] += len(unexpected_deprecation)
+            breakdown[
+                "review_governance_blocking_without_admitted_blocker_count"
+            ] += int(blocking_without_blocker)
+            breakdown[
+                "review_governance_nonblocking_side_effect_count"
+            ] += int(nonblocking_side_effect)
+            breakdown["review_governance_failure_event_count"] += int(
+                governance_failed
+            )
+            breakdown["review_governance_safe_event_count"] += int(
+                not governance_failed
             )
             continue
         if event_type == "autogen_model_client_usage":

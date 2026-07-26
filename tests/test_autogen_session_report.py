@@ -95,6 +95,79 @@ class AutoGenSessionReportTest(unittest.TestCase):
         self.assertEqual(summary["memory_evidence_reference_merge_count"], 2)
         self.assertEqual(summary["model_visible_protocol_marker_count"], 0)
 
+    def test_review_governance_trace_is_aggregated_with_safety_failures(self) -> None:
+        summary = _autogen_token_summary(
+            [
+                {
+                    "event_type": "autogen_review_conflict_governance",
+                    "payload": {
+                        "authoritative": True,
+                        "blocking": False,
+                        "targeted_memory_ids": [],
+                        "deprecated_memory_ids": [],
+                        "blocker_admission_status": "",
+                        "blocker_memory_refs": [],
+                    },
+                },
+                {
+                    "event_type": "autogen_review_conflict_governance",
+                    "payload": {
+                        "authoritative": True,
+                        "blocking": True,
+                        "targeted_memory_ids": ["memory_a"],
+                        "deprecated_memory_ids": ["memory_a"],
+                        "blocker_admission_status": "admitted",
+                        "blocker_memory_refs": [{"memory_id": "blocker_a"}],
+                    },
+                },
+                {
+                    "event_type": "autogen_review_conflict_governance",
+                    "payload": {
+                        "authoritative": True,
+                        "blocking": True,
+                        "targeted_memory_ids": ["memory_b"],
+                        "deprecated_memory_ids": [],
+                        "blocker_admission_status": "rejected",
+                        "blocker_memory_refs": [],
+                    },
+                },
+            ]
+        )
+
+        self.assertEqual(summary["review_governance_event_count"], 3)
+        self.assertEqual(summary["review_governance_authoritative_count"], 3)
+        self.assertEqual(summary["review_governance_blocking_count"], 2)
+        self.assertEqual(summary["review_governance_positive_count"], 1)
+        self.assertEqual(
+            summary["review_governance_targeted_memory_count"],
+            2,
+        )
+        self.assertEqual(
+            summary["review_governance_deprecated_memory_count"],
+            1,
+        )
+        self.assertEqual(
+            summary["review_governance_blocker_admitted_count"],
+            1,
+        )
+        self.assertEqual(
+            summary[
+                "review_governance_targeted_without_deprecation_count"
+            ],
+            1,
+        )
+        self.assertEqual(
+            summary[
+                "review_governance_blocking_without_admitted_blocker_count"
+            ],
+            1,
+        )
+        self.assertEqual(
+            summary["review_governance_failure_event_count"],
+            1,
+        )
+        self.assertEqual(summary["review_governance_safe_event_count"], 2)
+
     def test_mixed_memory_adoption_is_exclusive_and_reported(self) -> None:
         events = [
             {

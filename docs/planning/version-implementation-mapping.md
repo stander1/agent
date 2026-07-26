@@ -4907,3 +4907,36 @@ v5.14g 根据 v5.14f 正式归档修复两个通用缺陷：人数等计数被�
 
 详细说明：
 `docs/experiments/v5.14g-review-conflict-governance.md`。
+
+## 71. v5.14h：冻结口径正式规模回归与治理证据闭环
+
+v5.14h 不增加新的协作机制，而是把 v5.14g 已通过确定性验收的通用修复放回
+v5.14f 的真实 Provider、A1-A10/B1-B10 完整任务矩阵。任务、Agent 配置、模型、
+温度、最大轮次、成本指标、质量口径和旧阈值全部保持不变。
+
+实现映射：
+
+- `web_monitor/parser.py`：汇总动态审查权限、阻断/通过、定向记忆、软废弃、
+  阻断准入和治理失败事件；
+- `agent_runtime/eval/autogen_session_report.py`：在会话和 Run 报告中输出
+  `review_governance_summary` 与对应指标行；
+- `agent_runtime/drivers/autogen.py`：治理 Trace 补充真实 `state_ref_count`，
+  保留阻断候选准入的输入证据；
+- `experiments/v5.14h-formal-regression-acceptance/preregistration.json`：
+  复用 v5.14f 旧阈值，预先冻结新增治理门禁与 A/B 文件 SHA-256；
+- `verify_acceptance.py`：先继承 v5.14f 全部成本、质量、交付、记忆、保真和
+  卫生门禁，再校验旧阈值零漂移、冻结任务零漂移和治理链完整性；
+- `run_openeuler.sh`：直接使用 v5.14f 的两份正式任务文件，支持中断续跑并
+  打包不可变证据。
+
+公平性边界：
+
+```text
+阻断事件数量不作为强制目标，避免要求模型故意产出错误；
+每个场景必须观察到动态审查权限链路；
+一旦发生阻断，命中记忆必须全部且仅定向软废弃，阻断结论必须正常准入；
+正向审查不得产生生命周期副作用；
+成本改善仍必须同时通过 Provider Token、端到端协作 Token 和匿名质量门禁。
+```
+
+详细说明：`docs/experiments/v5.14h-formal-regression-acceptance.md`。

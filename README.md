@@ -2,10 +2,10 @@
 
 本仓库用于迭代实现一个面向多 Agent 协作的跨框架运行时工具层，目标是在多 Agent 任务中通过结构化通信、非文本状态传递和共享记忆复用降低协作开销。
 
-当前开发版本：`v5.13s dynamic capability profiles`
+当前开发版本：`v5.14h formal regression acceptance`
 
-v5.13s 真实 AutoGen/openEuler 验收步骤：
-[experiments/v5.13s-dynamic-capability-acceptance/README.md](experiments/v5.13s-dynamic-capability-acceptance/README.md)
+v5.14h 真实 AutoGen/openEuler 验收步骤：
+[experiments/v5.14h-formal-regression-acceptance/README.md](experiments/v5.14h-formal-regression-acceptance/README.md)
 
 最新发行包门禁版本：`v5.13h package release gate`
 
@@ -70,7 +70,18 @@ v5.13s 真实 AutoGen/openEuler 验收步骤：
 - [docs/experiments/v5.13q-continuity-memory-guard.md](docs/experiments/v5.13q-continuity-memory-guard.md)
 - [docs/experiments/v5.13r-minimal-sufficient-role-views.md](docs/experiments/v5.13r-minimal-sufficient-role-views.md)
 - [docs/experiments/v5.13s-dynamic-capability-profiles.md](docs/experiments/v5.13s-dynamic-capability-profiles.md)
+- [docs/experiments/v5.14g-review-conflict-governance.md](docs/experiments/v5.14g-review-conflict-governance.md)
+- [docs/experiments/v5.14h-formal-regression-acceptance.md](docs/experiments/v5.14h-formal-regression-acceptance.md)
 - [docs/release/v5.12z-final-release-notes.md](docs/release/v5.12z-final-release-notes.md)
+
+## v5.14h Current Note
+
+`v5.14h` reruns the unchanged v5.14f A1-A10/B1-B10 formal matrix after the
+generic v5.14g review-conflict fix. The runtime report now audits dynamic review
+authority, targeted memory deprecation, blocker admission, unrelated-memory
+protection, and positive-review side effects. Frozen task hashes and all legacy
+cost, quality, delivery, memory, fidelity, protocol, and routing thresholds are
+checked before the new governance gates are evaluated.
 
 ## v5.13s Current Note
 

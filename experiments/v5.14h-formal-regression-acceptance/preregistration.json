@@ -1,0 +1,99 @@
+{
+  "schema_version": "agentlite.v514h.preregistration.v1",
+  "frozen_before_provider_run": true,
+  "experiment_kind": "formal_scale_single_run",
+  "source_lineage": {
+    "mechanism_baseline": "v5.14g-review-conflict-governance",
+    "comparison_baseline": "v5.14f-formal-scale-acceptance",
+    "task_scope": "A1-A10 and B1-B10",
+    "input_policy": "reuse_exact_v514f_frozen_inputs",
+    "legacy_threshold_source_sha256": "b5aa7e3a424ea7ae48bd190eb5c2e7775caf0dea74ffc78ea310a73458ab8b00"
+  },
+  "frozen_input_sha256": {
+    "question_A_formal.json": "cd0250c73743c00d47615e9f8275fe568f7a342809926b5a380d2f829ae58986",
+    "question_B_formal.json": "7ef55fc08060b03879363c88aaed0362c0e965f69147c153d219e883db6abc38"
+  },
+  "scenarios": [
+    {
+      "scenario_id": "A-formal",
+      "directory": "A",
+      "terminal_task_id": "A10"
+    },
+    {
+      "scenario_id": "B-formal",
+      "directory": "B",
+      "terminal_task_id": "B10"
+    }
+  ],
+  "groups": ["native", "observed", "managed"],
+  "tasks_per_scenario": 10,
+  "provider": {
+    "base_url": "https://token-plan-cn.xiaomimimo.com/v1",
+    "model": "mimo-v2.5"
+  },
+  "temperature": 0,
+  "max_turns": 9,
+  "primary_cost_metrics": [
+    "provider_llm_total_tokens",
+    "end_to_end_collaboration_tokens"
+  ],
+  "diagnostic_cost_metrics": [
+    "direct_message_tokens",
+    "prompt_view_tokens",
+    "retrieved_memory_tokens",
+    "control_llm_tokens",
+    "retry_tokens"
+  ],
+  "state_evidence_metrics": [
+    "state_count",
+    "state_type_counts",
+    "payload_kind_counts",
+    "structured_non_text_count",
+    "contains_embedding_refs_count",
+    "total_size_bytes"
+  ],
+  "review_governance_metrics": [
+    "review_governance_event_count",
+    "review_governance_blocking_count",
+    "review_governance_targeted_memory_count",
+    "review_governance_deprecated_memory_count",
+    "review_governance_blocker_admitted_count",
+    "review_governance_failure_event_count"
+  ],
+  "diagnostic_requested_state_types": [
+    "retrieval_state",
+    "embedding_state",
+    "artifact_state"
+  ],
+  "quality_rule": "min(primary_blind_score, technical_blind_score)",
+  "judge_usage_in_runtime_cost": false,
+  "thresholds": {
+    "managed_provider_token_reduction_min": 0.15,
+    "managed_transport_token_reduction_min": 0.15,
+    "managed_quality_noninferiority_margin": 0.3,
+    "managed_delivery_complete_delta_min": 0,
+    "rewrite_error_fallback_count_max": 0,
+    "managed_terminal_score_min": 7.0,
+    "managed_terminal_score_noninferiority_margin": 1.0,
+    "managed_terminal_blocking_finding_count_max": 0,
+    "memory_hit_count_min": 1,
+    "memory_injected_count_min": 1,
+    "useful_memory_hit_count_min": 1,
+    "wrong_memory_hit_count_max": 0,
+    "current_task_fidelity_failure_count_max": 0,
+    "model_visible_protocol_marker_count_max": 0,
+    "routing_metadata_state_count_max": 0,
+    "review_governance_event_count_min_per_scenario": 1,
+    "review_governance_failure_event_count_max": 0,
+    "review_governance_targeted_without_deprecation_count_max": 0,
+    "review_governance_unexpected_deprecation_count_max": 0,
+    "review_governance_blocking_without_admitted_blocker_count_max": 0,
+    "review_governance_nonblocking_side_effect_count_max": 0
+  },
+  "interpretation": {
+    "formal_scale_passed": "The unchanged v5.14f cost, quality, delivery, memory and hygiene gates all pass.",
+    "review_governance_passed": "Dynamic review authority is observed and every observed lifecycle side effect is targeted, complete and admitted through the normal memory pipeline.",
+    "blocking_event_boundary": "A blocking event is diagnostic rather than mandatory because a correct provider output may require no rejection.",
+    "single_run_boundary": "This is one formal regression run and does not estimate variance or confidence intervals."
+  }
+}
