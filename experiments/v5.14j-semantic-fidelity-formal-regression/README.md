@@ -41,3 +41,14 @@ export AGENTLITE_V514J_EXP_ID="替换为原实验编号"
 export AGENTLITE_V514J_RESUME=1
 bash experiments/v5.14j-semantic-fidelity-formal-regression/run_openeuler.sh
 ```
+
+## 评分 JSON 中断恢复
+
+匿名综合评分和技术评分都使用逐任务检查点。评分响应依次经过：
+
+1. JSON 块提取与确定性规则修复；
+2. 只携带坏 JSON、校验错误、Schema 和匿名候选 ID 的短上下文格式修复；
+3. 仍失败时，使用相同证据和评分标准执行一次限制说明长度的完整重审。
+
+所有失败和成功尝试的评分 Token、延迟、恢复模式、响应长度与 SHA-256
+都会进入 `judge_attempts`。这些评分调用仍与运行时协作成本隔离。

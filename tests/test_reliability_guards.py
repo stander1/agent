@@ -13,6 +13,11 @@ from agent_runtime.reliability.provider_guard import (
     ProviderResponseError,
     normalize_provider_response,
 )
+from agent_runtime.reliability.structured_output_guard import (
+    aggregate_attempt_usage,
+    guard_structured_json_object,
+    render_pruned_json_retry_prompt,
+)
 
 
 class ProviderGuardTest(unittest.TestCase):
@@ -108,6 +113,62 @@ class ContractGuardTest(unittest.TestCase):
         self.assertEqual(parsed, {"a": 1})
         self.assertIn("deterministic_json_repair", actions)
         self.assertEqual(errors, [])
+
+
+class StructuredOutputGuardTest(unittest.TestCase):
+    def test_repairs_fenced_json_before_retry(self) -> None:
+        result = guard_structured_json_object(
+            'prefix\n```json\n{"task_id":"T1","evaluations":[],}\n```'
+        )
+
+        self.assertTrue(result.valid)
+        self.assertEqual(result.parsed["task_id"], "T1")
+        self.assertIn("extract_json_block", result.repair_actions)
+        self.assertIn("deterministic_json_repair", result.repair_actions)
+
+    def test_pruned_retry_contains_contract_not_full_task_history(self) -> None:
+        prompt = render_pruned_json_retry_prompt(
+            task_id="T8",
+            candidate_ids=["c1", "c2", "c3"],
+            invalid_response='{"task_id":"T8","evaluations":[',
+            validation_error="unterminated array",
+            evaluation_fields=["total", "delivery_usable"],
+            response_kind="technical_blind_audit",
+        )
+
+        self.assertIn('"context_mode": "pruned"', prompt)
+        self.assertIn('"candidate_ids"', prompt)
+        self.assertIn("unterminated array", prompt)
+        self.assertNotIn("连续任务历史", prompt)
+
+    def test_attempt_usage_includes_failed_format_calls(self) -> None:
+        usage = aggregate_attempt_usage(
+            [
+                {
+                    "usage": {
+                        "prompt_tokens": 100,
+                        "completion_tokens": 50,
+                        "total_tokens": 150,
+                    }
+                },
+                {
+                    "usage": {
+                        "prompt_tokens": 20,
+                        "completion_tokens": 10,
+                        "total_tokens": 30,
+                    }
+                },
+            ]
+        )
+
+        self.assertEqual(
+            usage,
+            {
+                "prompt_tokens": 120,
+                "completion_tokens": 60,
+                "total_tokens": 180,
+            },
+        )
 
 
 if __name__ == "__main__":

@@ -5001,6 +5001,10 @@ v5.14j 不增加生产运行时机制，而是把 v5.14i 已通过确定性验�
   任务逐项盲评门禁；
 - `tests/test_v514j_semantic_fidelity_formal_regression.py`：验证协议泄漏、
   盲评不完整和 Agent 配置漂移均会使正式验收失败。
+- `agent_runtime/reliability/structured_output_guard.py`：为结构化评分输出提供
+  JSON 提取、确定性修复、短上下文格式重试和多尝试用量累计；
+- 两个匿名评分器：逐任务检查点不变；格式失败时不再重复发送相同超长提示，
+  依次执行短上下文修复和精简完整重审，并记录所有评分尝试的 Token 与延迟。
 
 公平性边界：
 

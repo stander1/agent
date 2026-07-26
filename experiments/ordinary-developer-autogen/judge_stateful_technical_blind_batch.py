@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -13,6 +12,13 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from agent_runtime.llm.client import OpenAICompatibleChatClient
 from agent_runtime.llm.config import load_llm_config
+from agent_runtime.reliability.structured_output_guard import (
+    aggregate_attempt_usage,
+    concise_reaudit_suffix,
+    guard_structured_json_object,
+    render_pruned_json_retry_prompt,
+    response_fingerprint,
+)
 
 
 SCORE_LIMITS = {
@@ -55,19 +61,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def json_from_response(text: str) -> dict[str, Any]:
-    cleaned = text.strip()
-    fence = re.search(r"```(?:json)?\s*(.*?)```", cleaned, flags=re.S | re.I)
-    if fence:
-        cleaned = fence.group(1).strip()
-    if not cleaned.startswith("{"):
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start >= 0 and end > start:
-            cleaned = cleaned[start : end + 1]
-    parsed = json.loads(cleaned)
-    if not isinstance(parsed, dict):
-        raise ValueError("Technical judge response root must be an object")
-    return parsed
+    result = guard_structured_json_object(text)
+    if result.parsed is None:
+        raise ValueError(
+            "; ".join(result.errors)
+            or "Technical judge response root must be an object"
+        )
+    return result.parsed
 
 
 def build_prompt(
@@ -334,29 +334,84 @@ def main() -> int:
             candidates=candidates,
         )
         last_error: Exception | None = None
+        last_response = ""
+        judge_attempts: list[dict[str, Any]] = []
         for format_attempt in range(args.format_retries + 1):
-            suffix = ""
-            if format_attempt:
-                suffix = (
-                    "\n\n上一次响应未通过 JSON 校验。请重新独立技术审查，"
-                    "严格只输出指定 JSON，并完整覆盖所有 candidate_id。"
+            if format_attempt == 0:
+                retry_mode = "initial_audit"
+                system_prompt = (
+                    "你是匿名技术审查员。逐项核验可执行性，只输出合法 JSON。"
+                )
+                user_prompt = prompt
+            elif format_attempt == 1:
+                retry_mode = "pruned_format_repair"
+                system_prompt = (
+                    "你是同一个匿名技术审查员，只修复上一响应的 JSON 合同。"
+                )
+                user_prompt = render_pruned_json_retry_prompt(
+                    task_id=task_id,
+                    candidate_ids=candidate_ids,
+                    invalid_response=last_response,
+                    validation_error=str(last_error or ""),
+                    evaluation_fields=[
+                        *SCORE_LIMITS,
+                        "delivery_usable",
+                        "findings",
+                        "strengths",
+                    ],
+                    response_kind="technical_blind_audit",
+                )
+            else:
+                retry_mode = "concise_full_reaudit"
+                system_prompt = (
+                    "你是匿名技术审查员。沿用原评分标准，精简说明并只输出合法 JSON。"
+                )
+                user_prompt = prompt + concise_reaudit_suffix(
+                    validation_error=str(last_error or ""),
+                    candidate_ids=candidate_ids,
+                    technical=True,
                 )
             response = client.complete(
-                system_prompt=(
-                    "你是匿名技术审查员。逐项核验可执行性，只输出合法 JSON。"
-                ),
-                user_prompt=prompt + suffix,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
             )
+            guard = guard_structured_json_object(response.content)
+            attempt_record = {
+                "attempt": format_attempt,
+                "mode": retry_mode,
+                "usage": dict(response.usage),
+                "latency_ms": response.latency_ms,
+                "model": response.model,
+                "finish_reason": response.raw_finish_reason,
+                "provider_guard": response.provider_guard,
+                "response_chars": len(response.content),
+                "response_sha256": response_fingerprint(response.content),
+                "repair_actions": list(guard.repair_actions),
+                "parse_errors": list(guard.errors),
+            }
             try:
+                if guard.parsed is None:
+                    raise ValueError(
+                        "; ".join(guard.errors)
+                        or "Technical judge JSON parse failed"
+                    )
                 normalized = normalize_result(
-                    json_from_response(response.content),
+                    guard.parsed,
                     task_id=task_id,
                     candidate_ids=candidate_ids,
                 )
-                normalized["judge_usage"] = response.usage
-                normalized["judge_latency_ms"] = response.latency_ms
+                attempt_record["status"] = "valid"
+                judge_attempts.append(attempt_record)
+                normalized["judge_usage"] = aggregate_attempt_usage(
+                    judge_attempts
+                )
+                normalized["judge_latency_ms"] = sum(
+                    float(item.get("latency_ms") or 0.0)
+                    for item in judge_attempts
+                )
                 normalized["judge_model"] = response.model
                 normalized["format_retry_count"] = format_attempt
+                normalized["judge_attempts"] = judge_attempts
                 results.append(normalized)
                 write_checkpoint(
                     args.output,
@@ -364,10 +419,18 @@ def main() -> int:
                     config=config.without_secret(),
                     results=results,
                 )
-                print(f"[{index}/{len(tasks)}] {task_id} technical audit complete", flush=True)
+                print(
+                    f"[{index}/{len(tasks)}] "
+                    f"{task_id} technical audit complete",
+                    flush=True,
+                )
                 break
-            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            except (TypeError, ValueError) as exc:
+                attempt_record["status"] = "invalid"
+                attempt_record["validation_error"] = str(exc)
+                judge_attempts.append(attempt_record)
                 last_error = exc
+                last_response = response.content
         else:
             raise RuntimeError(
                 f"Unable to technically audit {task_id}: {last_error}"
