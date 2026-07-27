@@ -309,6 +309,60 @@ FINAL_ANSWER_READY"""
         self.assertTrue(assessment.approved_prior_artifact)
         self.assertIn("review_feedback_not_final_artifact", assessment.reasons)
 
+    def test_marks_previous_item_approval_as_review_only(self) -> None:
+        content = """## 验收通过
+
+批准上一份 Writer 成果作为最终交付物。
+FINAL_ANSWER_READY"""
+
+        assessment = assess_final_delivery(
+            request="请生成完整审计报告",
+            content=content,
+            source="reviewer",
+            expected_source="reviewer",
+            marker="FINAL_ANSWER_READY",
+            require_marker=True,
+        )
+
+        self.assertFalse(assessment.valid)
+        self.assertTrue(assessment.review_only)
+        self.assertTrue(assessment.approved_prior_artifact)
+
+    def test_marks_heading_only_approval_as_review_only(self) -> None:
+        assessment = assess_final_delivery(
+            request="请生成完整审计报告",
+            content="## 验收通过\nFINAL_ANSWER_READY",
+            source="reviewer",
+            expected_source="reviewer",
+            marker="FINAL_ANSWER_READY",
+            require_marker=True,
+        )
+
+        self.assertFalse(assessment.valid)
+        self.assertTrue(assessment.review_only)
+        self.assertTrue(assessment.approved_prior_artifact)
+
+    def test_complete_artifact_with_approval_heading_is_not_reference_only(
+        self,
+    ) -> None:
+        content = """## 验收通过
+
+以下是可直接交付的完整报告正文。报告包含范围、方法、证据、发现、
+风险等级、修复责任人和验收标准，并逐项回答用户当前要求。
+FINAL_ANSWER_READY"""
+
+        assessment = assess_final_delivery(
+            request="请生成完整审计报告",
+            content=content,
+            source="reviewer",
+            expected_source="reviewer",
+            marker="FINAL_ANSWER_READY",
+            require_marker=True,
+        )
+
+        self.assertTrue(assessment.valid)
+        self.assertFalse(assessment.approved_prior_artifact)
+
     def test_marks_mislabeled_generic_agent_acceptance_summary_as_review_only(self) -> None:
         content = """## 最终可交付成果
 

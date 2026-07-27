@@ -5151,3 +5151,13 @@ A1-A10/B1-B10 连续任务矩阵。三组使用同一份 v5.14m Agent 配置，�
 该阶段不向生产运行时加入 Question A/B、旅游地点、安全实体或固定角色
 名称特判。详细说明见
 `docs/experiments/v5.14n-reviewer-artifact-formal-regression.md`。
+
+## 78. v5.14o：紧凑 Reviewer 审批语义
+
+v5.14o 根据 v5.14n 的真实 MiMo 失败证据，补齐“上一份成果”和仅写
+“验收通过”等紧凑审批表达。运行时只在存在最近有效业务成果且审批短文
+没有修订要求时进行引用晋升；无候选、验收不通过和包含完整业务正文的
+消息均不会误触发。
+
+该机制不依赖 Question A/B、业务实体或成果 Agent 名称。详细说明见
+`docs/experiments/v5.14o-compact-review-approval.md`。

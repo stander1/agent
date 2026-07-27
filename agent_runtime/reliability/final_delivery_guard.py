@@ -45,7 +45,8 @@ _USER_CONFIRMED_QUOTE_RE = re.compile(
 )
 _PRIOR_ARTIFACT_REFERENCE_RE = re.compile(
     r"(?is)(?:"
-    r"(?:\u524d\u5e8f|\u6b64\u524d|\u4e0a\u4e00\u7248|\u4e0a\u8f6e)"
+    r"(?:\u524d\u5e8f|\u6b64\u524d|\u4e0a\u4e00\u7248|\u4e0a\u4e00\u4efd|"
+    r"\u524d\u4e00\u4efd|\u6700\u8fd1\u4e00\u4efd|\u4e0a\u8f6e)"
     r".{0,48}(?:writer|artifact|draft|\u4ea7\u51fa|\u8349\u7a3f|\u6210\u679c)"
     r"|(?:previous|prior).{0,48}(?:writer|artifact|draft|output)"
     r"|artifact_state\s*:"
@@ -89,6 +90,15 @@ _PRIOR_ARTIFACT_APPROVAL_RE = re.compile(
     r"\u672a\u53d1\u73b0.{0,32}\u95ee\u9898|"
     r"approved?|accepted?|validated?"
     r")"
+)
+_COMPACT_REVIEW_APPROVAL_RE = re.compile(
+    r"(?is)^\s*(?:#{1,4}\s*)?"
+    r"(?:(?:\u9a8c\u6536|\u5ba1\u67e5|\u5ba1\u6838|\u8bc4\u5ba1)"
+    r"\s*(?:\u901a\u8fc7|\u5408\u683c|\u5b8c\u6210)"
+    r"|(?:review\s+)?(?:approved?|accepted?|validated?))"
+    r"(?:\s*[.:：。\uff01!]?\s*"
+    r"(?:\u6279\u51c6|\u540c\u610f|\u786e\u8ba4|approve|accept)"
+    r".{0,420})?\s*$"
 )
 _REVISION_REQUIRED_RE = re.compile(
     r"(?is)(?:"
@@ -315,6 +325,11 @@ def is_prior_artifact_approval(content: str) -> bool:
         return False
     if _INTEGRATED_FINAL_ARTIFACT_RE.search(body):
         return False
+    if (
+        len(body) <= 600
+        and _COMPACT_REVIEW_APPROVAL_RE.fullmatch(body)
+    ):
+        return True
     prior_reference = bool(_PRIOR_ARTIFACT_REFERENCE_RE.search(body))
     submitted_artifact_reference = bool(
         _SUBMITTED_ARTIFACT_REFERENCE_RE.search(body)

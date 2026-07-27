@@ -277,6 +277,68 @@ class ReviewerFinalTextTerminationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("完整审计报告", self.condition.last_resolved_artifact.content)
 
+    async def test_previous_item_wording_promotes_latest_artifact(self) -> None:
+        artifact = (
+            "## 完整业务成果\n\n"
+            "成果逐项覆盖当前用户要求，并包含事实、约束、执行步骤、"
+            "风险和验收标准，可由用户直接使用。"
+        )
+        await self.condition(
+            [TextMessage(content=artifact, source="DomainBuilder")]
+        )
+
+        result = await self.condition(
+            [
+                TextMessage(
+                    content=(
+                        "## 验收通过\n"
+                        "批准上一份 Writer 成果作为最终交付物。\n"
+                        f"{MARKER}"
+                    ),
+                    source="reviewer",
+                )
+            ]
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            self.condition.last_resolved_artifact.resolution_kind,
+            "prior_artifact_approved",
+        )
+        self.assertEqual(
+            self.condition.last_resolved_artifact.origin_source,
+            "DomainBuilder",
+        )
+
+    async def test_heading_only_approval_promotes_latest_artifact(self) -> None:
+        artifact = (
+            "## Complete delivery\n\n"
+            "This delivery contains scope, evidence, findings, risks, "
+            "mitigations, owners, and acceptance criteria."
+        )
+        await self.condition(
+            [TextMessage(content=artifact, source="EvidenceAgent17")]
+        )
+
+        result = await self.condition(
+            [
+                TextMessage(
+                    content=f"## 验收通过\n{MARKER}",
+                    source="reviewer",
+                )
+            ]
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            self.condition.last_resolved_artifact.resolution_kind,
+            "prior_artifact_approved",
+        )
+        self.assertEqual(
+            self.condition.last_resolved_artifact.origin_source,
+            "EvidenceAgent17",
+        )
+
     async def test_promotes_arbitrary_agent_artifact_when_review_summary_is_mislabeled(self) -> None:
         artifact = (
             "## Evidence report\n\n"
