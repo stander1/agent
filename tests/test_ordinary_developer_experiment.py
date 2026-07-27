@@ -239,6 +239,192 @@ class OrdinaryDeveloperExperimentTests(unittest.TestCase):
         self.assertEqual(row["judge_usage"]["total_tokens"], 210)
         self.assertEqual(row["judge_latency_ms"], 30.0)
 
+    def test_technical_judge_binds_reaudit_findings_to_current_answer_anchors(
+        self,
+    ) -> None:
+        candidate_ids = ["c1", "c2", "c3"]
+        answers = {
+            candidate_id: (
+                f"Current answer for {candidate_id}: timeout is 45 seconds."
+            )
+            for candidate_id in candidate_ids
+        }
+        calls: list[dict[str, str]] = []
+
+        def response_payload(*, anchored: bool) -> dict[str, object]:
+            return {
+                "task_id": "T1",
+                "evaluations": [
+                    {
+                        "candidate_id": candidate_id,
+                        "constraint_fidelity": 2,
+                        "technical_correctness": 3,
+                        "internal_consistency": 2,
+                        "executability": 2,
+                        "delivery_usable": True,
+                        "findings": [
+                            {
+                                **(
+                                    {"evidence_id": "E001"}
+                                    if anchored
+                                    else {}
+                                ),
+                                "severity": "low",
+                                "evidence": "The timeout value needs review.",
+                                "issue": "The timeout should be verified.",
+                                "repair": "Verify it against the source.",
+                            }
+                        ],
+                        "strengths": [],
+                    }
+                    for candidate_id in candidate_ids
+                ],
+                "best_candidate_ids": candidate_ids,
+                "summary": "Equivalent.",
+            }
+
+        class FakeClient:
+            def __init__(self, config: object) -> None:
+                del config
+
+            def complete(
+                self,
+                *,
+                system_prompt: str,
+                user_prompt: str,
+            ) -> SimpleNamespace:
+                calls.append(
+                    {
+                        "system_prompt": system_prompt,
+                        "user_prompt": user_prompt,
+                    }
+                )
+                return SimpleNamespace(
+                    content=json.dumps(
+                        response_payload(anchored=len(calls) > 1)
+                    ),
+                    usage={
+                        "prompt_tokens": 100,
+                        "completion_tokens": 20,
+                        "total_tokens": 120,
+                    },
+                    latency_ms=10.0,
+                    model="fake-model",
+                    raw_finish_reason="stop",
+                    provider_guard={"status": "valid"},
+                )
+
+        batch = {
+            "tasks": [
+                {
+                    "task_id": "T1",
+                    "question": "Check the current timeout.",
+                    "candidates": [
+                        {
+                            "candidate_id": candidate_id,
+                            "track_id": candidate_id,
+                            "previous_answer": (
+                                "Previous answer says timeout is 30 seconds."
+                            ),
+                            "answer": answers[candidate_id],
+                        }
+                        for candidate_id in candidate_ids
+                    ],
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            batch_path = root / "batch.json"
+            output_path = root / "technical.json"
+            batch_path.write_text(
+                json.dumps(batch),
+                encoding="utf-8",
+            )
+            argv = [
+                "judge_stateful_technical_blind_batch.py",
+                "--batch",
+                str(batch_path),
+                "--output",
+                str(output_path),
+                "--config",
+                str(
+                    PROJECT_ROOT / "configs" / "llm.mimo.example.json"
+                ),
+                "--format-retries",
+                "2",
+            ]
+            with patch.dict(
+                TECHNICAL_JUDGE_GLOBALS["main"].__globals__,
+                {"OpenAICompatibleChatClient": FakeClient},
+            ), patch.object(sys, "argv", argv):
+                result = TECHNICAL_JUDGE_GLOBALS["main"]()
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("[E001]", calls[1]["user_prompt"])
+        self.assertIn('"evidence_id": "E001"', calls[1]["user_prompt"])
+        row = payload["results"][0]
+        self.assertEqual(
+            row["judge_attempts"][1]["mode"],
+            "current_answer_evidence_reaudit",
+        )
+        for evaluation in row["evaluations"]:
+            finding = evaluation["findings"][0]
+            self.assertEqual(
+                finding["evidence"],
+                answers[evaluation["candidate_id"]],
+            )
+            self.assertEqual(
+                finding["evidence_binding"],
+                "anchored_current_answer",
+            )
+            self.assertEqual(finding["evidence_id"], "E001")
+
+    def test_technical_judge_rejects_unknown_current_answer_anchor(
+        self,
+    ) -> None:
+        normalize_result = TECHNICAL_JUDGE_GLOBALS["normalize_result"]
+        parsed = {
+            "task_id": "T1",
+            "evaluations": [
+                {
+                    "candidate_id": "c1",
+                    "constraint_fidelity": 2,
+                    "technical_correctness": 3,
+                    "internal_consistency": 2,
+                    "executability": 2,
+                    "delivery_usable": True,
+                    "findings": [
+                        {
+                            "evidence_id": "E999",
+                            "severity": "low",
+                            "evidence": "Paraphrased evidence.",
+                            "issue": "The timeout should be verified.",
+                            "repair": "Verify it against the source.",
+                        }
+                    ],
+                    "strengths": [],
+                }
+            ],
+        }
+        with self.assertRaisesRegex(
+            ValueError,
+            "no valid evidence_id",
+        ):
+            normalize_result(
+                parsed,
+                task_id="T1",
+                candidate_ids=["c1"],
+                candidate_answers={
+                    "c1": "Current answer: timeout is 45 seconds."
+                },
+                evidence_catalogs={
+                    "c1": {"E001": "timeout is 45 seconds."}
+                },
+            )
+
     def test_blind_judges_validate_and_reuse_task_checkpoints(self) -> None:
         tasks = [
             {

@@ -5086,3 +5086,13 @@ Observed、Managed 三组公平对照。任务、Agent、模型、温度、最�
 
 详细说明：
 `docs/experiments/v5.14l-typed-reliability-formal-regression.md`。
+
+评分恢复补充：
+
+- `judge_stateful_technical_blind_batch.py`：技术 finding 在自由文本证据无法
+  精确绑定时，使用当前候选局部证据锚点重新审查；程序只回填锚点对应的
+  当前答案原文，未知、跨候选和历史证据仍被拒绝；
+- `resume_technical_audit.sh`：验证并复用冻结候选、匿名映射、综合评分与
+  技术评分 checkpoint，只续跑未完成的技术审查，避免重跑 Agent 任务或
+  已完成评分；
+- 该恢复不改变评分量表、分数上限、严重级别、质量合成规则和预注册阈值。

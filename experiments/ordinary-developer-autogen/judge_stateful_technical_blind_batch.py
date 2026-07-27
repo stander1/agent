@@ -75,20 +75,39 @@ def build_prompt(
     task_id: str,
     task_history: list[dict[str, str]],
     candidates: list[dict[str, str]],
+    evidence_catalogs: dict[str, dict[str, str]] | None = None,
 ) -> str:
     history = "\n\n".join(
         f"[{item['task_id']}]\n{item['question']}" for item in task_history
     )
     answer_sections: list[str] = []
     for item in candidates:
+        candidate_id = str(item["candidate_id"])
         previous_answer = str(item.get("previous_answer", "")).strip()
+        current_answer = str(item.get("answer", ""))
+        if evidence_catalogs is not None:
+            current_answer = _render_evidence_catalog(
+                evidence_catalogs.get(candidate_id, {})
+            )
         answer_sections.append(
-            f"## {item['candidate_id']}（匿名轨道 {item.get('track_id', '')}）\n"
+            f"## {candidate_id}（匿名轨道 {item.get('track_id', '')}）\n"
             f"### 上一轮交付物\n{previous_answer or '（第一轮，无上一轮交付物）'}\n\n"
-            f"### 当前交付物\n{item['answer']}"
+            f"### 当前交付物\n{current_answer}"
         )
     answers = "\n\n".join(answer_sections)
     candidate_ids = [str(item["candidate_id"]) for item in candidates]
+    anchored_rule = (
+        "9. 当前交付物已切分为 [E001] 形式的证据锚点。每条 finding "
+        "必须返回属于同一候选的 evidence_id；程序会从该锚点回填当前"
+        "交付物原文。不得引用上一轮交付物的文本或其他候选的锚点。\n"
+        if evidence_catalogs is not None
+        else ""
+    )
+    evidence_id_field = (
+        '          "evidence_id": "E001",'
+        if evidence_catalogs is not None
+        else ""
+    )
     return f"""
 你是独立、保守的技术审查员。下面是连续任务在 {task_id} 时点的需求历史和三个匿名候选。你的职责不是评价文风，而是寻找会影响真实实施的技术缺陷。
 
@@ -101,6 +120,7 @@ def build_prompt(
 6. 有 critical/high finding 时 delivery_usable 必须为 false；存在任何明确 finding 时不得给 10 分。
 7. 分项为：约束忠实度 0-2、技术正确性 0-4、内部一致性 0-2、可执行性 0-2。
 8. 三个候选分别审查，允许并列，只返回合法 JSON。
+{anchored_rule}
 
 JSON 结构：
 {{
@@ -113,10 +133,11 @@ JSON 结构：
       "internal_consistency": 0,
       "executability": 0,
       "total": 0,
-      "delivery_usable": false,
-      "findings": [
-        {{
-          "severity": "medium",
+       "delivery_usable": false,
+       "findings": [
+         {{
+{evidence_id_field}
+           "severity": "medium",
           "evidence": "候选中的短文本",
           "issue": "具体问题",
           "repair": "修正方向"
@@ -143,6 +164,7 @@ def normalize_result(
     task_id: str,
     candidate_ids: list[str],
     candidate_answers: dict[str, str] | None = None,
+    evidence_catalogs: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     if str(parsed.get("task_id")) != task_id:
         raise ValueError(f"Unexpected task_id: {parsed.get('task_id')!r}")
@@ -173,6 +195,11 @@ def normalize_result(
                 else ""
             ),
             enforce_current_answer=candidate_answers is not None,
+            evidence_catalog=(
+                evidence_catalogs.get(candidate_id, {})
+                if evidence_catalogs is not None
+                else None
+            ),
         )
         score_cap = min(
             (SEVERITY_CAPS[item["severity"]] for item in findings),
@@ -217,6 +244,7 @@ def _normalize_findings(
     *,
     current_answer: str = "",
     enforce_current_answer: bool = False,
+    evidence_catalog: dict[str, str] | None = None,
 ) -> list[dict[str, str]]:
     if value is None:
         return []
@@ -234,22 +262,37 @@ def _normalize_findings(
         repair = str(item.get("repair") or "").strip()
         if not evidence or not issue or not repair:
             raise ValueError(f"{candidate_id} finding lacks evidence/issue/repair")
+        evidence_id = str(item.get("evidence_id") or "").strip()
+        evidence_binding = "verbatim_current_answer"
         if enforce_current_answer and not _evidence_in_current_answer(
             evidence,
             current_answer,
         ):
-            raise ValueError(
-                f"{candidate_id} finding evidence is not present in the "
-                "current answer"
+            anchored_evidence = (
+                str(evidence_catalog.get(evidence_id) or "")
+                if evidence_catalog is not None and evidence_id
+                else ""
             )
-        findings.append(
-            {
-                "severity": severity,
-                "evidence": evidence[:240],
-                "issue": issue,
-                "repair": repair,
-            }
-        )
+            if not anchored_evidence or not _evidence_in_current_answer(
+                anchored_evidence,
+                current_answer,
+            ):
+                raise ValueError(
+                    f"{candidate_id} finding evidence is not present in the "
+                    "current answer and has no valid evidence_id"
+                )
+            evidence = anchored_evidence
+            evidence_binding = "anchored_current_answer"
+        finding = {
+            "severity": severity,
+            "evidence": evidence[:240],
+            "issue": issue,
+            "repair": repair,
+            "evidence_binding": evidence_binding,
+        }
+        if evidence_binding == "anchored_current_answer":
+            finding["evidence_id"] = evidence_id
+        findings.append(finding)
     return findings
 
 
@@ -264,6 +307,46 @@ def _evidence_in_current_answer(evidence: str, answer: str) -> bool:
 
 def _normalize_evidence_text(text: str) -> str:
     return " ".join(str(text or "").split()).casefold()
+
+
+def build_evidence_catalogs(
+    candidates: list[dict[str, Any]],
+    *,
+    max_quote_chars: int = 200,
+) -> dict[str, dict[str, str]]:
+    return {
+        str(item["candidate_id"]): _evidence_catalog(
+            str(item.get("answer") or ""),
+            max_quote_chars=max_quote_chars,
+        )
+        for item in candidates
+    }
+
+
+def _evidence_catalog(
+    answer: str,
+    *,
+    max_quote_chars: int,
+) -> dict[str, str]:
+    quotes: list[str] = []
+    for raw_line in str(answer or "").splitlines():
+        line = raw_line.strip()
+        while line:
+            quotes.append(line[:max_quote_chars])
+            line = line[max_quote_chars:]
+    return {
+        f"E{index:03d}": quote
+        for index, quote in enumerate(quotes, start=1)
+    }
+
+
+def _render_evidence_catalog(catalog: dict[str, str]) -> str:
+    if not catalog:
+        return "（当前交付物为空）"
+    return "\n".join(
+        f"[{evidence_id}] {quote}"
+        for evidence_id, quote in catalog.items()
+    )
 
 
 def write_checkpoint(
@@ -380,6 +463,7 @@ def main() -> int:
             str(item["candidate_id"]): str(item.get("answer") or "")
             for item in candidates
         }
+        evidence_catalogs = build_evidence_catalogs(candidates)
         prompt = build_prompt(
             task_id=task_id,
             task_history=history,
@@ -406,7 +490,12 @@ def main() -> int:
                         "你是同一个匿名技术审查员。重新审查当前交付物，"
                         "每条 evidence 必须逐字来自当前交付物，只输出合法 JSON。"
                     )
-                    user_prompt = prompt + concise_reaudit_suffix(
+                    user_prompt = build_prompt(
+                        task_id=task_id,
+                        task_history=history,
+                        candidates=candidates,
+                        evidence_catalogs=evidence_catalogs,
+                    ) + concise_reaudit_suffix(
                         validation_error=str(last_error or ""),
                         candidate_ids=candidate_ids,
                         technical=True,
@@ -430,11 +519,29 @@ def main() -> int:
                         response_kind="technical_blind_audit",
                     )
             else:
-                retry_mode = "concise_full_reaudit"
+                evidence_mismatch = (
+                    "evidence is not present in the current answer"
+                    in str(last_error or "")
+                )
+                retry_mode = (
+                    "anchored_concise_full_reaudit"
+                    if evidence_mismatch
+                    else "concise_full_reaudit"
+                )
                 system_prompt = (
                     "你是匿名技术审查员。沿用原评分标准，精简说明并只输出合法 JSON。"
                 )
-                user_prompt = prompt + concise_reaudit_suffix(
+                reaudit_prompt = (
+                    build_prompt(
+                        task_id=task_id,
+                        task_history=history,
+                        candidates=candidates,
+                        evidence_catalogs=evidence_catalogs,
+                    )
+                    if evidence_mismatch
+                    else prompt
+                )
+                user_prompt = reaudit_prompt + concise_reaudit_suffix(
                     validation_error=str(last_error or ""),
                     candidate_ids=candidate_ids,
                     technical=True,
@@ -456,6 +563,10 @@ def main() -> int:
                 "response_sha256": response_fingerprint(response.content),
                 "repair_actions": list(guard.repair_actions),
                 "parse_errors": list(guard.errors),
+                "evidence_anchor_count": sum(
+                    len(catalog)
+                    for catalog in evidence_catalogs.values()
+                ),
             }
             try:
                 if guard.parsed is None:
@@ -468,6 +579,7 @@ def main() -> int:
                     task_id=task_id,
                     candidate_ids=candidate_ids,
                     candidate_answers=candidate_answers,
+                    evidence_catalogs=evidence_catalogs,
                 )
                 attempt_record["status"] = "valid"
                 judge_attempts.append(attempt_record)

@@ -36,3 +36,15 @@ export AGENTLITE_V514L_EXP_ID="替换为原实验编号"
 export AGENTLITE_V514L_RESUME=1
 bash experiments/v5.14l-typed-reliability-formal-regression/run_openeuler.sh
 ```
+
+若仅匿名技术评分因 evidence 无法绑定当前答案而中断，先定点恢复该场景：
+
+```bash
+export AGENTLITE_V514L_EXP_ID="替换为原实验编号"
+bash experiments/v5.14l-typed-reliability-formal-regression/resume_technical_audit.sh A
+```
+
+恢复脚本会验证并复用已有匿名候选、映射、综合评分和技术评分 checkpoint，
+只续跑尚未完成的技术评分任务。完成后再用
+`AGENTLITE_V514L_RESUME=1` 运行主脚本，主脚本会跳过已经完整的 A 场景并
+继续 B 场景及最终验收。

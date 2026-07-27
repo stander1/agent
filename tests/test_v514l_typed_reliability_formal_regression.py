@@ -398,6 +398,20 @@ class TypedReliabilityFormalRegressionTest(unittest.TestCase):
         self.assertIn("AGENTLITE_V514L_RESUME", runner)
         self.assertIn("typed_reliability_formal_report.json", runner)
 
+    def test_technical_recovery_reuses_frozen_scoring_checkpoints(
+        self,
+    ) -> None:
+        recovery = (
+            EXPERIMENT_DIR / "resume_technical_audit.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("quality_blind_batch.json", recovery)
+        self.assertIn("quality_blind_mapping.json", recovery)
+        self.assertIn("quality_blind_scores.json", recovery)
+        self.assertIn("quality_blind_technical_scores.json", recovery)
+        self.assertIn("--resume", recovery)
+        self.assertIn("scoring-recovery-history.txt", recovery)
+        self.assertNotIn("code_app.py", recovery)
+
 
 def _snapshot_path(root: Path, directory: str) -> Path:
     return (
