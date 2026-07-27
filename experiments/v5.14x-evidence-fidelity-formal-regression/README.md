@@ -12,3 +12,7 @@ MiMo Provider experiment:
 
 The only added audit validates any observed required-evidence guard event.
 Zero events are valid because the model may obey the preflight directly.
+
+`start_background.sh` reads the Provider key from standard input (or a hidden
+interactive prompt), keeps it out of the command line and logs, and returns the
+experiment ID, PID, and log path after a detached launch.
