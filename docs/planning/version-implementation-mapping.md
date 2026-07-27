@@ -5322,3 +5322,37 @@ Native、Observed、Managed 三组正式对照。任务、能力型 Agent 配置
 该阶段不修改任务、提示词、输出长度、轮次和既有阈值，也不在生产运行时
 加入 Question A/B、业务实体、固定结论或固定 Agent 名称特判。详细说明见
 `docs/experiments/v5.14v-continuity-memory-formal-regression.md`。
+
+## 86. v5.14w：事实分面与必需证据保真治理
+
+v5.14w 根据 v5.14v 的真实失败证据，修复预算事实误合并和缺失必需证据时
+越过用户保守回退要求的两个通用问题。
+
+实现映射：
+
+- `agent_runtime/memory/claim_extractor.py`：在分句前规范化千位分隔符，
+  按局部语义区分预算估算、上限、分项和修订目标；
+- `agent_runtime/drivers/autogen.py`：在角色视图和 Agent 输出边界增加
+  必需证据预检；只有任务引用文件、文件不可得且用户明确给出回退值时启用；
+- `web_monitor/parser.py` 与
+  `agent_runtime/eval/autogen_session_report.py`：统计并导出必需证据
+  守卫事件和实际阻断次数；
+- `tests/test_claim_extractor.py`、
+  `tests/test_autogen_shared_memory.py`、
+  `tests/test_v514w_evidence_fidelity.py`：覆盖数值分面、修订、文件可得性、
+  保守回退、消息类型保持和误拦截边界；
+- `experiments/v5.14w-evidence-fidelity-governance/`：在 openEuler 上
+  运行定向回归、机制验收、编译和不可变证据归档。
+
+通用边界：
+
+```text
+不识别 Question A/B、业务实体、固定结论和固定 Agent 名称；
+不解释领域规则、不猜测文件内容、不发明回退状态；
+只有用户已明确给出证据不足回退值时才允许保守治理；
+文件内容已提供或工作区文件存在时不触发缺失证据守卫；
+既有 Schema、组隔离、记忆准入与端到端成本核算不被绕过。
+```
+
+详细说明见
+`docs/experiments/v5.14w-evidence-fidelity-governance.md`。

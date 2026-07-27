@@ -340,6 +340,14 @@ class AutoGenSessionReportTest(unittest.TestCase):
                 },
             },
             {
+                "event_type": "autogen_required_evidence_guard",
+                "payload": {
+                    "status": "blocked_and_deferred",
+                    "unavailable_artifacts": ["policy_rules.md"],
+                    "fallback_value": "needs_more_evidence",
+                },
+            },
+            {
                 "event_type": "autogen_memory_candidate",
                 "payload": {
                     "candidate_kind": "autogen_team_final",
@@ -439,6 +447,8 @@ class AutoGenSessionReportTest(unittest.TestCase):
         self.assertEqual(summary["current_task_identity_anchored_count"], 1)
         self.assertEqual(summary["current_task_identity_guard_event_count"], 1)
         self.assertEqual(summary["current_task_identity_guard_blocked_count"], 1)
+        self.assertEqual(summary["required_evidence_guard_event_count"], 1)
+        self.assertEqual(summary["required_evidence_guard_blocked_count"], 1)
         self.assertEqual(summary["current_candidate_required_count"], 1)
         self.assertEqual(summary["current_candidate_available_count"], 1)
         self.assertEqual(summary["current_candidate_complete_count"], 1)
@@ -452,6 +462,10 @@ class AutoGenSessionReportTest(unittest.TestCase):
         self.assertEqual(metrics["current_task_identity_anchored_count"], 1)
         self.assertEqual(
             metrics["current_task_identity_guard_blocked_count"],
+            1,
+        )
+        self.assertEqual(
+            metrics["required_evidence_guard_blocked_count"],
             1,
         )
         self.assertEqual(metrics["current_candidate_complete_count"], 1)

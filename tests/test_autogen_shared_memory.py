@@ -20,6 +20,9 @@ from agent_runtime.drivers.autogen import (
     _has_semantic_payload,
     _memory_adoption_evidence,
     _memory_view_facts_covered,
+    _required_evidence_assessment,
+    _required_evidence_contract,
+    _required_evidence_prompt_rule,
     _semantic_autogen_state_text,
     _sanitize_model_visible_content,
     _select_token_nonexpanding_view,
@@ -1112,6 +1115,154 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                     original,
                 )
                 self.assertIs(guarded, original)
+
+    def test_required_evidence_contract_is_generic_and_conservative(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = (
+                "Use policy_rules.md to classify the current case. "
+                "If the evidence is unavailable, return needs_more_evidence."
+            )
+
+            contract = _required_evidence_contract(
+                current_task=task,
+                evidence_context="",
+                target_cwd=root,
+            )
+            assessment = _required_evidence_assessment(
+                current_task=task,
+                evidence_context="",
+                output_text=(
+                    "Final decision: synthetic_fraud_ring. "
+                    "The result is based on policy_rules.md."
+                ),
+                target_cwd=root,
+            )
+            prompt_rule = _required_evidence_prompt_rule(
+                current_task=task,
+                evidence_context="",
+                target_cwd=root,
+            )
+
+            self.assertTrue(contract["required"])
+            self.assertEqual(
+                contract["unavailable_artifacts"],
+                ["policy_rules.md"],
+            )
+            self.assertEqual(
+                contract["fallback_value"],
+                "needs_more_evidence",
+            )
+            self.assertTrue(assessment["blocked"])
+            self.assertEqual(
+                assessment["claimed_unavailable_artifacts"],
+                ["policy_rules.md"],
+            )
+            self.assertEqual(
+                assessment["conflicting_decision_values"],
+                ["synthetic_fraud_ring"],
+            )
+            self.assertIn("policy_rules.md", prompt_rule)
+            self.assertIn("needs_more_evidence", prompt_rule)
+
+    def test_required_evidence_contract_accepts_supplied_artifact_content(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = (
+                "Use policy_rules.md. Evidence missing must output "
+                "needs_more_evidence."
+            )
+            context = (
+                "BEGIN policy_rules.md\n"
+                "classification_threshold=0.8\n"
+                "END policy_rules.md"
+            )
+
+            contract = _required_evidence_contract(
+                current_task=task,
+                evidence_context=context,
+                target_cwd=root,
+            )
+            assessment = _required_evidence_assessment(
+                current_task=task,
+                evidence_context=context,
+                output_text="Final decision: approved.",
+                target_cwd=root,
+            )
+
+            self.assertFalse(contract["required"])
+            self.assertEqual(
+                contract["available_artifacts"],
+                ["policy_rules.md"],
+            )
+            self.assertFalse(assessment["blocked"])
+
+    def test_required_evidence_guard_preserves_native_message_type(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = {
+                "AGENTLITE_AUTOGEN_BROADCAST_MODE": "real-rewrite",
+                "AGENTLITE_AUTOGEN_TEAM_REWRITE": "1",
+                "AGENTLITE_AUTOGEN_SHARED_MEMORY": "1",
+                "AGENTLITE_MEMORY_SCOPE": "required-evidence-test",
+            }
+            with patch.dict("os.environ", env, clear=False):
+                coordinator = ProfiledAgent(
+                    "EvidenceCoordinator",
+                    "Coordinate evidence-bound decisions.",
+                    "Use only evidence supplied by the current task.",
+                )
+                team = ProfiledTeam([coordinator])
+                manager = AutoGenHookManager(
+                    self._context(root, "launch_required_evidence")
+                )
+                current_task = (
+                    "Use policy_rules.md to classify this case. "
+                    "Evidence missing must output needs_more_evidence."
+                )
+                manager.record_call_start(
+                    instance=team,
+                    method_name="run_stream",
+                    target_kind="agentchat_team",
+                    args=(),
+                    kwargs={"task": current_task},
+                )
+                context = manager.record_call_start(
+                    instance=coordinator,
+                    method_name="on_messages",
+                    target_kind="agentchat_agent",
+                    args=([FakeTextMessage(current_task, "user")],),
+                    kwargs={},
+                )
+
+                guarded = manager.guard_call_result_if_needed(
+                    context,
+                    FakeTextMessage(
+                        "Final decision: synthetic_fraud_ring.",
+                        "EvidenceCoordinator",
+                    ),
+                )
+
+                self.assertIsInstance(guarded, FakeTextMessage)
+                self.assertIn("needs_more_evidence", guarded.content)
+                self.assertNotIn("synthetic_fraud_ring", guarded.content)
+                events = self._events(manager.output_dir / "trace.jsonl")
+                guard = next(
+                    item
+                    for item in reversed(events)
+                    if item.get("event_type")
+                    == "autogen_required_evidence_guard"
+                )
+                self.assertEqual(
+                    guard["payload"]["status"],
+                    "blocked_and_deferred",
+                )
+                self.assertEqual(
+                    guard["payload"]["unavailable_artifacts"],
+                    ["policy_rules.md"],
+                )
 
     def test_real_rewrite_removes_memory_already_covered_by_latest_upstream(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

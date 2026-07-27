@@ -40,7 +40,10 @@ _REVISION_RE = re.compile(
     r"change(?:d)?\s+to|revis(?:e|ed)\s+to|increase(?:d)?\s+to|replace(?:d)?)",
     re.IGNORECASE,
 )
-_NUMBER_TOKEN = r"(?:\d+(?:\.\d+)?|[零〇一二两三四五六七八九十百千万]+)"
+_NUMBER_TOKEN = (
+    r"(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|"
+    r"\d+(?:\.\d+)?|[零〇一二两三四五六七八九十百千万]+)"
+)
 _CURRENCY_PREFIX = r"(?:人民币|CNY|RMB|USD|美元|¥|￥|\$)"
 _CURRENCY_SUFFIX = r"(?:元|人民币|CNY|RMB|USD|美元)"
 _NON_MONETARY_COUNT_UNIT = (
@@ -134,7 +137,12 @@ def extract_claim_cards(
         source_pointer=source_pointer,
         confidence=min(0.98, default_confidence + 0.06),
     )
-    for raw_sentence in _sentences(text):
+    sentence_source = re.sub(
+        r"(?<=\d),(?=\d{3}(?:\D|$))",
+        "",
+        str(text or ""),
+    )
+    for raw_sentence in _sentences(sentence_source):
         sentence = _clean_markup(raw_sentence)
         if len(sentence) < 3:
             continue
@@ -425,12 +433,13 @@ def _extract_known_claims(
             )
         )
 
-    budget_amount = _extract_budget_amount(sentence)
-    if budget_amount is not None:
-        budget_value, budget_unit = budget_amount
-        budget_scope, budget_label, budget_modality = _budget_claim_shape(
-            sentence
-        )
+    for (
+        budget_value,
+        budget_unit,
+        budget_scope,
+        budget_label,
+        budget_modality,
+    ) in _extract_budget_claim_specs(sentence):
         rows.append(
             _claim(
                 subject,
@@ -724,6 +733,176 @@ def _budget_claim_shape(sentence: str) -> tuple[str, str, str]:
     return "constraint.budget_upper_bound", "budget_upper_bound", "requirement"
 
 
+def _extract_budget_claim_specs(
+    sentence: str,
+) -> list[tuple[str, str, str, str, str]]:
+    """Extract distinct budget facets from one sentence.
+
+    A sentence may state an estimate and a cap together, or revise a cap from
+    an old value to a new value. Classifying the first number using cues from
+    the whole sentence conflates those facts and can promote an estimate as
+    the active constraint.
+    """
+
+    amount_pattern = re.compile(
+        rf"(?:(?P<prefix>{_CURRENCY_PREFIX})\s*)?"
+        rf"(?P<value>{_NUMBER_TOKEN})"
+        rf"(?:\s*(?P<suffix>{_CURRENCY_SUFFIX}))?",
+        re.IGNORECASE,
+    )
+    budget_cue = re.compile(
+        r"(?:预算|总费用|总金额|合计|budget|total\s+cost)",
+        re.IGNORECASE,
+    )
+    upper_cue = re.compile(
+        r"(?:上限|红线|不超过|不得超过|至多|最多|只有|≤|<=|"
+        r"\b(?:cap|limit|maximum|max|at\s+most|no\s+more\s+than)\b)",
+        re.IGNORECASE,
+    )
+    estimate_cue = re.compile(
+        r"(?:预计|估算|测算|原方案|当前方案|预算总和|总预算|"
+        r"总费用|总金额|合计|\b(?:estimate|estimated|total\s+budget|"
+        r"total\s+cost)\b)",
+        re.IGNORECASE,
+    )
+    revision_transition = re.search(
+        r"(?:从|由|\bfrom\b).{0,64}?"
+        r"(?:改为|修改为|修订为|调整为|提高到|降低到|更新为|到|至|\bto\b)"
+        r"\s*",
+        sentence,
+        re.IGNORECASE,
+    )
+    revision_match = revision_transition or _REVISION_RE.search(sentence)
+    amount_matches = []
+    for match in amount_pattern.finditer(sentence):
+        if match.group("prefix") or match.group("suffix"):
+            amount_matches.append(match)
+            continue
+        following = sentence[match.end() : match.end() + 12]
+        if re.match(
+            rf"\s*{_NON_MONETARY_COUNT_UNIT}",
+            following,
+            re.IGNORECASE,
+        ):
+            continue
+        preceding = sentence[max(0, match.start() - 48) : match.start()]
+        direct_budget_value = re.search(
+            r"(?:预算|总费用|总金额|合计|budget|total\s+cost|"
+            r"上限|cap|limit|estimate|estimated)\s*$",
+            preceding,
+            re.IGNORECASE,
+        )
+        related_budget_value = re.search(
+            r"(?:预算|总费用|总金额|合计|budget|total\s+cost|"
+            r"上限|cap|limit|estimate|estimated)"
+            r"[^0-9]{0,32}?"
+            r"(?:为|是|只有|调整为|更新为|不超过|至多|最多|"
+            r"=|:|：|≤|<=|\bis\b|\bat\b|\bremains?\b)"
+            r"\s*$",
+            preceding,
+            re.IGNORECASE,
+        )
+        if direct_budget_value or related_budget_value:
+            amount_matches.append(match)
+    if not amount_matches:
+        fallback = _extract_budget_amount(sentence)
+        if fallback is None:
+            return []
+        value, unit = fallback
+        scope, label, modality = _budget_claim_shape(sentence)
+        return [(value, unit, scope, label, modality)]
+
+    revision_target_start = -1
+    if revision_match is not None:
+        post_revision = [
+            match
+            for match in amount_matches
+            if match.start() >= revision_match.end()
+        ]
+        if post_revision:
+            revision_target_start = post_revision[0].start()
+
+    extracted: list[tuple[str, str, str, str, str]] = []
+    for match in amount_matches:
+        clause_start = max(
+            sentence.rfind(mark, 0, match.start()) + 1
+            for mark in ("\n", "。", "；", ";", "!", "！", "?", "？")
+        )
+        clause_end_candidates = [
+            position
+            for mark in ("\n", "。", "；", ";", "!", "！", "?", "？")
+            if (position := sentence.find(mark, match.end())) >= 0
+        ]
+        clause_end = min(clause_end_candidates) if clause_end_candidates else len(sentence)
+        local_clause = sentence[clause_start:clause_end]
+        local_before = sentence[max(clause_start, match.start() - 48) : match.start()]
+        local_after = sentence[match.end() : min(clause_end, match.end() + 6)]
+        local_window = f"{local_before}{match.group(0)}{local_after}"
+        if not budget_cue.search(local_clause) and not upper_cue.search(local_clause):
+            continue
+
+        # In "cap from OLD updated to NEW", OLD is lineage, not the new fact.
+        if (
+            revision_target_start >= 0
+            and match.start() < revision_match.end()
+            and upper_cue.search(local_clause)
+        ):
+            continue
+
+        if upper_cue.search(local_window):
+            scope, label, modality = (
+                "constraint.budget_upper_bound",
+                "budget_upper_bound",
+                "requirement",
+            )
+        elif estimate_cue.search(local_window):
+            scope, label, modality = (
+                "estimate.budget_total",
+                "budget_total",
+                "estimate",
+            )
+        else:
+            component = re.search(
+                r"(?P<label>[A-Za-z\u3400-\u4dbf\u4e00-\u9fff]"
+                r"[A-Za-z0-9_\-\u3400-\u4dbf\u4e00-\u9fff]{0,23})"
+                r"\s*(?:预算|budget)\s*(?:为|=|:|：)?\s*$",
+                local_before,
+                re.IGNORECASE,
+            )
+            component_label = component.group("label").strip() if component else ""
+            if component_label and component_label.casefold() not in {
+                "总",
+                "总计",
+                "整体",
+                "项目",
+                "本次",
+                "旅行",
+                "total",
+                "overall",
+            }:
+                normalized = _normalize_key(component_label)
+                scope, label, modality = (
+                    f"allocation.budget.{normalized}",
+                    f"{component_label}_budget",
+                    "allocation",
+                )
+            else:
+                scope, label, modality = (
+                    "constraint.budget_upper_bound",
+                    "budget_upper_bound",
+                    "requirement",
+                )
+
+        value = _parse_number_text(match.group("value"))
+        unit = _currency_unit(match.group(0))
+        extracted.append((value, unit, scope, label, modality))
+
+    unique: dict[tuple[str, str], tuple[str, str, str, str, str]] = {}
+    for row in extracted:
+        unique[(row[2], normalized_value(row[0], "number", row[1]))] = row
+    return list(unique.values())
+
+
 def _extract_budget_table_claims(
     text: str,
     *,
@@ -892,7 +1071,7 @@ def _infer_value_type(value: str) -> str:
 
 
 def _parse_number_text(text: str) -> str:
-    value = text.strip()
+    value = text.strip().replace(",", "")
     if re.fullmatch(r"\d+(?:\.\d+)?", value):
         return value
     digits = {

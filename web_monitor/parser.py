@@ -670,6 +670,8 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "current_task_identity_anchored_count": 0,
         "current_task_identity_guard_event_count": 0,
         "current_task_identity_guard_blocked_count": 0,
+        "required_evidence_guard_event_count": 0,
+        "required_evidence_guard_blocked_count": 0,
         "current_candidate_required_count": 0,
         "current_candidate_available_count": 0,
         "current_candidate_complete_count": 0,
@@ -1028,6 +1030,11 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
             breakdown["current_task_identity_guard_event_count"] += 1
             if str(payload.get("status") or "") == "blocked_and_reanchored":
                 breakdown["current_task_identity_guard_blocked_count"] += 1
+            continue
+        if event_type == "autogen_required_evidence_guard":
+            breakdown["required_evidence_guard_event_count"] += 1
+            if str(payload.get("status") or "") == "blocked_and_deferred":
+                breakdown["required_evidence_guard_blocked_count"] += 1
             continue
         if event_type in shadow_event_types:
             native, runtime, _, _, _ = _autogen_event_cost(payload)

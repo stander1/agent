@@ -147,6 +147,29 @@ _CURRENT_INTERACTION_ASSERTION_PATTERNS = (
         re.IGNORECASE,
     ),
 )
+_REQUIRED_ARTIFACT_REF_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])"
+    r"(?P<ref>(?:[A-Za-z0-9_.-]+[\\/])*[A-Za-z0-9_.-]+"
+    r"\.(?:md|txt|json|jsonl|csv|tsv|yaml|yml|toml|xml|pdf|docx))"
+    r"(?![A-Za-z0-9_-])",
+    re.IGNORECASE,
+)
+_EXPLICIT_EVIDENCE_FALLBACK_RE = re.compile(
+    r"(?:(?:若|如果|当|when|if).{0,72}?)?"
+    r"(?:证据|规则|资料|文件|artifact|evidence|rule|source).{0,36}?"
+    r"(?:不足|缺失|不可用|未提供|无法读取|insufficient|missing|unavailable)"
+    r"(?:时|则|必须|应当|应该|需|must|should|required|then|otherwise)?"
+    r".{0,48}?"
+    r"(?:返回|输出|使用|设为|结论(?:为)?|return|output|use|set)"
+    r"\s*[`'\"“”]*"
+    r"(?P<value>[A-Za-z][A-Za-z0-9_.-]{0,62}[A-Za-z0-9_-])",
+    re.IGNORECASE,
+)
+_EVIDENCE_READ_CLAIM_RE = re.compile(
+    r"(?:已|已经|成功)?(?:读取|加载|查阅|解析|核对|依据|根据|基于)"
+    r"|(?:read|loaded|parsed|consulted|according\s+to|based\s+on)",
+    re.IGNORECASE,
+)
 _GENERIC_NUMERIC_CONCEPT_BIGRAMS = frozenset(
     {
         "任务",
@@ -315,6 +338,8 @@ class HookCallContext:
         default_factory=dict
     )
     task_identity_guard_cache: dict[str, str] = field(default_factory=dict)
+    required_evidence_guard_cache: dict[str, str] = field(default_factory=dict)
+    input_context_text: str = ""
 
 
 @dataclass(slots=True)
@@ -798,6 +823,92 @@ class AutoGenHookManager:
         )
         return guarded_result
 
+    def _guard_required_evidence_if_needed(
+        self,
+        context: HookCallContext,
+        result: Any,
+    ) -> Any:
+        if self.broadcast_mode != "real-rewrite":
+            return result
+        if context.target_kind != "agentchat_agent":
+            return result
+        if context.method_name not in {"on_messages", "on_messages_stream"}:
+            return result
+        output_text = _memory_guard_result_text(result)
+        if not output_text.strip():
+            return result
+        output_fingerprint = _text_fingerprint(output_text)
+        cached_text = context.required_evidence_guard_cache.get(
+            output_fingerprint
+        )
+        if cached_text is not None:
+            cloned = _clone_memory_guard_result(result, cached_text)
+            return cloned if cloned is not None else result
+
+        with self._memory_lock:
+            current_task = self._current_team_task_by_group.get(
+                context.task.group_id,
+                "",
+            )
+            user_history = tuple(
+                self._user_task_history_by_group.get(
+                    context.task.group_id,
+                    (),
+                )
+            )
+        assessment = _required_evidence_assessment(
+            current_task=current_task or context.task.prompt,
+            evidence_context="\n".join(
+                (*user_history[:-1], context.input_context_text)
+            ),
+            output_text=output_text,
+            target_cwd=self.context.target_cwd,
+        )
+        if not assessment["blocked"]:
+            return result
+
+        fallback_value = str(assessment["fallback_value"])
+        unavailable = ", ".join(assessment["unavailable_artifacts"])
+        correction = "\n".join(
+            (
+                "Required-evidence correction.",
+                (
+                    "The current task depends on evidence that is not "
+                    f"available in the supplied context or workspace: {unavailable}."
+                ),
+                "Do not claim that unavailable evidence was read or verified.",
+                (
+                    "Use the user's explicit evidence-insufficient fallback: "
+                    f"{fallback_value}."
+                ),
+                "Continue from the current task using admitted evidence only.",
+            )
+        )
+        guarded_result = _clone_memory_guard_result(result, correction)
+        if guarded_result is None:
+            raise RuntimeError(
+                "AgentLite blocked an ungrounded evidence claim but could not "
+                "preserve the native AutoGen result type."
+            )
+        context.required_evidence_guard_cache[output_fingerprint] = correction
+        self.trace.write(
+            "autogen_required_evidence_guard",
+            {
+                "call_id": context.call_id,
+                "task_id": context.task.task_id,
+                "group_id": context.task.group_id,
+                "agent_id": context.agent.agent_id,
+                "role": context.agent.role,
+                "target_kind": context.target_kind,
+                "method": context.method_name,
+                "status": "blocked_and_deferred",
+                **assessment,
+                "original_output_fingerprint": output_fingerprint,
+                "guarded_output_fingerprint": _text_fingerprint(correction),
+            },
+        )
+        return guarded_result
+
     def guard_call_result_if_needed(
         self,
         context: HookCallContext,
@@ -805,6 +916,7 @@ class AutoGenHookManager:
     ) -> Any:
         """Prevent superseded memory facts from leaving an Agent call."""
 
+        result = self._guard_required_evidence_if_needed(context, result)
         result = self._guard_current_task_identity_if_needed(context, result)
         if context.target_kind != "agentchat_agent":
             return result
@@ -1550,6 +1662,15 @@ class AutoGenHookManager:
             continuity_context_reasons=continuity_context_reasons,
             semantic_action=semantic_action,
             task_sequence_index=task_sequence_index,
+            input_context_text="\n".join(
+                _sanitize_model_visible_content(
+                    str(getattr(message, "content_text", "") or "")
+                )
+                for message in decoded_messages
+                if str(getattr(message, "source", "") or "").casefold()
+                != "user"
+                and str(getattr(message, "content_text", "") or "").strip()
+            ),
         )
         if target_kind == "agentchat_agent":
             self._safe_kernel_call(
@@ -3440,6 +3561,7 @@ class AutoGenHookManager:
             user_task_history=user_task_history,
             final_delivery_marker=self.final_delivery_marker,
             task_sequence_index=context.task_sequence_index,
+            target_cwd=self.context.target_cwd,
         )
         receiver_profile = self.kernel.capability_profiles.get(
             context.agent.agent_id
@@ -3780,6 +3902,13 @@ class AutoGenHookManager:
             + json.dumps(receiver_view["information_fields"], ensure_ascii=False),
             "CURRENT_USER_TASK (highest priority):",
             receiver_view["current_task"],
+            _required_evidence_prompt_rule(
+                current_task=receiver_view["current_task"],
+                evidence_context="\n".join(
+                    content for _, content in upstream
+                ),
+                target_cwd=self.context.target_cwd,
+            ),
             "CAPABILITY_PROMPT_VIEW:",
             receiver_view["prompt_view"],
         ]
@@ -5104,12 +5233,19 @@ class AutoGenHookManager:
         memory_refs = memory_selection.refs
         memory_prompt_views = memory_selection.prompt_views
         current_task_source_view = "\n".join(
-            (
+            section
+            for section in (
                 "CURRENT_USER_TASK (highest priority):",
                 current_task,
                 "CURRENT_TASK_IDENTITY_RULE:",
                 _current_task_identity_rule(context.task_sequence_index),
+                _required_evidence_prompt_rule(
+                    current_task=current_task,
+                    evidence_context="",
+                    target_cwd=self.context.target_cwd,
+                ),
             )
+            if section
         )
         current_task_view = build_minimal_context_view(
             query=current_task,
@@ -7961,6 +8097,7 @@ def _build_chronology_prompt_view(
     user_task_history: list[str] | tuple[str, ...] = (),
     final_delivery_marker: str = "",
     task_sequence_index: int = 0,
+    target_cwd: Path | str = ".",
 ) -> str:
     """Build a receiver view that preserves task and newest upstream semantics."""
 
@@ -7996,6 +8133,16 @@ def _build_chronology_prompt_view(
         for source, content in visible
         if source.lower() != "user" and content.strip()
     ]
+    evidence_context = "\n".join(
+        [
+            *[
+                str(task)
+                for task in user_task_history
+                if str(task).strip() and str(task).strip() != task_text
+            ],
+            *[content for _, content in upstream],
+        ]
+    )
 
     sections: list[str] = []
     if task_text:
@@ -8005,6 +8152,11 @@ def _build_chronology_prompt_view(
                 task_text,
                 "CURRENT_TASK_IDENTITY_RULE:",
                 _current_task_identity_rule(task_sequence_index),
+                _required_evidence_prompt_rule(
+                    current_task=task_text,
+                    evidence_context=evidence_context,
+                    target_cwd=target_cwd,
+                ),
             ]
         )
     prior_user_tasks = [
@@ -8057,6 +8209,167 @@ def _current_task_identity_rule(task_sequence_index: int) -> str:
         "agent-generated ordinals are context only; never rename, renumber, "
         "or replace the current task."
     )
+
+
+def _required_evidence_contract(
+    *,
+    current_task: str,
+    evidence_context: str,
+    target_cwd: Path | str,
+) -> dict[str, Any]:
+    task_text = str(current_task or "")
+    fallback_match = _EXPLICIT_EVIDENCE_FALLBACK_RE.search(task_text)
+    artifact_refs = list(
+        dict.fromkeys(
+            match.group("ref").replace("\\", "/")
+            for match in _REQUIRED_ARTIFACT_REF_RE.finditer(task_text)
+        )
+    )
+    if fallback_match is None or not artifact_refs:
+        return {
+            "required": False,
+            "artifact_refs": artifact_refs,
+            "available_artifacts": [],
+            "unavailable_artifacts": [],
+            "fallback_value": "",
+        }
+
+    root = Path(target_cwd).expanduser().resolve()
+    available: list[str] = []
+    unavailable: list[str] = []
+    context_text = str(evidence_context or "")
+    for artifact_ref in artifact_refs:
+        supplied = _artifact_content_supplied(
+            artifact_ref,
+            context_text,
+        )
+        candidate = (root / artifact_ref).resolve()
+        workspace_file = (
+            candidate.is_relative_to(root)
+            and candidate.is_file()
+        )
+        if supplied or workspace_file:
+            available.append(artifact_ref)
+        else:
+            unavailable.append(artifact_ref)
+    return {
+        "required": bool(unavailable),
+        "artifact_refs": artifact_refs,
+        "available_artifacts": available,
+        "unavailable_artifacts": unavailable,
+        "fallback_value": fallback_match.group("value"),
+    }
+
+
+def _artifact_content_supplied(
+    artifact_ref: str,
+    evidence_context: str,
+) -> bool:
+    basename = Path(artifact_ref).name
+    marker = re.compile(
+        rf"(?:BEGIN\s+{re.escape(basename)}|"
+        rf"{re.escape(basename)}\s*(?:内容|content)\s*[:：])",
+        re.IGNORECASE,
+    )
+    return bool(marker.search(str(evidence_context or "")))
+
+
+def _required_evidence_prompt_rule(
+    *,
+    current_task: str,
+    evidence_context: str,
+    target_cwd: Path | str,
+) -> str:
+    contract = _required_evidence_contract(
+        current_task=current_task,
+        evidence_context=evidence_context,
+        target_cwd=target_cwd,
+    )
+    if not contract["required"]:
+        return ""
+    artifacts = ", ".join(contract["unavailable_artifacts"])
+    return "\n".join(
+        (
+            "REQUIRED_EVIDENCE_PREFLIGHT:",
+            (
+                "The following task-required artifacts are not available in "
+                f"the supplied context or workspace: {artifacts}."
+            ),
+            "Do not claim they were read, loaded, or verified.",
+            (
+                "Follow the user's explicit evidence-insufficient fallback: "
+                f"{contract['fallback_value']}."
+            ),
+        )
+    )
+
+
+def _required_evidence_assessment(
+    *,
+    current_task: str,
+    evidence_context: str,
+    output_text: str,
+    target_cwd: Path | str,
+) -> dict[str, Any]:
+    contract = _required_evidence_contract(
+        current_task=current_task,
+        evidence_context=evidence_context,
+        target_cwd=target_cwd,
+    )
+    if not contract["required"]:
+        return {
+            **contract,
+            "blocked": False,
+            "claimed_unavailable_artifacts": [],
+            "conflicting_decision_values": [],
+        }
+
+    output = str(output_text or "")
+    claimed: list[str] = []
+    for artifact_ref in contract["unavailable_artifacts"]:
+        basename = Path(artifact_ref).name
+        for match in re.finditer(re.escape(basename), output, re.IGNORECASE):
+            prefix = output[max(0, match.start() - 48) : match.start()]
+            if not _EVIDENCE_READ_CLAIM_RE.search(prefix):
+                continue
+            if re.search(
+                r"(?:未|没有|无法|尚未|不能|不可|not|never|unable)"
+                r".{0,20}$",
+                prefix,
+                re.IGNORECASE,
+            ):
+                continue
+            claimed.append(artifact_ref)
+            break
+
+    fallback = str(contract["fallback_value"])
+    decisions = [
+        claim
+        for claim in extract_claim_cards(
+            output,
+            subject="project:current",
+            source_pointer="required_evidence_guard",
+            default_confidence=0.9,
+        )
+        if (
+            str(claim.get("scope") or "").startswith("decision.")
+            or str(claim.get("scope") or "").startswith("config.decision")
+        )
+        and str(claim.get("polarity") or "positive") != "negative"
+    ]
+    conflicting_values = [
+        str(claim.get("value") or "")
+        for claim in decisions
+        if str(claim.get("value") or "").casefold() != fallback.casefold()
+    ]
+    return {
+        **contract,
+        "blocked": bool(claimed or conflicting_values),
+        "claimed_unavailable_artifacts": list(dict.fromkeys(claimed)),
+        "conflicting_decision_values": list(
+            dict.fromkeys(conflicting_values)
+        ),
+    }
 
 
 def _current_task_identity_assessment(

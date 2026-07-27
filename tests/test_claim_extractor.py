@@ -87,6 +87,58 @@ class ClaimExtractorTests(unittest.TestCase):
             "estimate.budget_total",
         )
 
+    def test_estimate_and_upper_bound_in_same_sentence_remain_distinct(
+        self,
+    ) -> None:
+        claims = extract_claim_cards(
+            "原方案总预算为2300元，已低于新上限2600元。",
+            subject="project:generic",
+        )
+        budget_claims = {
+            (str(claim["scope"]), str(claim["value"]))
+            for claim in claims
+            if "budget" in str(claim["scope"])
+        }
+
+        self.assertIn(("estimate.budget_total", "2300"), budget_claims)
+        self.assertIn(
+            ("constraint.budget_upper_bound", "2600"),
+            budget_claims,
+        )
+        self.assertNotIn(
+            ("constraint.budget_upper_bound", "2300"),
+            budget_claims,
+        )
+
+    def test_budget_revision_promotes_target_not_historical_source(
+        self,
+    ) -> None:
+        claims = extract_claim_cards(
+            "将总预算上限从3000元正式更新为2600元。",
+            subject="project:generic",
+        )
+        upper_bounds = [
+            claim
+            for claim in claims
+            if claim["scope"] == "constraint.budget_upper_bound"
+        ]
+
+        self.assertEqual([claim["value"] for claim in upper_bounds], ["2600"])
+        self.assertEqual(upper_bounds[0]["revision_kind"], "replaces")
+
+    def test_grouped_currency_amount_is_not_truncated(self) -> None:
+        claims = extract_claim_cards(
+            "总预算上限更新为2,600元。",
+            subject="project:generic",
+        )
+        upper_bounds = [
+            claim
+            for claim in claims
+            if claim["scope"] == "constraint.budget_upper_bound"
+        ]
+
+        self.assertEqual([claim["value"] for claim in upper_bounds], ["2600"])
+
     def test_explicit_overall_decision_is_preserved_as_a_typed_claim(self) -> None:
         claims = extract_claim_cards(
             (

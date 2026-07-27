@@ -493,6 +493,12 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
     current_task_identity_guard_blocked_count = _int(
         token_summary.get("current_task_identity_guard_blocked_count")
     )
+    required_evidence_guard_event_count = _int(
+        token_summary.get("required_evidence_guard_event_count")
+    )
+    required_evidence_guard_blocked_count = _int(
+        token_summary.get("required_evidence_guard_blocked_count")
+    )
     current_candidate_required_count = _int(
         token_summary.get("current_candidate_required_count")
     )
@@ -790,6 +796,16 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
             "current_task_identity_guard_blocked_count",
             current_task_identity_guard_blocked_count,
             "阻断并重新锚定到当前任务的输出次数",
+        ),
+        _row(
+            "required_evidence_guard_event_count",
+            required_evidence_guard_event_count,
+            "检测到必需证据不可用且输出越过保守回退要求的事件数",
+        ),
+        _row(
+            "required_evidence_guard_blocked_count",
+            required_evidence_guard_blocked_count,
+            "阻断无证据强结论并回退到用户指定保守状态的次数",
         ),
         _row(
             "current_candidate_required_count",
