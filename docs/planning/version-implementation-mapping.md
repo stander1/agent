@@ -5232,3 +5232,30 @@ v5.14r 完整复用 v5.14p 的冻结任务、Agent 配置、模型、温度、�
 新增审计只包含当前候选必需/可用/完整/缺失、候选 Token 和任务身份
 锚点；正式结论仍由 Provider 总 Token、端到端协作成本、双盲质量、
 完整交付、记忆正确性和协议卫生共同决定。
+
+## 82. v5.14s：历史约束与当前结果消歧
+
+v5.14s 根据 v5.14r 的真实终局失败证据，修复数值上限守卫把决策日志中的
+旧值误判为当前执行结果的问题。该阶段不放宽上限，而是明确区分当前总计、
+历史记录与显式替代关系。
+
+实现映射：
+
+- `agent_runtime/reliability/final_delivery_guard.py`：只把明确的总计表达纳入
+  当前结果校验；历史编号记录不作为当前结果；存在“从 X 调整为 Y”语义时
+  校验替代后的 Y；当前值仍高于上限时继续阻断；
+- `tests/test_final_delivery_guard.py`：覆盖历史值误报、显式替代和真实超限；
+- `experiments/v5.14s-superseded-constraint-resolution/`：在 openEuler 上运行
+  全量单元测试、通用机制验收、编译与不可变证据归档。
+
+通用边界：
+
+```text
+不识别 Question A/B、旅游或安全领域实体、固定预算数值和固定 Agent 名称；
+决策日志可以保留被替代值以满足可审计性；
+只有明确的当前总计或替代后数值参与上限比较；
+模糊时不伪造当前值，明确超限时仍然阻断。
+```
+
+详细说明见
+`docs/experiments/v5.14s-superseded-constraint-resolution.md`。

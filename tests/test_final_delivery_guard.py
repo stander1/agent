@@ -496,6 +496,61 @@ FINAL_ANSWER_READY"""
 
         self.assertTrue(assessment.valid)
 
+    def test_historical_budget_in_decision_log_is_not_current_total(self) -> None:
+        content = """## 最终可交付方案
+
+当前两人预算总计 2500 元。
+决策日志：
+- 交互 #1：最初总预算为 3000 元。
+- 交互 #8：总预算上限从 3000 元收紧到 2600 元。
+FINAL_ANSWER_READY"""
+
+        assessment = assess_final_delivery(
+            request="请生成完整方案，总预算不得超过 2600 元。",
+            content=content,
+            source="reviewer",
+            expected_source="reviewer",
+            marker="FINAL_ANSWER_READY",
+            require_marker=True,
+        )
+
+        self.assertTrue(assessment.valid)
+
+    def test_superseded_budget_uses_current_value_after_transition(self) -> None:
+        content = """## 最终可交付方案
+
+初始总预算 3000 元，现已调整为 2500 元。
+FINAL_ANSWER_READY"""
+
+        assessment = assess_final_delivery(
+            request="请生成完整方案，总预算不得超过 2600 元。",
+            content=content,
+            source="reviewer",
+            expected_source="reviewer",
+            marker="FINAL_ANSWER_READY",
+            require_marker=True,
+        )
+
+        self.assertTrue(assessment.valid)
+
+    def test_superseded_budget_still_rejects_excessive_current_value(self) -> None:
+        content = """## 最终可交付方案
+
+初始总预算 3000 元，现已调整为 2800 元。
+FINAL_ANSWER_READY"""
+
+        assessment = assess_final_delivery(
+            request="请生成完整方案，总预算不得超过 2600 元。",
+            content=content,
+            source="reviewer",
+            expected_source="reviewer",
+            marker="FINAL_ANSWER_READY",
+            require_marker=True,
+        )
+
+        self.assertFalse(assessment.valid)
+        self.assertIn("numeric_upper_bound_violation", assessment.reasons)
+
     def test_rejects_budget_total_above_nondelegable_upper_bound(self) -> None:
         assessment = assess_final_delivery(
             request="请生成完整执行方案，总预算不得超过 3000 元。",

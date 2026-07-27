@@ -133,7 +133,32 @@ _UPPER_BOUND_SIGNAL_RE = re.compile(
 _BUDGET_RESULT_RE = re.compile(
     r"(?i)(?:"
     r"\u603b\u8ba1|\u5408\u8ba1|\u603b\u91d1\u989d|\u603b\u8d39\u7528|"
-    r"\u9884\u7b97|budget|total(?:\s+cost)?|cost"
+    r"\u9884\u7b97\u603b\u8ba1|\u603b\u9884\u7b97|\u5b9e\u9645\u9884\u7b97|"
+    r"grand\s+total|budget\s+total|total\s+budget|actual\s+budget|"
+    r"total\s+cost"
+    r")"
+)
+_HISTORICAL_RECORD_RE = re.compile(
+    r"(?i)(?:"
+    r"(?:\u4ea4\u4e92|\u6b65\u9aa4|\u8f6e\u6b21|\u7248\u672c)"
+    r"\s*[#\uff03]?\s*\d+|"
+    r"\b(?:interaction|step|round|version)\s*[#:]?\s*\d+\b"
+    r")"
+)
+_HISTORICAL_BUDGET_RE = re.compile(
+    r"(?i)(?:"
+    r"\u6700\u521d|\u521d\u59cb|\u539f\u5b9a|\u539f\u9884\u7b97|"
+    r"\u6b64\u524d|\u4e4b\u524d|\u65e7\u7248|\u8c03\u6574\u524d|"
+    r"\b(?:initial|original|previous|prior|former|old)\b"
+    r")"
+)
+_BUDGET_SUPERSESSION_RE = re.compile(
+    r"(?i)(?:"
+    r"\u8c03\u6574\u4e3a|\u8c03\u6574\u81f3|\u6539\u4e3a|"
+    r"\u964d\u81f3|\u964d\u5230|\u6536\u7d27\u81f3|\u6536\u7d27\u5230|"
+    r"\u73b0\u4e3a|\u73b0\u5728\u4e3a|\u6700\u7ec8\u4e3a|\u6700\u7ec8\u81f3|"
+    r"\b(?:changed?|adjusted?|reduced?|lowered?)\s+to\b|"
+    r"\b(?:now|currently|finally)\s+(?:is|at)\b"
     r")"
 )
 _NUMBER_RE = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)(?![\w.])")
@@ -363,14 +388,7 @@ def _numeric_upper_bound_violations(
     for clause in semantic_clauses(body):
         if not _BUDGET_RESULT_RE.search(clause):
             continue
-        values = [
-            value
-            for value in _budget_values(clause)
-            if not (
-                1900 <= value <= 2100
-                and re.search(r"(?i)(?:year|date|\u5e74|\u65e5\u671f)", clause)
-            )
-        ]
+        values = _current_budget_result_values(clause)
         observed = max(values, default=0.0)
         if observed > active_bound:
             violations.append(
@@ -380,6 +398,44 @@ def _numeric_upper_bound_violations(
                 f"{_format_number(observed)}"
             )
     return tuple(dict.fromkeys(violations))
+
+
+def _current_budget_result_values(clause: str) -> list[float]:
+    text = str(clause or "")
+    quantities = list(parse_quantities(text))
+    monetary = [item for item in quantities if item.dimension == "money"]
+    candidates = monetary or [
+        item for item in quantities if item.dimension == "scalar"
+    ]
+    candidates = [
+        item
+        for item in candidates
+        if not (
+            1900 <= item.value <= 2100
+            and re.search(r"(?i)(?:year|date|\u5e74|\u65e5\u671f)", text)
+        )
+    ]
+    if not candidates:
+        return []
+
+    transition = None
+    for match in _BUDGET_SUPERSESSION_RE.finditer(text):
+        transition = match.end()
+    if transition is not None:
+        current = [item.value for item in candidates if item.start >= transition]
+        if current:
+            return current
+
+    if _HISTORICAL_RECORD_RE.search(text):
+        return []
+
+    current: list[float] = []
+    for item in candidates:
+        prefix = text[max(0, item.start - 36) : item.start]
+        if _HISTORICAL_BUDGET_RE.search(prefix):
+            continue
+        current.append(item.value)
+    return current
 
 
 def _current_task_missing_requirements(
