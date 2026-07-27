@@ -5305,3 +5305,20 @@ v5.14u 根据 v5.14t 的真实质量失败证据，修复两个通用问题：�
 
 详细说明见
 `docs/experiments/v5.14u-continuity-identity-memory-resolution.md`。
+
+## 85. v5.14v：连续任务与审批成果记忆正式回归
+
+v5.14v 将 v5.14u 放回真实 MiMo Provider、A1-A10/B1-B10 连续任务和
+Native、Observed、Managed 三组正式对照。任务、能力型 Agent 配置、模型、
+温度、九轮上限、匿名评分器及 v5.14t 全部门禁保持不变。
+
+新增证据：
+
+- 紧凑审批解析到前序有效业务成果并生成非拒绝类型化记忆引用的次数；
+- 当前任务身份守卫的真实触发记录、协作序号和被拦截的标签或交互序号；
+- 身份守卫零触发不视为失败，因为模型可能没有漂移；任何已触发事件都必须
+  具有明确错误断言和有效协作序号。
+
+该阶段不修改任务、提示词、输出长度、轮次和既有阈值，也不在生产运行时
+加入 Question A/B、业务实体、固定结论或固定 Agent 名称特判。详细说明见
+`docs/experiments/v5.14v-continuity-memory-formal-regression.md`。
