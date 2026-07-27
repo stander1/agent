@@ -331,6 +331,72 @@ FINAL_ANSWER_READY"""
         self.assertTrue(assessment.approved_prior_artifact)
         self.assertIn("review_feedback_not_final_artifact", assessment.reasons)
 
+    def test_rejects_revision_request_hidden_below_final_heading(self) -> None:
+        content = """## 最终可交付成果
+
+当前产出仅为修订说明，未提供用户要求的完整成果。
+请补充缺失字段并重新生成可独立阅读的交付物。
+FINAL_ANSWER_READY"""
+
+        assessment = assess_final_delivery(
+            request="请输出包含全部字段的完整成果。",
+            content=content,
+            source="reviewer",
+            expected_source="reviewer",
+            marker="FINAL_ANSWER_READY",
+            require_marker=True,
+        )
+
+        self.assertFalse(assessment.valid)
+        self.assertTrue(assessment.review_only)
+        self.assertIn("review_feedback_not_final_artifact", assessment.reasons)
+
+    def test_long_explicit_acceptance_still_references_prior_artifact(self) -> None:
+        content = (
+            "## 最终可交付成果\n\n"
+            "作为独立验收专家，我对 EvidenceAssembler42 提交的报告"
+            "进行了验收检查。所有证据、字段与约束均通过验收，批准该报告"
+            "作为最终交付物。\n"
+            + ("验收记录完整，未发现阻断问题。" * 180)
+            + "\nFINAL_ANSWER_READY"
+        )
+
+        assessment = assess_final_delivery(
+            request="请交付完整证据报告。",
+            content=content,
+            source="reviewer",
+            expected_source="reviewer",
+            marker="FINAL_ANSWER_READY",
+            require_marker=True,
+        )
+
+        self.assertGreater(len(content), 2600)
+        self.assertFalse(assessment.valid)
+        self.assertTrue(assessment.approved_prior_artifact)
+        self.assertTrue(assessment.review_only)
+
+    def test_acceptance_evaluation_is_not_the_submitted_artifact(self) -> None:
+        content = """## 最终可交付成果
+
+以下是对团队消息中 AuthorAgent 产出的验收评估与最终输出。
+一、字段完整性验收评估：全部字段已通过验收。
+二、证据血缘验收评估：引用关系完整。
+结论：该产出符合当前要求，无需修订。
+FINAL_ANSWER_READY"""
+
+        assessment = assess_final_delivery(
+            request="请输出一份可直接使用的结构化状态。",
+            content=content,
+            source="reviewer",
+            expected_source="reviewer",
+            marker="FINAL_ANSWER_READY",
+            require_marker=True,
+        )
+
+        self.assertFalse(assessment.valid)
+        self.assertTrue(assessment.approved_prior_artifact)
+        self.assertTrue(assessment.review_only)
+
     def test_rejects_budget_total_above_explicit_upper_bound(self) -> None:
         content = """## 最终可交付方案
 

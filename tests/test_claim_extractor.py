@@ -87,6 +87,57 @@ class ClaimExtractorTests(unittest.TestCase):
             "estimate.budget_total",
         )
 
+    def test_explicit_overall_decision_is_preserved_as_a_typed_claim(self) -> None:
+        claims = extract_claim_cards(
+            (
+                "| 候选标签 | 局部判断 |\n"
+                "| --- | --- |\n"
+                "| option_alpha | needs_review |\n"
+                "综合风险判断：needs_more_evidence（需要补充来源证据）。"
+            ),
+            subject="project:generic",
+        )
+        decisions = [
+            claim
+            for claim in claims
+            if claim["scope"] == "decision.risk"
+        ]
+
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0]["value"], "needs_more_evidence")
+        self.assertEqual(
+            decisions[0]["slot_id"],
+            "slot.system.design_decision",
+        )
+        self.assertEqual(decisions[0]["modality"], "decision")
+
+    def test_english_final_status_is_preserved_without_domain_rules(self) -> None:
+        claims = extract_claim_cards(
+            "Final status: ready_for_release.",
+            subject="project:generic",
+        )
+        decisions = [
+            claim
+            for claim in claims
+            if claim["scope"] == "decision.status"
+        ]
+
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0]["value"], "ready_for_release")
+
+    def test_assignment_suffix_is_not_promoted_to_global_decision(self) -> None:
+        claims = extract_claim_cards(
+            "reviewer completed T1; reviewer_result=completed",
+            subject="project:generic",
+        )
+
+        self.assertFalse(
+            any(
+                claim["slot_id"] == "slot.system.design_decision"
+                for claim in claims
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5096,3 +5096,39 @@ Observed、Managed 三组公平对照。任务、Agent、模型、温度、最�
   技术评分 checkpoint，只续跑未完成的技术审查，避免重跑 Agent 任务或
   已完成评分；
 - 该恢复不改变评分量表、分数上限、严重级别、质量合成规则和预注册阈值。
+
+## 76. v5.14m：Reviewer 成果所有权与结论连续性
+
+v5.14m 根据 v5.14l 正式回归的真实失败证据修复 Reviewer 审查文本误交付、
+验收时重复改写成果和明确结论未进入共享记忆三个通用根因。
+
+实现映射：
+
+- `agent_runtime/reliability/final_delivery_guard.py`：最终标题不能掩盖正文中的
+  当前成果缺失和继续修订语义；长篇验收评估仍被识别为前序成果批准；
+- `agent_runtime/adapters/autogen_termination.py`：复用既有任意 Agent 成果
+  晋升机制，交付原成果而不是 Reviewer 审查文本；
+- `agent_runtime/memory/claim_extractor.py`：提取独立的最终/当前/综合结论、
+  判断、状态及英文等价标签，写入类型化决策 scope，并排除标识符后缀误报；
+- `experiments/ordinary-developer-autogen/`：默认代码和 Studio 模板采用
+  Reviewer 否决或按引用批准协议；
+- `experiments/v5.14m-reviewer-artifact-continuity/`：冻结改进后的 A/B 配置，
+  提供不调用 Provider 的 openEuler 验收与不可变归档；
+- `tests/test_final_delivery_guard.py`、`test_autogen_termination.py`、
+  `test_claim_extractor.py` 和 `test_v514m_reviewer_artifact_continuity.py`：
+  覆盖真实失败同形边界和历史配置哈希保护。
+
+通用边界：
+
+```text
+生产运行时不识别 Question A/B、领域实体、固定数值或固定业务 Agent 名称；
+Reviewer 来源可配置，成果晋升对象是最近一份通过守卫的非 Reviewer 成果；
+明确结论按语义标签提取，不按具体结论值硬编码；
+旧正式实验配置和哈希不追溯修改；
+机制验收通过后仍需新的预注册 Provider 正式回归。
+```
+
+详细说明：
+`docs/experiments/v5.14m-reviewer-artifact-continuity.md`。
+v5.14l 结果：
+`docs/experiments/v5.14l-results-20260726.md`。

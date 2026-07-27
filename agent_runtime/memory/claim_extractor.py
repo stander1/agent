@@ -46,6 +46,19 @@ _CURRENCY_SUFFIX = r"(?:元|人民币|CNY|RMB|USD|美元)"
 _NON_MONETARY_COUNT_UNIT = (
     r"(?:人|位|名|天|晚|次|个|组|张|辆|间|份|项|轮|小时|分钟|岁)"
 )
+_EXPLICIT_DECISION_RE = re.compile(
+    r"(?<![A-Za-z0-9_])"
+    r"(?P<label>"
+    r"(?:(?:最终|当前|综合|总体)\s*)?(?:风险\s*)?"
+    r"(?:结论|判断|判定|决策|结果|状态)"
+    r"|(?:(?:final|current|overall)\s+)?"
+    r"(?:decision|verdict|outcome|result|status)"
+    r")"
+    r"\s*(?:为|是|=|:|：)\s*"
+    r"(?P<value>[A-Za-z][A-Za-z0-9_.-]{1,63}|"
+    r"[\u3400-\u4dbf\u4e00-\u9fff][^，。；;!?\n]{0,79})",
+    re.IGNORECASE,
+)
 
 
 def normalize_claim_cards(
@@ -135,6 +148,16 @@ def extract_claim_cards(
         )
 
         claims.extend(
+            _extract_explicit_decision_claims(
+                sentence,
+                subject=subject,
+                source_pointer=source_pointer,
+                confidence=confidence,
+                polarity=polarity,
+                revision_kind=revision_kind,
+            )
+        )
+        claims.extend(
             _extract_known_claims(
                 sentence,
                 subject=subject,
@@ -156,6 +179,50 @@ def extract_claim_cards(
         )
 
     return _dedupe_claims(item.to_dict() for item in claims)
+
+
+def _extract_explicit_decision_claims(
+    sentence: str,
+    *,
+    subject: str,
+    source_pointer: str,
+    confidence: float,
+    polarity: str,
+    revision_kind: str,
+) -> list[ExtractedClaim]:
+    rows: list[ExtractedClaim] = []
+    for match in _EXPLICIT_DECISION_RE.finditer(sentence):
+        label = match.group("label").strip()
+        value = _clean_decision_value(match.group("value"))
+        if not value:
+            continue
+        normalized_label = _normalize_key(label)
+        if re.search(r"(?:风险|risk)", label, re.IGNORECASE):
+            scope = "decision.risk"
+        elif re.search(r"(?:状态|status)", label, re.IGNORECASE):
+            scope = "decision.status"
+        elif re.search(r"(?:决策|decision)", label, re.IGNORECASE):
+            scope = "decision.selection"
+        else:
+            scope = "decision.outcome"
+        rows.append(
+            _claim(
+                subject,
+                normalized_label,
+                "slot.system.design_decision",
+                scope,
+                value,
+                _infer_value_type(value),
+                "",
+                sentence,
+                "decision",
+                polarity,
+                max(confidence, 0.93),
+                revision_kind,
+                source_pointer,
+            )
+        )
+    return rows
 
 
 def claim_identity(claim: dict[str, Any]) -> str:
@@ -548,6 +615,14 @@ def _clean_markup(text: str) -> str:
     cleaned = re.sub(r"[#>*`]+", " ", text)
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned.strip(" |-")
+
+
+def _clean_decision_value(value: str) -> str:
+    cleaned = str(value or "").strip(" \t\r\n`*_\"'，,。.;；:：")
+    cleaned = re.split(r"\s*[（(]\s*", cleaned, maxsplit=1)[0].strip()
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{1,63}", cleaned):
+        return cleaned
+    return cleaned[:80].rstrip("，,。.;；:：")
 
 
 def _polarity(text: str) -> str:

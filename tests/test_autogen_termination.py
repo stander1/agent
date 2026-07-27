@@ -368,6 +368,38 @@ class ReviewerFinalTextTerminationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resolved.origin_source, "specialist")
         self.assertEqual(resolved.resolution_kind, "prior_artifact_approved")
 
+    async def test_long_reviewer_acceptance_promotes_arbitrary_prior_agent(self) -> None:
+        artifact = (
+            "## Complete evidence artifact\n\n"
+            "The artifact contains source lineage, findings, uncertainty, "
+            "mitigations, owners, and acceptance criteria."
+        )
+        await self.condition(
+            [TextMessage(content=artifact, source="DomainAgent17")]
+        )
+        review = (
+            "## 最终可交付成果\n\n"
+            "作为独立验收专家，我对 DomainAgent17 提交的报告进行了验收检查。"
+            "所有字段均通过验收，批准该报告作为最终交付物。\n"
+            + ("验收记录完整，未发现阻断问题。" * 180)
+            + f"\n{MARKER}"
+        )
+
+        result = await self.condition(
+            [TextMessage(content=review, source="reviewer")]
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            self.condition.last_resolved_artifact.origin_source,
+            "DomainAgent17",
+        )
+        self.assertEqual(
+            self.condition.last_resolved_artifact.resolution_kind,
+            "prior_artifact_approved",
+        )
+        self.assertIn("source lineage", self.condition.last_resolved_artifact.content)
+
     async def test_rejects_review_summary_mislabeled_as_delivery_highlights(self) -> None:
         result = await self.condition(
             [

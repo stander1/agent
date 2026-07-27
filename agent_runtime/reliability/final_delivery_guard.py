@@ -65,6 +65,8 @@ _REVIEW_PROCESS_SIGNAL_RE = re.compile(
     r"作为.{0,40}(?:验收|审查|审核|评审)(?:专家|角色|人员)"
     r"|对.{0,100}(?:提交|产出|成果|草稿|报告).{0,50}"
     r"(?:进行|完成).{0,8}(?:审查|验收|审核|评审|检查)"
+    r"|(?:验收|审查|审核|评审)(?:评估|报告|结论|意见|摘要)"
+    r"|(?:审计)?验收专家结论"
     r"|检查重点|验收检查|产物验收|所有产出.{0,24}通过验收"
     r")"
 )
@@ -97,6 +99,14 @@ _REVISION_REQUIRED_RE = re.compile(
     r".{0,6}(?:\u540e\u518d|\u540e\u91cd\u65b0))"
     r"|\u4e0d\u5408\u683c|\u672a\u901a\u8fc7|\u5c1a\u672a|"
     r"revise|revision|required\s+changes?|repair|failed?"
+    r")"
+)
+_CURRENT_ARTIFACT_DEFICIENCY_RE = re.compile(
+    r"(?is)(?:"
+    r"(?:当前|本次|本轮|这份|该)(?:产出|成果|草稿|交付物|回答|回复)"
+    r".{0,96}(?:仅为|只是|缺少|缺失|未提供|未包含|尚未|不完整|不合格|无法交付)"
+    r"|(?:current|submitted|this)\s+(?:output|artifact|draft|deliverable|answer)"
+    r".{0,96}(?:only|missing|omits?|incomplete|not\s+provided|not\s+deliverable)"
     r")"
 )
 _BUDGET_CONTEXT_RE = re.compile(
@@ -208,6 +218,10 @@ def assess_final_delivery(
     review_only_signal = bool(_REVIEW_ONLY_SIGNAL_RE.search(body))
     delivery_boundary = has_explicit_delivery_boundary(body)
     approved_prior_artifact = is_prior_artifact_approval(body)
+    revision_required = bool(_REVISION_REQUIRED_RE.search(body))
+    current_artifact_deficient = bool(
+        _CURRENT_ARTIFACT_DEFICIENCY_RE.search(body)
+    )
     integrated_final_artifact = bool(
         _INTEGRATED_FINAL_ARTIFACT_RE.search(body)
         or (
@@ -220,7 +234,11 @@ def assess_final_delivery(
         or review_only_signal
         or (
             review_heading
-            and bool(_REVISION_REQUIRED_RE.search(body))
+            and revision_required
+        )
+        or (
+            revision_required
+            and current_artifact_deficient
         )
     ) and not integrated_final_artifact
     review_only = (
@@ -291,7 +309,7 @@ def has_explicit_delivery_boundary(content: str) -> bool:
 
 def is_prior_artifact_approval(content: str) -> bool:
     body = str(content or "").strip()
-    if not body or len(body) > 2600:
+    if not body:
         return False
     if _REVISION_REQUIRED_RE.search(body):
         return False
@@ -302,10 +320,10 @@ def is_prior_artifact_approval(content: str) -> bool:
         _SUBMITTED_ARTIFACT_REFERENCE_RE.search(body)
         and _REVIEW_PROCESS_SIGNAL_RE.search(body)
     )
-    return bool(
-        (prior_reference or submitted_artifact_reference)
-        and _PRIOR_ARTIFACT_APPROVAL_RE.search(body)
-    )
+    approval = bool(_PRIOR_ARTIFACT_APPROVAL_RE.search(body))
+    if submitted_artifact_reference and approval:
+        return True
+    return bool(len(body) <= 2600 and prior_reference and approval)
 
 
 def _numeric_upper_bound_violations(
