@@ -667,6 +667,15 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "current_task_role_view_saved_tokens": 0,
         "current_task_role_view_reduction_ratio": 0.0,
         "current_task_fidelity_failure_count": 0,
+        "current_task_identity_anchored_count": 0,
+        "current_task_identity_guard_event_count": 0,
+        "current_task_identity_guard_blocked_count": 0,
+        "current_candidate_required_count": 0,
+        "current_candidate_available_count": 0,
+        "current_candidate_complete_count": 0,
+        "current_candidate_missing_count": 0,
+        "current_candidate_source_tokens": 0,
+        "current_candidate_selected_tokens": 0,
         "final_delivery_assessed_count": 0,
         "final_delivery_valid_count": 0,
         "final_delivery_invalid_count": 0,
@@ -1015,6 +1024,11 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
                     "model_visible_agent_output_protocol_marker_count"
                 ] += marker_count
             continue
+        if event_type == "autogen_current_task_identity_guard":
+            breakdown["current_task_identity_guard_event_count"] += 1
+            if str(payload.get("status") or "") == "blocked_and_reanchored":
+                breakdown["current_task_identity_guard_blocked_count"] += 1
+            continue
         if event_type in shadow_event_types:
             native, runtime, _, _, _ = _autogen_event_cost(payload)
             if native > 0 or runtime > 0:
@@ -1120,6 +1134,33 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
             if isinstance(payload.get("rewrite_safety"), dict)
             else {}
         )
+        candidate_required = bool(
+            rewrite_safety.get("current_candidate_required")
+        )
+        candidate_available = bool(
+            rewrite_safety.get("current_candidate_available")
+        )
+        candidate_complete = bool(
+            rewrite_safety.get("current_candidate_complete")
+        )
+        if candidate_required:
+            breakdown["current_candidate_required_count"] += 1
+            breakdown["current_candidate_available_count"] += int(
+                candidate_available
+            )
+            breakdown["current_candidate_missing_count"] += int(
+                not candidate_available
+            )
+            breakdown["current_candidate_source_tokens"] += _int(
+                rewrite_safety.get("current_candidate_source_tokens")
+            )
+        if applied and candidate_required and candidate_complete:
+            breakdown["current_candidate_complete_count"] += 1
+            breakdown["current_candidate_selected_tokens"] += _int(
+                rewrite_safety.get("current_candidate_selected_tokens")
+            )
+        if applied and rewrite_safety.get("current_task_identity_anchored"):
+            breakdown["current_task_identity_anchored_count"] += 1
         if applied and rewrite_safety.get("team_receiver_role_view_hydration"):
             receiver_role_view_hydrations += 1
         if (

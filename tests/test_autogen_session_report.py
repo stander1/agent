@@ -12,6 +12,7 @@ from agent_runtime.eval.experiment_archive import (
 )
 from agent_runtime.eval.autogen_session_report import (
     SessionReportRequest,
+    _metric_rows,
     _state_summary,
     build_autogen_session_report,
     render_autogen_session_report,
@@ -321,8 +322,21 @@ class AutoGenSessionReportTest(unittest.TestCase):
                     "current_task_role_view_candidate_tokens": 120,
                     "current_task_no_expansion_fallback_count": 1,
                     "rewrite_safety": {
-                        "team_receiver_role_view_hydration": True
+                        "team_receiver_role_view_hydration": True,
+                        "current_task_identity_anchored": True,
+                        "current_candidate_required": True,
+                        "current_candidate_available": True,
+                        "current_candidate_complete": True,
+                        "current_candidate_source_tokens": 55,
+                        "current_candidate_selected_tokens": 55,
                     },
+                },
+            },
+            {
+                "event_type": "autogen_current_task_identity_guard",
+                "payload": {
+                    "status": "blocked_and_reanchored",
+                    "task_sequence_index": 3,
                 },
             },
             {
@@ -422,6 +436,26 @@ class AutoGenSessionReportTest(unittest.TestCase):
         self.assertEqual(summary["current_task_role_view_saved_tokens"], 60)
         self.assertEqual(summary["current_task_role_view_reduction_ratio"], 0.6)
         self.assertEqual(summary["current_task_fidelity_failure_count"], 0)
+        self.assertEqual(summary["current_task_identity_anchored_count"], 1)
+        self.assertEqual(summary["current_task_identity_guard_event_count"], 1)
+        self.assertEqual(summary["current_task_identity_guard_blocked_count"], 1)
+        self.assertEqual(summary["current_candidate_required_count"], 1)
+        self.assertEqual(summary["current_candidate_available_count"], 1)
+        self.assertEqual(summary["current_candidate_complete_count"], 1)
+        self.assertEqual(summary["current_candidate_missing_count"], 0)
+        self.assertEqual(summary["current_candidate_source_tokens"], 55)
+        self.assertEqual(summary["current_candidate_selected_tokens"], 55)
+        metrics = {
+            row["metric"]: row["value"]
+            for row in _metric_rows(summary)
+        }
+        self.assertEqual(metrics["current_task_identity_anchored_count"], 1)
+        self.assertEqual(
+            metrics["current_task_identity_guard_blocked_count"],
+            1,
+        )
+        self.assertEqual(metrics["current_candidate_complete_count"], 1)
+        self.assertEqual(metrics["current_candidate_selected_tokens"], 55)
         self.assertEqual(summary["final_delivery_assessed_count"], 1)
         self.assertEqual(summary["final_delivery_valid_count"], 1)
         self.assertEqual(summary["final_delivery_invalid_count"], 0)

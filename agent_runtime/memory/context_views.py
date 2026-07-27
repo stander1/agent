@@ -379,7 +379,8 @@ _CLAIM_RE = re.compile(r"\bclaim=([^;]+)")
 _CURRENT_USER_TASK_BLOCK_RE = re.compile(
     r"(?ms)^CURRENT_USER_TASK(?: \(highest priority\))?:\s*\n"
     r"(?P<body>.*?)"
-    r"(?=^(?:GROUNDING_RULE|USER_REQUEST_HISTORY|LATEST_UPSTREAM_MESSAGE|"
+    r"(?=^(?:CURRENT_TASK_IDENTITY_RULE|GROUNDING_RULE|USER_REQUEST_HISTORY|"
+    r"LATEST_UPSTREAM_MESSAGE|CURRENT_CANDIDATE_ARTIFACT|"
     r"PRIOR_UPSTREAM_DIGEST|CAPABILITY_PROMPT_VIEW|CURRENT_TASK_CONTEXT)"
     r"(?:\s*\[[^\]]+\])?(?:\s*\([^)]*\))?:|\Z)"
 )
@@ -731,8 +732,10 @@ def _collect_units(prompt_views: list[str]) -> list[_ViewUnit]:
                     for field_name, cues in FIELD_CUES.items()
                     if any(cue.casefold() in text.casefold() for cue in cues)
                 )
-                mandatory = current_task_protected or text.startswith(
-                    "[revision_guard"
+                mandatory = (
+                    current_task_protected
+                    or text.startswith("[revision_guard")
+                    or text.startswith("[current_task_identity]")
                 )
                 if text.startswith("[revision_guard") and "revisions" not in fields:
                     fields = (*fields, "revisions")

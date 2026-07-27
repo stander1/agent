@@ -484,6 +484,33 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
     current_task_fidelity_failure_count = _int(
         token_summary.get("current_task_fidelity_failure_count")
     )
+    current_task_identity_anchored_count = _int(
+        token_summary.get("current_task_identity_anchored_count")
+    )
+    current_task_identity_guard_event_count = _int(
+        token_summary.get("current_task_identity_guard_event_count")
+    )
+    current_task_identity_guard_blocked_count = _int(
+        token_summary.get("current_task_identity_guard_blocked_count")
+    )
+    current_candidate_required_count = _int(
+        token_summary.get("current_candidate_required_count")
+    )
+    current_candidate_available_count = _int(
+        token_summary.get("current_candidate_available_count")
+    )
+    current_candidate_complete_count = _int(
+        token_summary.get("current_candidate_complete_count")
+    )
+    current_candidate_missing_count = _int(
+        token_summary.get("current_candidate_missing_count")
+    )
+    current_candidate_source_tokens = _int(
+        token_summary.get("current_candidate_source_tokens")
+    )
+    current_candidate_selected_tokens = _int(
+        token_summary.get("current_candidate_selected_tokens")
+    )
     final_delivery_assessed_count = _int(
         token_summary.get("final_delivery_assessed_count")
     )
@@ -748,6 +775,51 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
             "current_task_fidelity_failure_count",
             current_task_fidelity_failure_count,
             "当前用户任务受保护语义单元未完整保留的次数",
+        ),
+        _row(
+            "current_task_identity_anchored_count",
+            current_task_identity_anchored_count,
+            "改写后仍显式携带当前任务身份锚点的次数",
+        ),
+        _row(
+            "current_task_identity_guard_event_count",
+            current_task_identity_guard_event_count,
+            "检测到输出任务身份漂移并执行守卫的事件数",
+        ),
+        _row(
+            "current_task_identity_guard_blocked_count",
+            current_task_identity_guard_blocked_count,
+            "阻断并重新锚定到当前任务的输出次数",
+        ),
+        _row(
+            "current_candidate_required_count",
+            current_candidate_required_count,
+            "按能力与语义动作判定必须读取当前候选交付物的改写次数",
+        ),
+        _row(
+            "current_candidate_available_count",
+            current_candidate_available_count,
+            "必须读取且成功定位当前候选交付物的次数",
+        ),
+        _row(
+            "current_candidate_complete_count",
+            current_candidate_complete_count,
+            "实际改写中完整保留当前候选交付物的次数",
+        ),
+        _row(
+            "current_candidate_missing_count",
+            current_candidate_missing_count,
+            "必须读取但未定位到当前候选交付物的次数",
+        ),
+        _row(
+            "current_candidate_source_tokens",
+            current_candidate_source_tokens,
+            "验证类接收者所需当前候选交付物的来源 Token",
+        ),
+        _row(
+            "current_candidate_selected_tokens",
+            current_candidate_selected_tokens,
+            "实际进入验证类接收者上下文的完整候选交付物 Token",
         ),
         _row(
             "final_delivery_assessed_count",

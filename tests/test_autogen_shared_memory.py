@@ -682,6 +682,221 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                     rewrite["payload"]["rewritten_input_tokens"],
                 )
 
+    def test_validation_capability_receives_complete_latest_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = {
+                "AGENTLITE_AUTOGEN_BROADCAST_MODE": "real-rewrite",
+                "AGENTLITE_AUTOGEN_TEAM_REWRITE": "1",
+                "AGENTLITE_AUTOGEN_SHARED_MEMORY": "1",
+                "AGENTLITE_MEMORY_SCOPE": "candidate-evidence-test",
+            }
+            with patch.dict("os.environ", env, clear=False):
+                composer = ProfiledAgent(
+                    "DeliveryComposer",
+                    "Write a complete deliverable from confirmed requirements.",
+                    "Synthesize the current plan into a complete artifact.",
+                )
+                sentinel = ProfiledAgent(
+                    "QualitySentinel",
+                    "Validator and auditor of the latest candidate deliverable.",
+                    "Review every constraint, number, and evidence item.",
+                )
+                manager = AutoGenHookManager(
+                    self._context(root, "launch_candidate_evidence")
+                )
+                current_task = (
+                    "Validate the latest complete candidate against every "
+                    "budget and delivery constraint."
+                )
+                manager.record_call_start(
+                    instance=ProfiledTeam([composer, sentinel]),
+                    method_name="run_stream",
+                    target_kind="agentchat_team",
+                    args=(),
+                    kwargs={"task": current_task},
+                )
+                candidate_lines = [
+                    "CURRENT_CANDIDATE_BEGIN",
+                    *[
+                        f"Line {index}: evidence item {index}, amount={index * 7}."
+                        for index in range(1, 260)
+                    ],
+                    "CURRENT_CANDIDATE_MIDDLE_MUST_SURVIVE",
+                    *[
+                        f"Constraint {index}: verified value={index * 11}."
+                        for index in range(260, 520)
+                    ],
+                    "CURRENT_CANDIDATE_END",
+                ]
+                candidate = "\n".join(candidate_lines)
+                messages = [
+                    {
+                        "type": "TextMessage",
+                        "content": "obsolete material " * 5000,
+                        "source": "LegacyWorker",
+                    },
+                    {
+                        "type": "TextMessage",
+                        "content": current_task,
+                        "source": "user",
+                    },
+                    {
+                        "type": "TextMessage",
+                        "content": candidate,
+                        "source": "DeliveryComposer",
+                    },
+                ]
+                context = manager.record_call_start(
+                    instance=sentinel,
+                    method_name="on_messages_stream",
+                    target_kind="agentchat_agent",
+                    args=(messages,),
+                    kwargs={},
+                )
+
+                rewritten_args, _ = manager.rewrite_call_arguments_if_safe(
+                    context,
+                    (messages,),
+                    {},
+                )
+
+                rewritten = rewritten_args[0][0]["content"]
+                self.assertIn("CURRENT_CANDIDATE_ARTIFACT", rewritten)
+                self.assertIn("CURRENT_CANDIDATE_BEGIN", rewritten)
+                self.assertIn(
+                    "CURRENT_CANDIDATE_MIDDLE_MUST_SURVIVE",
+                    rewritten,
+                )
+                self.assertIn("CURRENT_CANDIDATE_END", rewritten)
+                self.assertIn("[current_task_identity]", rewritten)
+                self.assertNotIn("obsolete material", rewritten)
+
+                events = self._events(manager.output_dir / "trace.jsonl")
+                rewrite = next(
+                    item
+                    for item in reversed(events)
+                    if item.get("event_type") == "autogen_agent_input_real_rewrite"
+                    and item.get("payload", {}).get("call_id") == context.call_id
+                )
+                safety = rewrite["payload"]["rewrite_safety"]
+                self.assertTrue(safety["current_candidate_required"])
+                self.assertTrue(safety["current_candidate_available"])
+                self.assertTrue(safety["current_candidate_complete"])
+                self.assertEqual(
+                    safety["current_candidate_source_chars"],
+                    len(candidate),
+                )
+                self.assertEqual(
+                    safety["current_candidate_selected_chars"],
+                    len(candidate),
+                )
+                self.assertGreater(
+                    rewrite["payload"]["native_input_tokens"],
+                    rewrite["payload"]["rewritten_input_tokens"],
+                )
+
+    def test_current_task_identity_guard_is_generic_and_sequence_grounded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = {
+                "AGENTLITE_AUTOGEN_BROADCAST_MODE": "real-rewrite",
+                "AGENTLITE_AUTOGEN_TEAM_REWRITE": "1",
+                "AGENTLITE_AUTOGEN_SHARED_MEMORY": "1",
+                "AGENTLITE_MEMORY_SCOPE": "task-identity-test",
+            }
+            with patch.dict("os.environ", env, clear=False):
+                coordinator = ProfiledAgent(
+                    "RiskCoordinator",
+                    "Plan evidence matching without changing task identity.",
+                    "Coordinate the current request and preserve its identity.",
+                )
+                team = ProfiledTeam([coordinator])
+                manager = AutoGenHookManager(
+                    self._context(root, "launch_task_identity")
+                )
+                for index in range(1, 9):
+                    manager.record_call_start(
+                        instance=team,
+                        method_name="run_stream",
+                        target_kind="agentchat_team",
+                        args=(),
+                        kwargs={"task": f"Prior interaction {index}."},
+                    )
+                current_task = (
+                    "Use R1, R6, and R7 evidence to assess the current risk. "
+                    "Do not advance to a later task."
+                )
+                manager.record_call_start(
+                    instance=team,
+                    method_name="run_stream",
+                    target_kind="agentchat_team",
+                    args=(),
+                    kwargs={"task": current_task},
+                )
+                context = manager.record_call_start(
+                    instance=coordinator,
+                    method_name="on_messages",
+                    target_kind="agentchat_agent",
+                    args=([FakeTextMessage(current_task, "user")],),
+                    kwargs={},
+                )
+
+                guarded = manager.guard_call_result_if_needed(
+                    context,
+                    FakeTextMessage(
+                        "识别本轮（R10）交付物要求并继续生成下一轮方案。",
+                        "RiskCoordinator",
+                    ),
+                )
+
+                self.assertIn("interaction #9", guarded.content)
+                self.assertIn(current_task, guarded.content)
+                self.assertNotIn("R10", guarded.content)
+                events = self._events(manager.output_dir / "trace.jsonl")
+                guard = next(
+                    item
+                    for item in reversed(events)
+                    if item.get("event_type")
+                    == "autogen_current_task_identity_guard"
+                )
+                self.assertEqual(
+                    guard["payload"]["expected_identity"],
+                    "R9",
+                )
+                self.assertEqual(
+                    guard["payload"]["unsupported_claims"],
+                    ["R10"],
+                )
+
+    def test_current_task_identity_guard_does_not_mutate_shadow_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.dict(
+                "os.environ",
+                {
+                    "AGENTLITE_AUTOGEN_BROADCAST_MODE": "shadow-only",
+                    "AGENTLITE_AUTOGEN_SHARED_MEMORY": "0",
+                },
+                clear=False,
+            ):
+                manager = AutoGenHookManager(
+                    self._context(root, "launch_identity_observed")
+                )
+                context = SimpleNamespace(
+                    target_kind="agentchat_agent",
+                    method_name="on_messages",
+                )
+                original = FakeTextMessage(
+                    "The current task is R10.",
+                    "RiskCoordinator",
+                )
+                guarded = manager._guard_current_task_identity_if_needed(
+                    context,
+                    original,
+                )
+                self.assertIs(guarded, original)
+
     def test_real_rewrite_removes_memory_already_covered_by_latest_upstream(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

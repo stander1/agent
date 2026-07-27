@@ -99,6 +99,38 @@ _AUTOGEN_REPEATED_INSTANCE_ID_RE = re.compile(
 CONTINUITY_COST_GATE_REASONS = frozenset(
     {"token_not_reduced", "team_task_token_not_reduced"}
 )
+CURRENT_CANDIDATE_REQUIRED_ACTIONS = frozenset(
+    {
+        "REVIEW_OUTPUT",
+        "REVIEW_SCHEMA",
+        "VERIFY_CLAIM",
+        "DIAGNOSE_FAILURE",
+    }
+)
+CURRENT_CANDIDATE_REQUIRED_CAPABILITIES = frozenset(
+    {
+        "validation",
+        "final_deliverable_review",
+        "schema_review",
+        "failure_review",
+    }
+)
+_TASK_LABEL_RE = re.compile(
+    r"\b(?P<prefix>[A-Za-z][A-Za-z0-9_.-]*?)(?P<number>\d+)\b"
+)
+_CURRENT_TASK_ASSERTION_PATTERNS = (
+    re.compile(
+        r"(?:本轮|当前(?:任务|步骤|阶段)|本任务|本阶段)"
+        r"\s*[（(]?\s*(?P<label>[A-Za-z][A-Za-z0-9_.-]*?\d+)"
+        r"\s*[）)]?",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:current\s+(?:task|round|step|stage)|this\s+(?:task|round|step|stage))"
+        r"\s*(?:is|=|:)?\s*(?P<label>[A-Za-z][A-Za-z0-9_.-]*?\d+)\b",
+        re.IGNORECASE,
+    ),
+)
 _GENERIC_NUMERIC_CONCEPT_BIGRAMS = frozenset(
     {
         "任务",
@@ -256,6 +288,7 @@ class HookCallContext:
     continuity_context_required: bool = False
     continuity_context_reasons: tuple[str, ...] = ()
     semantic_action: str = "HANDLE_TASK"
+    task_sequence_index: int = 0
     started_at: float = field(default_factory=time.perf_counter)
     display_restore_enabled: bool = False
     display_original_text: str = ""
@@ -265,6 +298,7 @@ class HookCallContext:
     memory_adoption_guard_cache: dict[str, tuple[str, dict[str, Any]]] = field(
         default_factory=dict
     )
+    task_identity_guard_cache: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -404,6 +438,7 @@ class AutoGenHookManager:
         self._collaboration_group_by_agent: dict[str, str] = {}
         self._current_team_task_by_group: dict[str, str] = {}
         self._user_task_history_by_group: dict[str, list[str]] = {}
+        self._team_task_sequence_by_group: dict[str, int] = {}
         self._memory_injections_by_call: dict[str, list[_InjectedMemoryRecord]] = {}
         self._core_response_rewrite_depth = 0
         self._patched_methods: set[str] = set()
@@ -669,6 +704,77 @@ class AutoGenHookManager:
             if records:
                 self._memory_injections_by_call[context.call_id] = records
 
+    def _guard_current_task_identity_if_needed(
+        self,
+        context: HookCallContext,
+        result: Any,
+    ) -> Any:
+        if self.broadcast_mode != "real-rewrite":
+            return result
+        if context.target_kind != "agentchat_agent":
+            return result
+        if context.method_name not in {"on_messages", "on_messages_stream"}:
+            return result
+        output_text = _memory_guard_result_text(result)
+        if not output_text.strip():
+            return result
+        output_fingerprint = _text_fingerprint(output_text)
+        cached_text = context.task_identity_guard_cache.get(output_fingerprint)
+        if cached_text is not None:
+            cloned = _clone_memory_guard_result(result, cached_text)
+            return cloned if cloned is not None else result
+
+        with self._memory_lock:
+            current_task = self._current_team_task_by_group.get(
+                context.task.group_id,
+                "",
+            )
+        assessment = _current_task_identity_assessment(
+            current_task=current_task or context.task.prompt,
+            output_text=output_text,
+            task_sequence_index=context.task_sequence_index,
+        )
+        if not assessment["blocked"]:
+            return result
+
+        correction = "\n".join(
+            (
+                "Current-task correction required.",
+                (
+                    f"This is collaboration interaction "
+                    f"#{context.task_sequence_index}. The preceding response "
+                    "renamed it with an unsupported task label that is not "
+                    "grounded in the current user request."
+                ),
+                "Continue from this exact current task without advancing to a "
+                "different task or round:",
+                current_task or context.task.prompt,
+            )
+        )
+        guarded_result = _clone_memory_guard_result(result, correction)
+        if guarded_result is None:
+            raise RuntimeError(
+                "AgentLite blocked current-task identity drift but could not "
+                "preserve the native AutoGen result type."
+            )
+        context.task_identity_guard_cache[output_fingerprint] = correction
+        self.trace.write(
+            "autogen_current_task_identity_guard",
+            {
+                "call_id": context.call_id,
+                "task_id": context.task.task_id,
+                "group_id": context.task.group_id,
+                "agent_id": context.agent.agent_id,
+                "role": context.agent.role,
+                "task_sequence_index": context.task_sequence_index,
+                "status": "blocked_and_reanchored",
+                **assessment,
+                "original_output_fingerprint": output_fingerprint,
+                "guarded_output_fingerprint": _text_fingerprint(correction),
+            },
+        )
+        return guarded_result
+
     def guard_call_result_if_needed(
         self,
         context: HookCallContext,
@@ -676,6 +782,7 @@ class AutoGenHookManager:
     ) -> Any:
         """Prevent superseded memory facts from leaving an Agent call."""
 
+        result = self._guard_current_task_identity_if_needed(context, result)
         if context.target_kind != "agentchat_agent":
             return result
         if context.method_name not in {"on_messages", "on_messages_stream"}:
@@ -1320,6 +1427,7 @@ class AutoGenHookManager:
             prompt=prompt,
             expected_agents=[agent.agent_id],
         )
+        task_sequence_index = 0
         if target_kind == "agentchat_team":
             task_value, _ = _extract_team_task_argument(args, kwargs)
             task_text, _ = _team_task_display_identity(task_value)
@@ -1335,10 +1443,24 @@ class AutoGenHookManager:
                     if not history or history[-1] != task_text.strip():
                         history.append(task_text.strip())
                         del history[:-8]
+                        self._team_task_sequence_by_group[task.group_id] = (
+                            self._team_task_sequence_by_group.get(task.group_id, 0)
+                            + 1
+                        )
+                    task_sequence_index = self._team_task_sequence_by_group.get(
+                        task.group_id,
+                        0,
+                    )
                 termination = getattr(instance, "_termination_condition", None)
                 recorder = getattr(termination, "record_user_task", None)
                 if callable(recorder):
                     recorder(task_text.strip())
+        else:
+            with self._memory_lock:
+                task_sequence_index = self._team_task_sequence_by_group.get(
+                    task.group_id,
+                    0,
+                )
         memory_context = self._prepare_shared_memory_context(
             task=task,
             target_kind=target_kind,
@@ -1372,6 +1494,7 @@ class AutoGenHookManager:
             continuity_context_required=bool(continuity_context_reasons),
             continuity_context_reasons=continuity_context_reasons,
             semantic_action=semantic_action,
+            task_sequence_index=task_sequence_index,
         )
         if target_kind == "agentchat_agent":
             self._safe_kernel_call(
@@ -1405,6 +1528,7 @@ class AutoGenHookManager:
                 "input_preview": _preview(prompt),
                 "team_participants": list(hook_context.team_participants),
                 "transport_metadata": hook_context.transport_metadata,
+                "task_sequence_index": hook_context.task_sequence_index,
                 "memory_refs": [
                     _memory_ref_payload(ref) for ref in memory_context.refs
                 ],
@@ -3260,6 +3384,7 @@ class AutoGenHookManager:
             current_task=current_team_task,
             user_task_history=user_task_history,
             final_delivery_marker=self.final_delivery_marker,
+            task_sequence_index=context.task_sequence_index,
         )
         receiver_profile = self.kernel.capability_profiles.get(
             context.agent.agent_id
@@ -3274,19 +3399,38 @@ class AutoGenHookManager:
             method_name=context.method_name,
             target_kind=context.target_kind,
         )
+        current_candidate = _current_candidate_artifact_view(
+            decoded_messages,
+            semantic_action=receiver_action,
+            capabilities=receiver_consumer.capabilities,
+            final_delivery_marker=self.final_delivery_marker,
+        )
+        chronology_source_view = (
+            _without_latest_upstream_message(chronology_view)
+            if current_candidate["available"]
+            else chronology_view
+        )
         minimal_chronology = build_minimal_context_view(
             query=current_team_task or context.task.prompt,
-            prompt_views=[chronology_view],
+            prompt_views=[chronology_source_view],
             consumer=receiver_consumer,
             action=receiver_action,
         )
         chronology_selection = _select_token_nonexpanding_view(
             self.token_counter,
-            source_views=[chronology_view],
+            source_views=[chronology_source_view],
             candidate_text=minimal_chronology.text,
         )
-        receiver_chronology_view = (
+        compact_chronology_view = (
             chronology_selection.text or chronology_view
+        )
+        receiver_chronology_view = "\n".join(
+            section
+            for section in (
+                compact_chronology_view,
+                str(current_candidate["text"]),
+            )
+            if section.strip()
         )
         chronology_safety = {
             "current_task_unit_count": minimal_chronology.current_task_unit_count,
@@ -3296,6 +3440,47 @@ class AutoGenHookManager:
             ),
             "current_task_view_selection_mode": (
                 chronology_selection.selection_mode
+            ),
+            "task_sequence_index": context.task_sequence_index,
+            "current_task_identity_anchored": (
+                "[current_task_identity]" in receiver_chronology_view
+            ),
+            "current_candidate_required": bool(
+                current_candidate["required"]
+            ),
+            "current_candidate_available": bool(
+                current_candidate["available"]
+            ),
+            "current_candidate_complete": bool(
+                current_candidate["complete"]
+            ),
+            "current_candidate_source": str(
+                current_candidate["source"]
+            ),
+            "current_candidate_source_chars": len(
+                str(current_candidate["content"])
+            ),
+            "current_candidate_selected_chars": len(
+                str(current_candidate["content"])
+            )
+            if current_candidate["complete"]
+            else 0,
+            "current_candidate_source_tokens": _count_tokens(
+                self.token_counter,
+                str(current_candidate["content"]),
+            ),
+            "current_candidate_selected_tokens": _count_tokens(
+                self.token_counter,
+                str(current_candidate["content"]),
+            )
+            if current_candidate["complete"]
+            else 0,
+            "current_candidate_view_mode": (
+                "capability_required_full_latest_artifact"
+                if current_candidate["complete"]
+                else "not_required"
+                if not current_candidate["required"]
+                else "required_candidate_missing"
             ),
         }
         state_refs = self._safe_kernel_call(
@@ -4863,17 +5048,23 @@ class AutoGenHookManager:
         )
         memory_refs = memory_selection.refs
         memory_prompt_views = memory_selection.prompt_views
+        current_task_source_view = "\n".join(
+            (
+                "CURRENT_USER_TASK (highest priority):",
+                current_task,
+                "CURRENT_TASK_IDENTITY_RULE:",
+                _current_task_identity_rule(context.task_sequence_index),
+            )
+        )
         current_task_view = build_minimal_context_view(
             query=current_task,
-            prompt_views=[
-                "CURRENT_USER_TASK (highest priority):\n" + current_task
-            ],
+            prompt_views=[current_task_source_view],
             consumer=consumer,
             action=memory_selection.semantic_action,
         )
         current_task_selection = _select_token_nonexpanding_view(
             self.token_counter,
-            source_views=[current_task],
+            source_views=[current_task_source_view],
             candidate_text=current_task_view.text,
         )
         envelope_json = self._safe_kernel_call(
@@ -4966,6 +5157,10 @@ class AutoGenHookManager:
             "current_task_units_preserved": (
                 current_task_selection.selection_mode == "source_no_expansion"
                 or current_task_view.current_task_units_preserved
+            ),
+            "task_sequence_index": context.task_sequence_index,
+            "current_task_identity_anchored": (
+                "[current_task_identity]" in current_task_selection.text
             ),
             "shadow_wire_envelope": wire_envelope,
             "schema_valid": schema_valid,
@@ -7627,6 +7822,7 @@ def _build_chronology_prompt_view(
     current_task: str = "",
     user_task_history: list[str] | tuple[str, ...] = (),
     final_delivery_marker: str = "",
+    task_sequence_index: int = 0,
 ) -> str:
     """Build a receiver view that preserves task and newest upstream semantics."""
 
@@ -7669,6 +7865,8 @@ def _build_chronology_prompt_view(
             [
                 "CURRENT_USER_TASK (highest priority):",
                 task_text,
+                "CURRENT_TASK_IDENTITY_RULE:",
+                _current_task_identity_rule(task_sequence_index),
             ]
         )
     prior_user_tasks = [
@@ -7707,6 +7905,182 @@ def _build_chronology_prompt_view(
     if sections:
         return "\n".join(sections)
     return ""
+
+
+def _current_task_identity_rule(task_sequence_index: int) -> str:
+    sequence = (
+        f" interaction #{task_sequence_index}"
+        if task_sequence_index > 0
+        else ""
+    )
+    return (
+        "[current_task_identity] The exact CURRENT_USER_TASK above is"
+        f"{sequence} and is the only current task. Historical labels and "
+        "agent-generated ordinals are context only; never rename, renumber, "
+        "or replace the current task."
+    )
+
+
+def _current_task_identity_assessment(
+    *,
+    current_task: str,
+    output_text: str,
+    task_sequence_index: int,
+) -> dict[str, Any]:
+    if task_sequence_index <= 0:
+        return {
+            "blocked": False,
+            "expected_identity": "",
+            "asserted_identities": [],
+            "unsupported_claims": [],
+            "inference_basis": "sequence_index_unavailable",
+        }
+
+    task_labels = [
+        (match.group("prefix"), int(match.group("number")))
+        for match in _TASK_LABEL_RE.finditer(str(current_task or ""))
+    ]
+    prefix_numbers: dict[str, set[int]] = {}
+    prefix_display: dict[str, str] = {}
+    for prefix, number in task_labels:
+        normalized_prefix = prefix.casefold()
+        prefix_numbers.setdefault(normalized_prefix, set()).add(number)
+        prefix_display.setdefault(normalized_prefix, prefix)
+    eligible_prefixes = [
+        prefix
+        for prefix, numbers in prefix_numbers.items()
+        if len(numbers) >= 2
+        and all(number <= task_sequence_index for number in numbers)
+    ]
+    if len(eligible_prefixes) != 1:
+        return {
+            "blocked": False,
+            "expected_identity": "",
+            "asserted_identities": [],
+            "unsupported_claims": [],
+            "inference_basis": "task_label_family_ambiguous",
+        }
+
+    expected_prefix = prefix_display[eligible_prefixes[0]]
+    expected_identity = f"{expected_prefix}{task_sequence_index}"
+    asserted = []
+    for pattern in _CURRENT_TASK_ASSERTION_PATTERNS:
+        asserted.extend(
+            match.group("label")
+            for match in pattern.finditer(str(output_text or ""))
+        )
+    asserted = list(dict.fromkeys(asserted))
+    unsupported = [
+        label
+        for label in asserted
+        if label.casefold() != expected_identity.casefold()
+    ]
+    return {
+        "blocked": bool(unsupported),
+        "expected_identity": expected_identity,
+        "asserted_identities": asserted,
+        "unsupported_claims": unsupported,
+        "inference_basis": (
+            "dominant_referenced_label_family_plus_collaboration_sequence"
+        ),
+    }
+
+
+def _requires_current_candidate_artifact(
+    *,
+    semantic_action: str,
+    capabilities: Iterable[str],
+) -> bool:
+    normalized_action = str(semantic_action or "").strip().upper()
+    normalized_capabilities = {
+        str(capability or "").strip().casefold()
+        for capability in capabilities
+        if str(capability or "").strip()
+    }
+    return (
+        normalized_action in CURRENT_CANDIDATE_REQUIRED_ACTIONS
+        or bool(
+            normalized_capabilities
+            & CURRENT_CANDIDATE_REQUIRED_CAPABILITIES
+        )
+    )
+
+
+def _current_candidate_artifact_view(
+    messages: list[Any],
+    *,
+    semantic_action: str,
+    capabilities: Iterable[str],
+    final_delivery_marker: str = "",
+) -> dict[str, Any]:
+    required = _requires_current_candidate_artifact(
+        semantic_action=semantic_action,
+        capabilities=capabilities,
+    )
+    if not required:
+        return {
+            "required": False,
+            "available": False,
+            "complete": False,
+            "source": "",
+            "content": "",
+            "text": "",
+        }
+
+    candidates: list[tuple[str, str]] = []
+    for message in messages:
+        source = str(getattr(message, "source", "") or "").strip() or "unknown"
+        native_type = str(getattr(message, "native_type", "") or "")
+        message_kind = str(getattr(message, "message_kind", "") or "")
+        if source.casefold() == "user" or message_kind != "text":
+            continue
+        if native_type.endswith("Event") or native_type == "ThoughtEvent":
+            continue
+        content = _sanitize_model_visible_content(
+            str(getattr(message, "content_text", "") or "")
+        )
+        content = _strip_exact_control_line(
+            content,
+            final_delivery_marker,
+        ).strip()
+        if content:
+            candidates.append((source, content))
+
+    if not candidates:
+        return {
+            "required": True,
+            "available": False,
+            "complete": False,
+            "source": "",
+            "content": "",
+            "text": "",
+        }
+    source, content = candidates[-1]
+    text = "\n".join(
+        (
+            f"CURRENT_CANDIDATE_ARTIFACT [{source}] "
+            "(authoritative candidate to validate; use in full):",
+            content,
+        )
+    )
+    return {
+        "required": True,
+        "available": True,
+        "complete": True,
+        "source": source,
+        "content": content,
+        "text": text,
+    }
+
+
+def _without_latest_upstream_message(view: str) -> str:
+    return re.sub(
+        r"(?ms)^LATEST_UPSTREAM_MESSAGE(?:\s*\[[^\]]+\])?"
+        r"(?:\s*\([^)]*\))?:\s*\n.*?"
+        r"(?=^PRIOR_UPSTREAM_DIGEST(?:\s*\[[^\]]+\])?:|\Z)",
+        "",
+        str(view or ""),
+    ).strip()
 
 
 def _strip_exact_control_line(content: str, marker: str) -> str:

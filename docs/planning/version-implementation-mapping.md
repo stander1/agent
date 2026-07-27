@@ -5190,3 +5190,35 @@ v5.14n 的成本、质量、交付、记忆、状态和协议卫生阈值一项�
 
 详细说明见
 `docs/experiments/v5.14p-compact-approval-formal-regression.md`。
+
+## 80. v5.14q：当前候选充分证据与任务身份
+
+v5.14q 根据 v5.14p 的真实 MiMo 失败证据修复两个通用问题：审查能力的
+角色视图裁掉当前候选正文，以及历史任务标签污染当前任务身份。
+
+实现映射：
+
+- `agent_runtime/drivers/autogen.py`：按动态能力画像和语义动作识别审查、
+  验证、格式检查与失败诊断职责，只为这些职责保留最近一份当前候选
+  交付物全文；旧历史和长期记忆继续压缩；
+- `agent_runtime/memory/context_views.py`：把当前任务身份锚点列为必须保留
+  的上下文单元；
+- 输出身份守卫结合协作序号和当前请求中可唯一推导的标签族，拦截极窄
+  范围的未来轮次自我标注；无法可靠推导时保持透传；
+- `experiments/v5.14q-candidate-evidence-task-identity/`：提供完整单元测试、
+  机制检查、环境指纹和不可变归档；
+- `tests/test_autogen_shared_memory.py`：使用任意命名的能力型 Agent 验证
+  候选首中尾完整、旧历史仍压缩、身份漂移拦截和无固定角色依赖。
+
+通用边界：
+
+```text
+不识别 Question A/B、业务实体、领域数值或 planner/writer/reviewer 固定名称；
+完整保留的是当前待验证候选，不是全部历史；
+语义必需证据可以覆盖局部压缩目标，但仍受结构、Schema 和组隔离约束；
+无法唯一推导任务身份时不做猜测性拦截；
+最终成本按通信、Prompt View、记忆、控制和重试的端到端口径核算。
+```
+
+详细说明见
+`docs/experiments/v5.14q-candidate-evidence-task-identity.md`。
