@@ -33,7 +33,11 @@ class OpenAICompatibleChatClient:
         self.config = config
 
     def auth_headers(self) -> dict[str, str]:
-        key = self.config.resolved_api_key
+        key = self.config.resolved_api_key.strip()
+        if not key:
+            raise RuntimeError("LLM API key is empty after whitespace normalization.")
+        if "\r" in key or "\n" in key:
+            raise RuntimeError("LLM API key contains unsupported newline characters.")
         if self.config.auth_scheme == "authorization_bearer":
             return {"Authorization": f"Bearer {key}"}
         if self.config.auth_scheme == "api_key":

@@ -41,6 +41,24 @@ class LlmClientTest(unittest.TestCase):
         )
         self.assertEqual(client.auth_headers(), {"Authorization": "Bearer test-key"})
 
+    def test_auth_header_normalizes_surrounding_whitespace(self) -> None:
+        client = CapturingClient(
+            LlmConfig(api_key="  test-key\r\n", auth_scheme="authorization_bearer")
+        )
+        self.assertEqual(client.auth_headers(), {"Authorization": "Bearer test-key"})
+
+    def test_auth_header_rejects_embedded_newline_without_leaking_secret(self) -> None:
+        client = CapturingClient(
+            LlmConfig(
+                api_key="test-secret\r\ninjected-header",
+                auth_scheme="authorization_bearer",
+            )
+        )
+        with self.assertRaises(RuntimeError) as caught:
+            client.auth_headers()
+        self.assertNotIn("test-secret", str(caught.exception))
+        self.assertNotIn("injected-header", str(caught.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,6 +11,7 @@ if [[ -t 0 ]]; then
 else
   IFS= read -r OPENAI_API_KEY
 fi
+OPENAI_API_KEY="${OPENAI_API_KEY%$'\r'}"
 if [[ -z "${OPENAI_API_KEY:-}" ]]; then
   echo "错误：MiMo API Key 为空，未启动正式实验。" >&2
   exit 2
