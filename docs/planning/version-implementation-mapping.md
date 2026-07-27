@@ -5161,3 +5161,32 @@ v5.14o 根据 v5.14n 的真实 MiMo 失败证据，补齐“上一份成果”�
 
 该机制不依赖 Question A/B、业务实体或成果 Agent 名称。详细说明见
 `docs/experiments/v5.14o-compact-review-approval.md`。
+
+## 79. v5.14p：紧凑审批准入正式回归
+
+v5.14p 将 v5.14o 已通过确定性验收的紧凑审批修复放回真实 MiMo Provider、
+A1-A10/B1-B10 连续任务及 Native、Observed、Managed 三组正式对照。任务、
+v5.14m Agent 配置、模型、温度、最大轮次、匿名评分器和全部门禁与 v5.14n
+保持一致。
+
+实现映射：
+
+- `experiments/v5.14p-compact-approval-formal-regression/preregistration.json`：
+  绑定 v5.14n 冻结输入、v5.14m Agent 配置和 v5.14o 机制验收器；
+- `run_openeuler.sh`：复用三组真实运行、评分、中断续跑和不可变归档设施；
+- `verify_acceptance.py`：继承原正式门禁，再验证紧凑审批引用晋升、成果所有权、
+  审批正文隔离和明确决策记忆；
+- `tests/test_v514p_compact_approval_formal_regression.py`：防止输入、阈值、
+  机制提交和验收脚本发生未声明漂移。
+
+公平性边界：
+
+```text
+生产运行时不识别 Question A/B、领域实体、固定数值或固定业务 Agent 名称；
+不修改任务、提示词、轮次和输出长度制造改善；
+v5.14n 的成本、质量、交付、记忆、状态和协议卫生阈值一项也不放宽；
+本次单次正式回归只验证修复是否恢复真实任务，不估计跨重复实验方差。
+```
+
+详细说明见
+`docs/experiments/v5.14p-compact-approval-formal-regression.md`。
