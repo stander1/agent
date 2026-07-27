@@ -131,6 +131,22 @@ _CURRENT_TASK_ASSERTION_PATTERNS = (
         re.IGNORECASE,
     ),
 )
+_CURRENT_INTERACTION_ASSERTION_PATTERNS = (
+    re.compile(
+        r"(?:本轮|当前用户指令|当前任务|本任务|本次(?:交互|任务)|"
+        r"当前(?:交互|轮次))"
+        r"\s*(?:[（(]\s*(?:交互|轮次|任务)?\s*#?|"
+        r"(?:交互|轮次)\s*#?|#\s*)"
+        r"(?P<number>\d+)\s*[）)]?",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:current|this)\s+(?:user\s+)?"
+        r"(?:interaction|round|task|request)"
+        r"\s*(?:is|=|:)?\s*#?\s*(?P<number>\d+)\b",
+        re.IGNORECASE,
+    ),
+)
 _GENERIC_NUMERIC_CONCEPT_BIGRAMS = frozenset(
     {
         "任务",
@@ -729,10 +745,17 @@ class AutoGenHookManager:
                 context.task.group_id,
                 "",
             )
+            user_task_history = tuple(
+                self._user_task_history_by_group.get(
+                    context.task.group_id,
+                    (),
+                )
+            )
         assessment = _current_task_identity_assessment(
             current_task=current_task or context.task.prompt,
             output_text=output_text,
             task_sequence_index=context.task_sequence_index,
+            user_task_history=user_task_history,
         )
         if not assessment["blocked"]:
             return result
@@ -743,8 +766,8 @@ class AutoGenHookManager:
                 (
                     f"This is collaboration interaction "
                     f"#{context.task_sequence_index}. The preceding response "
-                    "renamed it with an unsupported task label that is not "
-                    "grounded in the current user request."
+                    "asserted an unsupported task label or interaction ordinal "
+                    "that is not grounded in the current user request."
                 ),
                 "Continue from this exact current task without advancing to a "
                 "different task or round:",
@@ -1177,6 +1200,10 @@ class AutoGenHookManager:
         if not self.shared_memory_enabled or not state_refs:
             return None
         delivery_assessment = None
+        approval_assessment = None
+        memory_source_text = text
+        resolution_kind = "latest_visible_message"
+        candidate_source = ""
         if context.target_kind == "agentchat_team" and context.method_name == "run_stream":
             with self._memory_lock:
                 grounding_contexts = tuple(
@@ -1189,6 +1216,7 @@ class AutoGenHookManager:
                 decoded_messages,
                 text,
             )
+            memory_source_text = candidate_text
             delivery_assessment = assess_final_delivery(
                 request=context.task.prompt,
                 content=candidate_text,
@@ -1197,6 +1225,22 @@ class AutoGenHookManager:
                 require_marker=True,
                 grounding_contexts=grounding_contexts,
             )
+            if delivery_assessment.approved_prior_artifact:
+                approval_assessment = delivery_assessment
+                resolved = _resolve_approved_prior_artifact(
+                    messages=decoded_messages,
+                    request=context.task.prompt,
+                    marker=self.final_delivery_marker,
+                    grounding_contexts=grounding_contexts,
+                )
+                if resolved is not None:
+                    (
+                        candidate_text,
+                        candidate_source,
+                        delivery_assessment,
+                    ) = resolved
+                    memory_source_text = candidate_text
+                    resolution_kind = "approved_prior_artifact"
             if delivery_assessment.valid:
                 candidate_kind = "autogen_team_final"
                 confidence, importance, coverage = 0.86, 0.82, 0.78
@@ -1212,7 +1256,11 @@ class AutoGenHookManager:
         else:
             return None
 
-        summary = _memory_summary(decoded_messages, text, limit=900)
+        summary = (
+            _decision_preserving_summary(memory_source_text, limit=900)
+            if candidate_kind == "autogen_team_final"
+            else _memory_summary(decoded_messages, text, limit=900)
+        )
         if len(summary.strip()) < 12:
             return None
         fingerprint = hashlib.sha256(
@@ -1260,6 +1308,13 @@ class AutoGenHookManager:
                         if delivery_assessment is not None
                         else {}
                     ),
+                    "approval_assessment": (
+                        approval_assessment.to_dict()
+                        if approval_assessment is not None
+                        else {}
+                    ),
+                    "resolution_kind": resolution_kind,
+                    "resolved_candidate_source": candidate_source,
                     "memory_refs": [
                         _memory_ref_payload(ref)
                         for ref in _admission_memory_refs(report)
@@ -7067,6 +7122,89 @@ def _latest_visible_message(
     return fallback.strip(), ""
 
 
+def _resolve_approved_prior_artifact(
+    *,
+    messages: list[Any],
+    request: str,
+    marker: str,
+    grounding_contexts: Iterable[str],
+) -> tuple[str, str, Any] | None:
+    visible: list[tuple[str, str]] = []
+    for message in messages:
+        content = _sanitize_model_visible_content(
+            str(getattr(message, "content_text", "") or "")
+        )
+        source = str(getattr(message, "source", "") or "").strip()
+        native_type = str(getattr(message, "native_type", "") or "")
+        message_kind = str(getattr(message, "message_kind", "") or "")
+        if not content or source.casefold() == "user" or message_kind != "text":
+            continue
+        if native_type.endswith("Event") or native_type == "ThoughtEvent":
+            continue
+        visible.append((content, source))
+
+    for content, source in reversed(visible[:-1]):
+        assessment = assess_final_delivery(
+            request=request,
+            content=content,
+            source=source,
+            marker=marker,
+            require_marker=False,
+            grounding_contexts=tuple(grounding_contexts),
+        )
+        if assessment.approved_prior_artifact:
+            continue
+        if assessment.valid:
+            return content, source, assessment
+        break
+    return None
+
+
+def _decision_preserving_summary(content: str, *, limit: int) -> str:
+    visible = _sanitize_model_visible_content(str(content or ""))
+    normalized = " ".join(visible.split())
+    if len(normalized) <= limit:
+        return normalized
+
+    claims = extract_claim_cards(
+        visible,
+        subject="validated_team_artifact",
+        source_pointer="autogen.team.final",
+        default_confidence=0.86,
+    )
+    priority_slots = (
+        "slot.system.design_decision",
+        "slot.project.requirement",
+    )
+    fact_texts: list[str] = []
+    for slot_id in priority_slots:
+        for claim in claims:
+            if str(claim.get("slot_id", "")) != slot_id:
+                continue
+            if str(claim.get("polarity", "positive")) != "positive":
+                continue
+            fact = " ".join(
+                str(claim.get("raw_text") or claim.get("summary") or "").split()
+            )
+            if fact and fact not in fact_texts:
+                fact_texts.append(fact)
+            if len(fact_texts) >= 6:
+                break
+        if len(fact_texts) >= 6:
+            break
+
+    prefix = (
+        "Confirmed facts: " + " | ".join(fact_texts)
+        if fact_texts
+        else ""
+    )
+    remaining = max(0, limit - len(prefix) - (1 if prefix else 0))
+    compact_artifact = _head_tail_digest(normalized, limit=remaining)
+    return "\n".join(
+        part for part in (prefix, compact_artifact) if part
+    )[:limit]
+
+
 def _autogen_memory_slot_hint(prompt: str, summary: str) -> str:
     text = f"{prompt.lower()}\n{summary.lower()}"
     if _looks_like_final_task(text):
@@ -7898,8 +8036,8 @@ def _build_chronology_prompt_view(
         previous_source, previous_content = upstream[-2]
         sections.extend(
             [
-                f"PRIOR_UPSTREAM_DIGEST [{previous_source}]:",
-                _head_tail_digest(previous_content, limit=360),
+                f"PRIOR_UPSTREAM_MESSAGE [{previous_source}]:",
+                previous_content,
             ]
         )
     if sections:
@@ -7926,6 +8064,7 @@ def _current_task_identity_assessment(
     current_task: str,
     output_text: str,
     task_sequence_index: int,
+    user_task_history: Iterable[str] = (),
 ) -> dict[str, Any]:
     if task_sequence_index <= 0:
         return {
@@ -7933,12 +8072,21 @@ def _current_task_identity_assessment(
             "expected_identity": "",
             "asserted_identities": [],
             "unsupported_claims": [],
+            "asserted_interaction_indices": [],
+            "unsupported_interaction_indices": [],
             "inference_basis": "sequence_index_unavailable",
         }
 
+    identity_sources = [
+        str(task)
+        for task in user_task_history
+        if str(task or "").strip()
+    ]
+    identity_sources.append(str(current_task or ""))
     task_labels = [
         (match.group("prefix"), int(match.group("number")))
-        for match in _TASK_LABEL_RE.finditer(str(current_task or ""))
+        for source in identity_sources
+        for match in _TASK_LABEL_RE.finditer(source)
     ]
     prefix_numbers: dict[str, set[int]] = {}
     prefix_display: dict[str, str] = {}
@@ -7952,17 +8100,14 @@ def _current_task_identity_assessment(
         if len(numbers) >= 2
         and all(number <= task_sequence_index for number in numbers)
     ]
-    if len(eligible_prefixes) != 1:
-        return {
-            "blocked": False,
-            "expected_identity": "",
-            "asserted_identities": [],
-            "unsupported_claims": [],
-            "inference_basis": "task_label_family_ambiguous",
-        }
-
-    expected_prefix = prefix_display[eligible_prefixes[0]]
-    expected_identity = f"{expected_prefix}{task_sequence_index}"
+    expected_identity = ""
+    inference_basis = "task_label_family_ambiguous"
+    if len(eligible_prefixes) == 1:
+        expected_prefix = prefix_display[eligible_prefixes[0]]
+        expected_identity = f"{expected_prefix}{task_sequence_index}"
+        inference_basis = (
+            "history_grounded_label_family_plus_collaboration_sequence"
+        )
     asserted = []
     for pattern in _CURRENT_TASK_ASSERTION_PATTERNS:
         asserted.extend(
@@ -7973,16 +8118,28 @@ def _current_task_identity_assessment(
     unsupported = [
         label
         for label in asserted
-        if label.casefold() != expected_identity.casefold()
+        if expected_identity
+        and label.casefold() != expected_identity.casefold()
+    ]
+    asserted_indices = [
+        int(match.group("number"))
+        for pattern in _CURRENT_INTERACTION_ASSERTION_PATTERNS
+        for match in pattern.finditer(str(output_text or ""))
+    ]
+    asserted_indices = list(dict.fromkeys(asserted_indices))
+    unsupported_indices = [
+        number
+        for number in asserted_indices
+        if number != task_sequence_index
     ]
     return {
-        "blocked": bool(unsupported),
+        "blocked": bool(unsupported or unsupported_indices),
         "expected_identity": expected_identity,
         "asserted_identities": asserted,
         "unsupported_claims": unsupported,
-        "inference_basis": (
-            "dominant_referenced_label_family_plus_collaboration_sequence"
-        ),
+        "asserted_interaction_indices": asserted_indices,
+        "unsupported_interaction_indices": unsupported_indices,
+        "inference_basis": inference_basis,
     }
 
 

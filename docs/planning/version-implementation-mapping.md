@@ -5274,3 +5274,34 @@ v5.14t 在真实 MiMo Provider 上复验 v5.14s。A/B 任务、能力型 Agent
 
 该阶段不修改生产提示词、Agent 角色、输出长度和评分阈值。详细说明见
 `docs/experiments/v5.14t-superseded-constraint-formal-regression.md`。
+
+## 84. v5.14u：连续任务身份与审批成果记忆解析
+
+v5.14u 根据 v5.14t 的真实质量失败证据，修复两个通用问题：当前请求只
+引用一个历史标签时任务身份无法推导，以及紧凑审批遮挡前序业务成果中的
+明确结论。
+
+实现映射：
+
+- `agent_runtime/drivers/autogen.py`：从有界用户任务历史和当前请求推导
+  标签族，独立校验显式交互序号；把最近两条上游消息先交给能力型语义
+  选择再压缩；紧凑审批解析到最近的有效业务成果，并晋升该成果而不是
+  审批短文；
+- `agent_runtime/memory/context_views.py`：补充中英文判断、状态、结果等
+  决策线索，并识别新的前序上游消息区段；
+- `tests/test_autogen_shared_memory.py`：覆盖历史标签推导、序号漂移、
+  普通数字不误报、前序成果中部结论保留、审批成果晋升和拒绝隔离；
+- `experiments/v5.14u-continuity-identity-memory-resolution/`：在
+  openEuler 上运行全量单元测试、机制验收、编译和不可变证据归档。
+
+通用边界：
+
+```text
+不识别 Question A/B、业务实体、固定结论和固定 Agent 名称；
+不向所有 Agent 广播完整历史，只处理最近两条上游消息并生成能力型最小视图；
+只有紧凑审批且前序成果独立通过交付校验时才晋升；
+审查拒绝、Schema、组隔离、记忆准入和端到端成本核算不被绕过。
+```
+
+详细说明见
+`docs/experiments/v5.14u-continuity-identity-memory-resolution.md`。

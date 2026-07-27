@@ -28,10 +28,18 @@ FIELD_CUES: dict[str, tuple[str, ...]] = {
         "选择",
         "确认",
         "结论",
+        "判断",
+        "判定",
+        "结果",
+        "状态",
         "decision",
         "selected",
         "confirmed",
         "agreed",
+        "verdict",
+        "outcome",
+        "result",
+        "status",
     ),
     "evidence": ("证据", "来源", "引用", "评分", "evidence", "source", "citation", "score"),
     "risks": ("风险", "冲突", "问题", "未解决", "risk", "conflict", "issue", "unresolved"),
@@ -381,7 +389,8 @@ _CURRENT_USER_TASK_BLOCK_RE = re.compile(
     r"(?P<body>.*?)"
     r"(?=^(?:CURRENT_TASK_IDENTITY_RULE|GROUNDING_RULE|USER_REQUEST_HISTORY|"
     r"LATEST_UPSTREAM_MESSAGE|CURRENT_CANDIDATE_ARTIFACT|"
-    r"PRIOR_UPSTREAM_DIGEST|CAPABILITY_PROMPT_VIEW|CURRENT_TASK_CONTEXT)"
+    r"PRIOR_UPSTREAM_DIGEST|PRIOR_UPSTREAM_MESSAGE|"
+    r"CAPABILITY_PROMPT_VIEW|CURRENT_TASK_CONTEXT)"
     r"(?:\s*\[[^\]]+\])?(?:\s*\([^)]*\))?:|\Z)"
 )
 

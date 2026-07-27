@@ -682,6 +682,81 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                     rewrite["payload"]["rewritten_input_tokens"],
                 )
 
+    def test_real_rewrite_preserves_middle_decision_from_approved_prior_artifact(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = {
+                "AGENTLITE_AUTOGEN_BROADCAST_MODE": "real-rewrite",
+                "AGENTLITE_AUTOGEN_TEAM_REWRITE": "1",
+                "AGENTLITE_AUTOGEN_SHARED_MEMORY": "1",
+                "AGENTLITE_MEMORY_SCOPE": "prior-decision-view-test",
+            }
+            with patch.dict("os.environ", env, clear=False):
+                reporter = ProfiledAgent(
+                    "DecisionReporter",
+                    "Synthesize confirmed decisions into the final report.",
+                    "Use the prior risk decision and preserve its evidence status.",
+                )
+                team = ProfiledTeam([reporter])
+                manager = AutoGenHookManager(
+                    self._context(root, "launch_prior_decision")
+                )
+                previous_task = "Assess the evidence and state the risk conclusion."
+                manager.record_call_start(
+                    instance=team,
+                    method_name="run_stream",
+                    target_kind="agentchat_team",
+                    args=(),
+                    kwargs={"task": previous_task},
+                )
+                current_task = (
+                    "Use the previous risk conclusion to prepare the final "
+                    "decision report without changing that conclusion."
+                )
+                manager.record_call_start(
+                    instance=team,
+                    method_name="run_stream",
+                    target_kind="agentchat_team",
+                    args=(),
+                    kwargs={"task": current_task},
+                )
+                prior_artifact = (
+                    "## Evidence assessment\n"
+                    + ("Source lineage and uncertainty details. " * 80)
+                    + "\nRisk decision: needs_more_evidence\n"
+                    + ("Bounded follow-up collection details. " * 80)
+                )
+                compact_approval = (
+                    "The prior specialist artifact is approved as the final "
+                    "deliverable.\nFINAL_ANSWER_READY"
+                )
+                messages = [
+                    FakeTextMessage(current_task, "user"),
+                    FakeTextMessage(prior_artifact, "specialist"),
+                    FakeTextMessage(compact_approval, "reviewer"),
+                ]
+                context = manager.record_call_start(
+                    instance=reporter,
+                    method_name="on_messages",
+                    target_kind="agentchat_agent",
+                    args=(messages,),
+                    kwargs={},
+                )
+
+                rewritten_args, _ = manager.rewrite_call_arguments_if_safe(
+                    context,
+                    (messages,),
+                    {},
+                )
+
+                self.assertEqual(len(rewritten_args[0]), 1)
+                rewritten = rewritten_args[0][0].content
+                self.assertIn(current_task, rewritten)
+                self.assertIn("needs_more_evidence", rewritten)
+                self.assertNotIn("AGENTLITE_", rewritten)
+
     def test_validation_capability_receives_complete_latest_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -867,6 +942,147 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                 self.assertEqual(
                     guard["payload"]["unsupported_claims"],
                     ["R10"],
+                )
+
+    def test_current_task_identity_guard_uses_user_task_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = {
+                "AGENTLITE_AUTOGEN_BROADCAST_MODE": "real-rewrite",
+                "AGENTLITE_AUTOGEN_TEAM_REWRITE": "1",
+                "AGENTLITE_AUTOGEN_SHARED_MEMORY": "1",
+                "AGENTLITE_MEMORY_SCOPE": "task-history-identity-test",
+            }
+            with patch.dict("os.environ", env, clear=False):
+                coordinator = ProfiledAgent(
+                    "EvidenceCoordinator",
+                    "Coordinate the current evidence request.",
+                    "Preserve the exact current task identity.",
+                )
+                team = ProfiledTeam([coordinator])
+                manager = AutoGenHookManager(
+                    self._context(root, "launch_history_identity")
+                )
+                for label in ("B1", "B2", "B3"):
+                    manager.record_call_start(
+                        instance=team,
+                        method_name="run_stream",
+                        target_kind="agentchat_team",
+                        args=(),
+                        kwargs={"task": f"{label} complete the requested evidence step."},
+                    )
+                current_task = (
+                    "Use the confirmed B3 result to complete the next evidence "
+                    "comparison without changing the current task."
+                )
+                manager.record_call_start(
+                    instance=team,
+                    method_name="run_stream",
+                    target_kind="agentchat_team",
+                    args=(),
+                    kwargs={"task": current_task},
+                )
+                context = manager.record_call_start(
+                    instance=coordinator,
+                    method_name="on_messages",
+                    target_kind="agentchat_agent",
+                    args=([FakeTextMessage(current_task, "user")],),
+                    kwargs={},
+                )
+
+                guarded = manager.guard_call_result_if_needed(
+                    context,
+                    FakeTextMessage(
+                        "The current task is B5, so I will complete B5 now.",
+                        "EvidenceCoordinator",
+                    ),
+                )
+
+                self.assertIn("interaction #4", guarded.content)
+                self.assertNotIn("B5", guarded.content)
+                events = self._events(manager.output_dir / "trace.jsonl")
+                guard = next(
+                    item
+                    for item in reversed(events)
+                    if item.get("event_type")
+                    == "autogen_current_task_identity_guard"
+                )
+                self.assertEqual(guard["payload"]["expected_identity"], "B4")
+                self.assertEqual(
+                    guard["payload"]["unsupported_claims"],
+                    ["B5"],
+                )
+                self.assertEqual(
+                    guard["payload"]["inference_basis"],
+                    "history_grounded_label_family_plus_collaboration_sequence",
+                )
+
+    def test_current_task_identity_guard_blocks_wrong_interaction_ordinal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = {
+                "AGENTLITE_AUTOGEN_BROADCAST_MODE": "real-rewrite",
+                "AGENTLITE_AUTOGEN_TEAM_REWRITE": "1",
+                "AGENTLITE_AUTOGEN_SHARED_MEMORY": "1",
+                "AGENTLITE_MEMORY_SCOPE": "ordinal-identity-test",
+            }
+            with patch.dict("os.environ", env, clear=False):
+                coordinator = ProfiledAgent(
+                    "GeneralCoordinator",
+                    "Coordinate arbitrary sequential work.",
+                    "Preserve the current user interaction ordinal.",
+                )
+                team = ProfiledTeam([coordinator])
+                manager = AutoGenHookManager(
+                    self._context(root, "launch_ordinal_identity")
+                )
+                for index in range(1, 7):
+                    manager.record_call_start(
+                        instance=team,
+                        method_name="run_stream",
+                        target_kind="agentchat_team",
+                        args=(),
+                        kwargs={"task": f"Complete sequential request {index}."},
+                    )
+                current_task = "Complete sequential request 6."
+                context = manager.record_call_start(
+                    instance=coordinator,
+                    method_name="on_messages",
+                    target_kind="agentchat_agent",
+                    args=([FakeTextMessage(current_task, "user")],),
+                    kwargs={},
+                )
+
+                guarded = manager.guard_call_result_if_needed(
+                    context,
+                    FakeTextMessage(
+                        "当前用户指令（交互 #3）要求生成完整交付物。",
+                        "GeneralCoordinator",
+                    ),
+                )
+
+                self.assertIn("interaction #6", guarded.content)
+                events = self._events(manager.output_dir / "trace.jsonl")
+                guard = next(
+                    item
+                    for item in reversed(events)
+                    if item.get("event_type")
+                    == "autogen_current_task_identity_guard"
+                )
+                self.assertEqual(
+                    guard["payload"]["unsupported_interaction_indices"],
+                    [3],
+                )
+                ordinary_count = FakeTextMessage(
+                    "当前任务包含3个候选方案，下面逐项比较。",
+                    "GeneralCoordinator",
+                )
+                self.assertIs(
+                    manager.guard_call_result_if_needed(
+                        context,
+                        ordinary_count,
+                    ),
+                    ordinary_count,
                 )
 
     def test_current_task_identity_guard_does_not_mutate_shadow_mode(self) -> None:
@@ -1116,6 +1332,77 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                 self.assertEqual(
                     candidate["payload"]["candidate_kind"],
                     "autogen_team_unvalidated",
+                )
+
+    def test_compact_approval_promotes_prior_artifact_and_preserves_decision(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = {
+                "AGENTLITE_AUTOGEN_BROADCAST_MODE": "real-rewrite",
+                "AGENTLITE_AUTOGEN_TEAM_REWRITE": "1",
+                "AGENTLITE_AUTOGEN_SHARED_MEMORY": "1",
+                "AGENTLITE_MEMORY_SCOPE": "approved-artifact-memory-test",
+            }
+            with patch.dict("os.environ", env, clear=False):
+                manager = AutoGenHookManager(
+                    self._context(root, "launch_approved_artifact")
+                )
+                task = "Assess the evidence and state the final risk conclusion."
+                context = manager.record_call_start(
+                    instance=FakeTeam(),
+                    method_name="run_stream",
+                    target_kind="agentchat_team",
+                    args=(),
+                    kwargs={"task": task},
+                )
+                artifact = (
+                    "## Complete evidence artifact\n\n"
+                    + ("Evidence lineage and uncertainty are documented. " * 30)
+                    + "\nRisk decision: needs_more_evidence\n"
+                    + ("The next collection action is bounded and auditable. " * 30)
+                )
+                manager.record_call_end(
+                    context,
+                    FakeTaskResult(
+                        messages=[
+                            FakeTextMessage(task, "user"),
+                            FakeTextMessage(artifact, "specialist"),
+                            FakeTextMessage(
+                                "确认前序 specialist 的成果符合要求，批准作为最终交付物。\n"
+                                "FINAL_ANSWER_READY",
+                                "reviewer",
+                            ),
+                        ]
+                    ),
+                )
+
+                snapshot = manager.kernel.memory_store.snapshot()
+                self.assertGreaterEqual(len(snapshot["memories"]), 1)
+                self.assertTrue(
+                    any(
+                        "needs_more_evidence" in memory["summary"]
+                        for memory in snapshot["memories"]
+                    )
+                )
+                events = self._events(manager.output_dir / "trace.jsonl")
+                candidate = next(
+                    item
+                    for item in reversed(events)
+                    if item.get("event_type") == "autogen_memory_candidate"
+                )
+                self.assertEqual(
+                    candidate["payload"]["candidate_kind"],
+                    "autogen_team_final",
+                )
+                self.assertEqual(
+                    candidate["payload"]["resolution_kind"],
+                    "approved_prior_artifact",
+                )
+                self.assertEqual(
+                    candidate["payload"]["resolved_candidate_source"],
+                    "specialist",
                 )
 
     def test_ungrounded_user_confirmation_is_rejected_from_long_term_memory(self) -> None:
