@@ -5259,3 +5259,18 @@ v5.14s 根据 v5.14r 的真实终局失败证据，修复数值上限守卫把�
 
 详细说明见
 `docs/experiments/v5.14s-superseded-constraint-resolution.md`。
+
+## 83. v5.14t：历史约束消歧正式回归
+
+v5.14t 在真实 MiMo Provider 上复验 v5.14s。A/B 任务、能力型 Agent
+配置、模型、温度、九轮上限、匿名综合与技术评分器以及全部成本质量门禁
+均与 v5.14r 相同。
+
+新增审计只判断两件事：
+
+- 正式输出中确实出现至少一条历史或被替代的数值约束，避免只做合成证明；
+- Managed 组没有把满足当前上限的交付物误报为
+  `numeric_upper_bound_violation`。
+
+该阶段不修改生产提示词、Agent 角色、输出长度和评分阈值。详细说明见
+`docs/experiments/v5.14t-superseded-constraint-formal-regression.md`。
