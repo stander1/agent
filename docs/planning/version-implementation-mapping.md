@@ -5132,3 +5132,22 @@ Reviewer 来源可配置，成果晋升对象是最近一份通过守卫的非 R
 `docs/experiments/v5.14m-reviewer-artifact-continuity.md`。
 v5.14l 结果：
 `docs/experiments/v5.14l-results-20260726.md`。
+
+## 77. v5.14n：Reviewer 成果连续性正式回归
+
+v5.14n 将 v5.14m 的确定性机制放回真实 MiMo Provider 与完整
+A1-A10/B1-B10 连续任务矩阵。三组使用同一份 v5.14m Agent 配置，并
+继续冻结 v5.14l 的任务、模型、温度、最大轮次、双盲评分和成本质量
+阈值。
+
+新增验收记录：
+
+- Reviewer 引用晋升前序业务成果的次数；
+- Reviewer 正文替代业务成果、所有权错标和审批短文泄漏次数；
+- `decision.*` 明确结论进入类型化共享记忆的数量；
+- 原有 Provider Token、端到端协作 Token、交付、质量、状态、记忆、
+  协议泄漏和可靠性门禁。
+
+该阶段不向生产运行时加入 Question A/B、旅游地点、安全实体或固定角色
+名称特判。详细说明见
+`docs/experiments/v5.14n-reviewer-artifact-formal-regression.md`。
