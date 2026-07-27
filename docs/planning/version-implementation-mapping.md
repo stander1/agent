@@ -5356,3 +5356,21 @@ v5.14w 根据 v5.14v 的真实失败证据，修复预算事实误合并和缺�
 
 详细说明见
 `docs/experiments/v5.14w-evidence-fidelity-governance.md`。
+
+## 87. v5.14x：事实与必需证据保真正式回归
+
+v5.14x 将 v5.14w 放回真实 MiMo Provider、A1-A10/B1-B10 连续任务和
+Native、Observed、Managed 三组正式对照。任务、能力型 Agent 配置、模型、
+温度、九轮上限、匿名评分器以及 v5.14v 全部门禁保持不变。
+
+新增审计只校验已经真实触发的必需证据守卫事件：
+
+- 状态必须为 `blocked_and_deferred`；
+- 必须记录不可用文件和用户明确给出的保守回退值；
+- 必须记录虚假读取声明或与回退冲突的强结论；
+- 事件数可以为零，因为模型可能在提示预检后直接遵守回退要求。
+
+该阶段不修改任务、提示词、输出长度、轮次、评分阈值和基线计算，也不在
+生产运行时加入 Question A/B、业务实体、固定结论或固定 Agent 名称特判。
+详细说明见
+`docs/experiments/v5.14x-evidence-fidelity-formal-regression.md`。
