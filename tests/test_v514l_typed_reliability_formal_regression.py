@@ -410,6 +410,8 @@ class TypedReliabilityFormalRegressionTest(unittest.TestCase):
         self.assertIn("quality_blind_technical_scores.json", recovery)
         self.assertIn("--resume", recovery)
         self.assertIn("scoring-recovery-history.txt", recovery)
+        self.assertIn('export MIMO_API_KEY="$OPENAI_API_KEY"', recovery)
+        self.assertIn('export OPENAI_API_KEY="$MIMO_API_KEY"', recovery)
         self.assertNotIn("code_app.py", recovery)
 
 

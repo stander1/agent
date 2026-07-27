@@ -47,4 +47,6 @@ bash experiments/v5.14l-typed-reliability-formal-regression/resume_technical_aud
 恢复脚本会验证并复用已有匿名候选、映射、综合评分和技术评分 checkpoint，
 只续跑尚未完成的技术评分任务。完成后再用
 `AGENTLITE_V514L_RESUME=1` 运行主脚本，主脚本会跳过已经完整的 A 场景并
-继续 B 场景及最终验收。
+继续 B 场景及最终验收。恢复脚本兼容 `OPENAI_API_KEY` 和
+`MIMO_API_KEY`；只设置其中一个时会在当前子进程内自动同步，二者均存在
+但值不同时会拒绝运行。

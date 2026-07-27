@@ -20,6 +20,18 @@ if [[ "$SCENARIO" != "A" && "$SCENARIO" != "B" ]]; then
   echo "错误：场景只能是 A 或 B，当前为：$SCENARIO" >&2
   exit 2
 fi
+if [[ -n "${OPENAI_API_KEY:-}" && -z "${MIMO_API_KEY:-}" ]]; then
+  export MIMO_API_KEY="$OPENAI_API_KEY"
+elif [[ -n "${MIMO_API_KEY:-}" && -z "${OPENAI_API_KEY:-}" ]]; then
+  export OPENAI_API_KEY="$MIMO_API_KEY"
+elif [[ -n "${MIMO_API_KEY:-}" && -n "${OPENAI_API_KEY:-}" ]] \
+  && [[ "$MIMO_API_KEY" != "$OPENAI_API_KEY" ]]; then
+  echo "错误：MIMO_API_KEY 与 OPENAI_API_KEY 不一致，拒绝选择其中之一。" >&2
+  exit 2
+elif [[ -z "${MIMO_API_KEY:-}" && -z "${OPENAI_API_KEY:-}" ]]; then
+  echo "错误：缺少 API Key，请设置 MIMO_API_KEY 或 OPENAI_API_KEY。" >&2
+  exit 2
+fi
 for path in \
   "$COMPARISON/quality_blind_batch.json" \
   "$COMPARISON/quality_blind_mapping.json" \
