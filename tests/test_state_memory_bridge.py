@@ -10,22 +10,22 @@ class StateToMemoryBridgeLiteTest(unittest.TestCase):
         bridge = StateToMemoryBridgeLite(store)
 
         report, validation = bridge.promote(
-            task_id="A1",
-            source_agent="writer",
-            task_topic="travel plan",
-            fallback_summary="保留预算约束和交通偏好，供后续行程复用。",
-            tags=["travel_A", "A1", "writer"],
+            task_id="T1",
+            source_agent="arbitrary-author",
+            task_topic="generic project",
+            fallback_summary="total_limit: 3000 CNY",
+            tags=["generic", "T1", "arbitrary-author"],
             slot_hint="reuse_strategy",
-            source_state_ids=["state_writer"],
-            evidence_refs=["state_writer"],
-            reuse_intent="供 travel_A 后续连续任务复用",
+            source_state_ids=["state_generic"],
+            evidence_refs=["state_generic"],
+            reuse_intent="reuse the validated exact fact",
             control={
                 "claim_cards": [
                     {
-                        "subject": "travel plan",
-                        "raw_slot_text": "budget",
+                        "subject": "generic project",
+                        "raw_slot_text": "total_limit",
                         "slot_id": "slot.project.requirement",
-                        "scope": "constraint.budget",
+                        "scope": "constraint.total_limit",
                         "value": "3000",
                         "value_type": "integer",
                         "unit": "CNY",
@@ -33,7 +33,6 @@ class StateToMemoryBridgeLiteTest(unittest.TestCase):
                         "modality": "asserted",
                         "polarity": "positive",
                         "confidence": 0.9,
-                        "source_pointer": "state_writer",
                     }
                 ]
             },
@@ -45,6 +44,51 @@ class StateToMemoryBridgeLiteTest(unittest.TestCase):
         self.assertEqual(report.memory_write_count, 1)
         self.assertEqual(report.promotion_view_count, 1)
         self.assertIsNotNone(report.memory_ref)
+        self.assertEqual(validation.explicit_claim_count, 1)
+        self.assertEqual(validation.explicit_claim_valid_count, 1)
+        claim = store.snapshot()["claim_cards"][0]
+        self.assertEqual(claim["source_span"]["source_id"], "state_generic")
+        self.assertEqual(claim["source_span"]["quote"], "total_limit: 3000 CNY")
+
+    def test_explicit_claim_without_matching_source_is_audit_only(self) -> None:
+        store = MemoryStoreLite()
+        bridge = StateToMemoryBridgeLite(store)
+
+        report, validation = bridge.promote(
+            task_id="T-unbound",
+            source_agent="arbitrary-author",
+            task_topic="generic project",
+            fallback_summary="status_label: green",
+            tags=["generic"],
+            slot_hint="reuse_strategy",
+            source_state_ids=["state_unbound"],
+            evidence_refs=["state_unbound"],
+            reuse_intent="retain only evidence-bound facts",
+            control={
+                "claim_cards": [
+                    {
+                        "subject": "generic project",
+                        "raw_slot_text": "status_label",
+                        "slot_id": "slot.project.requirement",
+                        "scope": "status.label",
+                        "value": "red",
+                        "certainty": "confirmed",
+                    }
+                ]
+            },
+            degraded=False,
+        )
+
+        self.assertFalse(validation.allowed)
+        self.assertEqual(validation.explicit_claim_count, 1)
+        self.assertEqual(validation.explicit_claim_valid_count, 0)
+        self.assertIn(
+            "explicit_claim_value_not_in_source",
+            validation.reasons,
+        )
+        self.assertEqual(report.admission_status, "audit_only")
+        self.assertEqual(report.memory_write_count, 0)
+        self.assertIsNone(report.memory_ref)
 
     def test_bridge_keeps_unstructured_summary_out_of_formal_memory(self) -> None:
         store = MemoryStoreLite()
@@ -89,6 +133,103 @@ class StateToMemoryBridgeLiteTest(unittest.TestCase):
         )
 
         self.assertTrue(validation.allowed)
+        self.assertEqual(report.admission_status, "audit_only")
+        self.assertEqual(report.memory_write_count, 0)
+        self.assertIsNone(report.memory_ref)
+
+    def test_bridge_admits_validated_open_predicate_without_domain_schema(
+        self,
+    ) -> None:
+        store = MemoryStoreLite()
+        bridge = StateToMemoryBridgeLite(store)
+
+        report, validation = bridge.promote(
+            task_id="G1",
+            source_agent="specialist",
+            task_topic="holdout project",
+            fallback_summary="unknown_metric: <= 42 qux",
+            tags=["holdout", "G1"],
+            slot_hint="reuse_strategy",
+            source_state_ids=["state_holdout"],
+            evidence_refs=["state_holdout"],
+            reuse_intent="reuse validated open fact",
+            control=None,
+            degraded=False,
+        )
+
+        self.assertTrue(validation.allowed)
+        self.assertEqual(validation.canonical_candidate_count, 1)
+        self.assertEqual(validation.canonical_candidate_valid_count, 1)
+        self.assertEqual(validation.dynamic_schema_registration_count, 1)
+        self.assertEqual(report.admission_status, "admitted")
+        self.assertEqual(report.memory_write_count, 1)
+        self.assertIsNotNone(report.memory_ref)
+        assert report.memory_ref is not None
+        self.assertTrue(report.memory_ref.slot_id.startswith("slot.open."))
+
+        claim = next(
+            item
+            for item in store.snapshot()["claim_cards"]
+            if item["claim_id"] == report.claim_ids[0]
+        )
+        self.assertEqual(claim["operator"], "le")
+        self.assertEqual(claim["value"], "42")
+        self.assertEqual(claim["unit"], "qux")
+        self.assertEqual(claim["schema_layer"], "dynamic")
+        self.assertEqual(claim["source_span"]["source_id"], "state_holdout")
+
+    def test_historical_open_candidate_is_audit_only(self) -> None:
+        store = MemoryStoreLite()
+        bridge = StateToMemoryBridgeLite(store)
+
+        report, validation = bridge.promote(
+            task_id="G2",
+            source_agent="specialist",
+            task_topic="holdout project",
+            fallback_summary="previous_limit: 9 qux",
+            tags=["holdout", "G2"],
+            slot_hint="reuse_strategy",
+            source_state_ids=["state_history"],
+            evidence_refs=["state_history"],
+            reuse_intent="retain history for audit",
+            control=None,
+            degraded=False,
+        )
+
+        self.assertTrue(validation.allowed)
+        self.assertEqual(report.admission_status, "audit_only")
+        self.assertEqual(report.memory_write_count, 0)
+        self.assertEqual(
+            report.admission_reasons,
+            ["epistemic_confirmation_required"],
+        )
+
+    def test_unresolved_open_predicate_fails_closed_when_dynamic_schema_is_off(
+        self,
+    ) -> None:
+        store = MemoryStoreLite()
+        bridge = StateToMemoryBridgeLite(
+            store,
+            allow_dynamic_schema=False,
+        )
+
+        report, validation = bridge.promote(
+            task_id="G3",
+            source_agent="specialist",
+            task_topic="holdout project",
+            fallback_summary="unregistered_signal: 7 qux",
+            tags=["holdout", "G3"],
+            slot_hint="reuse_strategy",
+            source_state_ids=["state_unresolved"],
+            evidence_refs=["state_unresolved"],
+            reuse_intent="do not admit unresolved facts",
+            control=None,
+            degraded=False,
+        )
+
+        self.assertFalse(validation.allowed)
+        self.assertEqual(validation.unresolved_schema_count, 1)
+        self.assertIn("open_predicate_unresolved", validation.reasons)
         self.assertEqual(report.admission_status, "audit_only")
         self.assertEqual(report.memory_write_count, 0)
         self.assertIsNone(report.memory_ref)

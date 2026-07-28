@@ -9,6 +9,10 @@ from agent_runtime.memory.claim_extractor import (
     extract_claim_cards,
     normalized_value,
 )
+from agent_runtime.reliability.typed_events import (
+    ReviewDecisionEvent,
+    ReviewDecisionKind,
+)
 
 
 REVIEW_ACTIONS = frozenset(
@@ -64,6 +68,9 @@ _APPROVAL_RE = re.compile(
 class ReviewConflictDecision:
     authoritative: bool
     blocking: bool
+    mutation_authorized: bool = False
+    decision_source: str = "none"
+    typed_event_id: str = ""
     authority_reasons: tuple[str, ...] = ()
     blocking_reasons: tuple[str, ...] = ()
     blocking_summary: str = ""
@@ -103,6 +110,7 @@ def evaluate_review_conflict(
         return ReviewConflictDecision(
             authoritative=False,
             blocking=False,
+            decision_source="legacy_text_inference",
         )
 
     clauses = _clauses(output_text)
@@ -115,6 +123,7 @@ def evaluate_review_conflict(
         return ReviewConflictDecision(
             authoritative=True,
             blocking=False,
+            decision_source="legacy_text_inference",
             authority_reasons=tuple(authority_reasons),
         )
 
@@ -177,9 +186,109 @@ def evaluate_review_conflict(
     return ReviewConflictDecision(
         authoritative=True,
         blocking=True,
+        decision_source="legacy_text_inference",
         authority_reasons=tuple(authority_reasons),
         blocking_reasons=tuple(blocking_clauses),
         blocking_summary=_blocking_summary(blocking_clauses),
+        targeted_memory_ids=tuple(memory_ids),
+        targeted_claim_ids=tuple(claim_ids),
+        targeted_semantic_keys=tuple(semantic_keys),
+        target_matches=tuple(matches),
+    )
+
+
+def decision_from_typed_review_event(
+    event: ReviewDecisionEvent,
+    *,
+    memory_rows: Iterable[Mapping[str, Any]],
+) -> ReviewConflictDecision:
+    """Map a validated typed event to exact memory targets."""
+
+    blocking = event.decision in {
+        ReviewDecisionKind.BLOCK,
+        ReviewDecisionKind.REQUEST_REVISION,
+    }
+    target_sets: dict[str, set[str]] = {
+        "memory": set(),
+        "claim": set(),
+        "semantic_key": set(),
+    }
+    blocking_reasons: list[str] = []
+    for finding in event.findings:
+        normalized_kind = {
+            "memory_id": "memory",
+            "claim_id": "claim",
+        }.get(finding.target_kind, finding.target_kind)
+        if normalized_kind in target_sets and finding.target_id:
+            target_sets[normalized_kind].add(finding.target_id)
+        reason = finding.summary or finding.code
+        if reason:
+            blocking_reasons.append(reason)
+
+    matches: list[dict[str, str]] = []
+    memory_ids: list[str] = []
+    claim_ids: list[str] = []
+    semantic_keys: list[str] = []
+    for row in memory_rows:
+        memory_id = str(row.get("memory_id") or "")
+        revision_guard = row.get("revision_guard")
+        if not isinstance(revision_guard, Mapping):
+            revision_guard = row
+        active_facts = revision_guard.get("active_facts")
+        if not isinstance(active_facts, list):
+            continue
+        for fact in active_facts:
+            if not isinstance(fact, Mapping):
+                continue
+            claim_id = str(fact.get("claim_id") or "")
+            semantic_key = str(fact.get("semantic_key") or "")
+            targeted = (
+                memory_id in target_sets["memory"]
+                or claim_id in target_sets["claim"]
+                or semantic_key in target_sets["semantic_key"]
+            )
+            if not targeted:
+                continue
+            evidence = next(
+                (
+                    finding.evidence.quote
+                    for finding in event.findings
+                    if finding.evidence is not None
+                    and finding.target_id
+                    in {memory_id, claim_id, semantic_key}
+                ),
+                "",
+            )
+            matches.append(
+                {
+                    "memory_id": memory_id,
+                    "claim_id": claim_id,
+                    "semantic_key": semantic_key,
+                    "slot_id": str(fact.get("slot_id") or ""),
+                    "scope": str(fact.get("scope") or ""),
+                    "value": str(fact.get("value") or ""),
+                    "evidence": evidence[:360],
+                }
+            )
+            if memory_id and memory_id not in memory_ids:
+                memory_ids.append(memory_id)
+            if claim_id and claim_id not in claim_ids:
+                claim_ids.append(claim_id)
+            if semantic_key and semantic_key not in semantic_keys:
+                semantic_keys.append(semantic_key)
+
+    summary = " ".join(dict.fromkeys(blocking_reasons)).strip()
+    if not summary:
+        summary = f"Typed review decision: {event.decision.value}."
+    return ReviewConflictDecision(
+        authoritative=True,
+        blocking=blocking,
+        mutation_authorized=True,
+        decision_source="typed_reliability_event",
+        typed_event_id=event.event_id,
+        authority_reasons=("verified_typed_event_authority",),
+        blocking_reasons=tuple(dict.fromkeys(blocking_reasons)),
+        blocking_summary=summary[:420],
         targeted_memory_ids=tuple(memory_ids),
         targeted_claim_ids=tuple(claim_ids),
         targeted_semantic_keys=tuple(semantic_keys),

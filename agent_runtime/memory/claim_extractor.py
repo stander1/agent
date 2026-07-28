@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass, asdict
 from typing import Any, Iterable
+
+from agent_runtime.memory.schema_registry import (
+    CanonicalClaimCandidate,
+    ClaimRelation,
+    SchemaRegistryLite,
+    SourceSpan,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +34,377 @@ class ExtractedClaim:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+_GENERIC_KEY_VALUE_RE = re.compile(
+    r"(?m)^\s*(?:[-*+]\s+)?(?:\*\*)?"
+    r"(?P<label>[^:=：|\r\n]{1,80}?)"
+    r"(?:\*\*)?\s*(?:=|:|：)\s*"
+    r"(?P<value>[^\r\n]+?)\s*$"
+)
+_GENERIC_TABLE_SEPARATOR_RE = re.compile(
+    r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$"
+)
+_GENERIC_JSON_FIELD_RE = re.compile(
+    r'(?P<key>"(?:\\.|[^"\\])*")\s*:\s*'
+    r'(?P<value>"(?:\\.|[^"\\])*"|true|false|null|'
+    r'[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)'
+)
+_GENERIC_NUMBER_RE = re.compile(
+    r"^[+-]?(?P<number>(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|"
+    r"\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)"
+    r"(?:\s*(?P<unit>[%‰°A-Za-z\u3400-\u4dbf\u4e00-\u9fff/._-]{1,16}))?"
+    r"(?:\s|$)"
+)
+_GENERIC_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:[T ][^\s]+)?$")
+_GENERIC_REVISION_RE = re.compile(
+    r"(?is)^\s*(?:from|由|从)\s+(?P<old>.+?)\s+"
+    r"(?:to|改为|调整为|更新为|变更为|至)\s+(?P<new>.+?)\s*$"
+)
+_GENERIC_TEMPORAL_HISTORICAL_RE = re.compile(
+    r"(?i)(?:(?<![A-Za-z0-9])"
+    r"(?:previous|former|old|initial|historical|deprecated|superseded)"
+    r"(?![A-Za-z0-9])|"
+    r"此前|之前|原(?:先|有)?|旧(?:版|值)?|历史|已废弃|已取代)"
+)
+_GENERIC_TEMPORAL_CURRENT_RE = re.compile(
+    r"(?i)(?:(?<![A-Za-z0-9])"
+    r"(?:current|final|latest|active|approved|confirmed)"
+    r"(?![A-Za-z0-9])|"
+    r"当前|最终|最新|现行|已批准|已确认)"
+)
+_GENERIC_TEMPORAL_FUTURE_RE = re.compile(
+    r"(?i)(?:(?<![A-Za-z0-9])"
+    r"(?:future|planned|proposed|pending)"
+    r"(?![A-Za-z0-9])|"
+    r"未来|计划|拟定|待确认)"
+)
+
+
+def extract_canonical_claim_candidates(
+    text: str,
+    *,
+    subject: str,
+    source_id: str,
+    default_confidence: float = 0.76,
+) -> list[dict[str, Any]]:
+    """Extract open assertions from structure without domain vocabularies."""
+
+    source_text = str(text or "")
+    candidates = _extract_generic_json_candidates(
+        source_text,
+        subject=subject,
+        source_id=source_id,
+        confidence=min(0.98, default_confidence + 0.05),
+    )
+    structured_spans = [
+        (
+            candidate.source_span.start,
+            candidate.source_span.end,
+        )
+        for candidate in candidates
+    ]
+    for match in _GENERIC_KEY_VALUE_RE.finditer(source_text):
+        if any(
+            _ranges_overlap(
+                match.start(),
+                match.end(),
+                start,
+                end,
+            )
+            for start, end in structured_spans
+        ):
+            continue
+        label = _clean_open_predicate(match.group("label"))
+        value_text = _clean_structured_value(match.group("value"))
+        if not _valid_open_predicate(label) or not value_text:
+            continue
+        candidate = _build_canonical_candidate(
+            source_text=source_text,
+            source_id=source_id,
+            start=match.start(),
+            end=match.end(),
+            subject=subject,
+            predicate=label,
+            value_text=value_text,
+            confidence=default_confidence,
+        )
+        if candidate is not None:
+            candidates.append(candidate)
+
+    candidates.extend(
+        _extract_generic_table_candidates(
+            source_text,
+            subject=subject,
+            source_id=source_id,
+            confidence=min(0.98, default_confidence + 0.04),
+        )
+    )
+    deduplicated: dict[tuple[str, str, str, int, int], CanonicalClaimCandidate] = {}
+    for candidate in candidates:
+        key = (
+            candidate.subject.casefold(),
+            candidate.predicate,
+            candidate.value.casefold(),
+            candidate.source_span.start,
+            candidate.source_span.end,
+        )
+        deduplicated.setdefault(key, candidate)
+    return [candidate.to_dict() for candidate in deduplicated.values()]
+
+
+def _extract_generic_json_candidates(
+    text: str,
+    *,
+    subject: str,
+    source_id: str,
+    confidence: float,
+) -> list[CanonicalClaimCandidate]:
+    candidates: list[CanonicalClaimCandidate] = []
+    for match in _GENERIC_JSON_FIELD_RE.finditer(text):
+        try:
+            key = json.loads(match.group("key"))
+            decoded_value = json.loads(match.group("value"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if (
+            not isinstance(key, str)
+            or decoded_value is None
+            or isinstance(decoded_value, (dict, list))
+        ):
+            continue
+        predicate = _clean_open_predicate(key)
+        if not _valid_open_predicate(predicate):
+            continue
+        if isinstance(decoded_value, bool):
+            value_text = "true" if decoded_value else "false"
+        elif isinstance(decoded_value, (int, float)):
+            value_text = match.group("value")
+        else:
+            value_text = str(decoded_value)
+        candidate = _build_canonical_candidate(
+            source_text=text,
+            source_id=source_id,
+            start=match.start(),
+            end=match.end(),
+            subject=subject,
+            predicate=predicate,
+            value_text=value_text,
+            confidence=confidence,
+        )
+        if candidate is not None:
+            candidates.append(candidate)
+    return candidates
+
+
+def _extract_generic_table_candidates(
+    text: str,
+    *,
+    subject: str,
+    source_id: str,
+    confidence: float,
+) -> list[CanonicalClaimCandidate]:
+    lines = text.splitlines(keepends=True)
+    offsets: list[int] = []
+    offset = 0
+    for line in lines:
+        offsets.append(offset)
+        offset += len(line)
+
+    candidates: list[CanonicalClaimCandidate] = []
+    index = 0
+    while index + 1 < len(lines):
+        header_line = lines[index].rstrip("\r\n")
+        separator_line = lines[index + 1].rstrip("\r\n")
+        if "|" not in header_line or not _GENERIC_TABLE_SEPARATOR_RE.match(
+            separator_line
+        ):
+            index += 1
+            continue
+        headers = _table_cells(header_line)
+        row_index = index + 2
+        while row_index < len(lines):
+            row_text = lines[row_index].rstrip("\r\n")
+            if "|" not in row_text or _GENERIC_TABLE_SEPARATOR_RE.match(row_text):
+                break
+            cells = _table_cells(row_text)
+            if len(cells) != len(headers):
+                break
+            row_subject = _clean_structured_value(cells[0]) or subject
+            scoped_subject = (
+                f"{subject}/{row_subject}" if len(headers) > 1 else subject
+            )
+            row_start = offsets[row_index]
+            row_end = row_start + len(row_text)
+            for column_index, value_text in enumerate(cells[1:], start=1):
+                predicate = _clean_open_predicate(headers[column_index])
+                value = _clean_structured_value(value_text)
+                if not _valid_open_predicate(predicate) or not value:
+                    continue
+                candidate = _build_canonical_candidate(
+                    source_text=text,
+                    source_id=source_id,
+                    start=row_start,
+                    end=row_end,
+                    subject=scoped_subject,
+                    predicate=predicate,
+                    value_text=value,
+                    confidence=confidence,
+                )
+                if candidate is not None:
+                    candidates.append(candidate)
+            row_index += 1
+        index = max(index + 1, row_index)
+    return candidates
+
+
+def _build_canonical_candidate(
+    *,
+    source_text: str,
+    source_id: str,
+    start: int,
+    end: int,
+    subject: str,
+    predicate: str,
+    value_text: str,
+    confidence: float,
+) -> CanonicalClaimCandidate | None:
+    relation: ClaimRelation | None = None
+    revision = _GENERIC_REVISION_RE.match(value_text)
+    if revision:
+        old_value, _, _, _ = _parse_open_value(revision.group("old"))
+        value_text = revision.group("new").strip()
+        relation = ClaimRelation(
+            relation_type="supersedes_value",
+            target_value=old_value,
+        )
+    value, value_type, unit, operator = _parse_open_value(value_text)
+    if not value:
+        return None
+    quote = source_text[start:end]
+    temporal_status = _infer_temporal_status(quote)
+    assertion_type = (
+        "revision"
+        if relation is not None
+        else "constraint"
+        if operator in {"lt", "le", "gt", "ge", "ne"}
+        else "fact"
+    )
+    polarity = "negative" if operator == "ne" else "positive"
+    span = SourceSpan.from_text(
+        source_id=source_id,
+        text=source_text,
+        start=start,
+        end=end,
+    )
+    candidate_seed = (
+        f"{source_id}:{start}:{end}:{subject}:{predicate}:{operator}:{value}:{unit}"
+    )
+    candidate_id = "ccc_" + hashlib.sha256(
+        candidate_seed.encode("utf-8")
+    ).hexdigest()[:16]
+    return CanonicalClaimCandidate(
+        candidate_id=candidate_id,
+        subject=subject,
+        predicate=predicate,
+        assertion_type=assertion_type,
+        operator=operator,
+        value=value,
+        value_type=value_type,
+        unit=unit,
+        polarity=polarity,
+        modality="asserted",
+        temporal_status=temporal_status,
+        confidence=max(0.0, min(1.0, float(confidence))),
+        source_span=span,
+        relations=(relation,) if relation is not None else (),
+    )
+
+
+def _parse_open_value(text: str) -> tuple[str, str, str, str]:
+    cleaned = _clean_structured_value(text)
+    operator = "eq"
+    operator_patterns = (
+        (r"^(?:<=|≤)\s*", "le"),
+        (r"^(?:>=|≥)\s*", "ge"),
+        (r"^<\s*", "lt"),
+        (r"^>\s*", "gt"),
+        (r"^(?:!=|≠)\s*", "ne"),
+        (
+            r"(?i)^(?:at\s+most|no\s+more\s+than|maximum|不超过|至多|最多)\s*",
+            "le",
+        ),
+        (
+            r"(?i)^(?:at\s+least|no\s+less\s+than|minimum|不少于|至少|最低)\s*",
+            "ge",
+        ),
+        (r"(?i)^(?:not|不得|禁止|不允许)\s+", "ne"),
+    )
+    for pattern, resolved_operator in operator_patterns:
+        updated, count = re.subn(pattern, "", cleaned, count=1)
+        if count:
+            cleaned = updated.strip()
+            operator = resolved_operator
+            break
+    if _GENERIC_DATE_RE.fullmatch(cleaned):
+        return cleaned, "date", "", operator
+    number = _GENERIC_NUMBER_RE.match(cleaned)
+    if number:
+        normalized_number = number.group("number").replace(",", "")
+        unit = str(number.group("unit") or "")
+        return normalized_number, "number", unit, operator
+    if cleaned.casefold() in {"true", "false", "yes", "no"}:
+        return cleaned.casefold(), "boolean", "", operator
+    return cleaned, "string", "", operator
+
+
+def _infer_temporal_status(text: str) -> str:
+    if _GENERIC_TEMPORAL_HISTORICAL_RE.search(text):
+        return "historical"
+    if _GENERIC_TEMPORAL_CURRENT_RE.search(text):
+        return "current"
+    if _GENERIC_TEMPORAL_FUTURE_RE.search(text):
+        return "future"
+    return "unspecified"
+
+
+def _clean_open_predicate(text: str) -> str:
+    cleaned = re.sub(r"[*_`#]+", " ", str(text or ""))
+    return SchemaRegistryLite.normalize_open_predicate(cleaned)
+
+
+def _clean_structured_value(text: str) -> str:
+    cleaned = re.sub(r"^\s*(?:[*_`]+)|(?:[*_`]+)\s*$", "", str(text or ""))
+    cleaned = cleaned.strip().rstrip(";,；，")
+    if (
+        len(cleaned) >= 2
+        and cleaned[0] == cleaned[-1]
+        and cleaned[0] in {'"', "'"}
+    ):
+        cleaned = cleaned[1:-1]
+    return cleaned.strip()
+
+
+def _valid_open_predicate(predicate: str) -> bool:
+    if len(predicate) < 2 or len(predicate) > 80:
+        return False
+    if predicate in {"http", "https", "file"}:
+        return False
+    return bool(re.search(r"[A-Za-z\u3400-\u4dbf\u4e00-\u9fff]", predicate))
+
+
+def _table_cells(line: str) -> list[str]:
+    stripped = line.strip().strip("|")
+    return [cell.strip() for cell in stripped.split("|")]
+
+
+def _ranges_overlap(
+    first_start: int,
+    first_end: int,
+    second_start: int,
+    second_end: int,
+) -> bool:
+    return first_start < second_end and second_start < first_end
 
 
 _SENTENCE_SPLIT_RE = re.compile(
@@ -141,7 +520,18 @@ def normalize_claim_cards(
                 or source_pointer
             ),
         )
-        normalized.append(claim.to_dict())
+        payload = claim.to_dict()
+        for key in (
+            "assertion_type",
+            "operator",
+            "temporal_status",
+            "source_span",
+            "relations",
+            "schema_layer",
+        ):
+            if key in item:
+                payload[key] = item[key]
+        normalized.append(payload)
     return _dedupe_claims(normalized)
 
 

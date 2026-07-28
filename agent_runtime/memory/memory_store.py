@@ -14,6 +14,7 @@ from agent_runtime.memory.claim_extractor import (
     normalize_claim_cards,
     normalized_value,
 )
+from agent_runtime.memory.conflict_resolver import resolve_claim_conflicts
 from agent_runtime.memory.references import (
     MemoryReferenceManagerLite,
     MemoryReferenceRecord,
@@ -173,6 +174,12 @@ class ClaimCard:
     supported_by: list[str] = field(default_factory=list)
     revision_kind: str = "asserted"
     semantic_key: str = ""
+    assertion_type: str = "fact"
+    operator: str = "eq"
+    temporal_status: str = "unspecified"
+    source_span: dict[str, Any] = field(default_factory=dict)
+    relations: list[dict[str, Any]] = field(default_factory=list)
+    schema_layer: str = "core"
 
 
 @dataclass(slots=True)
@@ -283,6 +290,12 @@ class ClaimCandidate:
     revision_kind: str = "asserted"
     temporal_scope: str = "cross_task"
     schema_version: str = "ccf.v2"
+    assertion_type: str = "fact"
+    operator: str = "eq"
+    temporal_status: str = "unspecified"
+    source_span: dict[str, Any] = field(default_factory=dict)
+    relations: list[dict[str, Any]] = field(default_factory=list)
+    schema_layer: str = "core"
 
 
 @dataclass(slots=True)
@@ -1036,6 +1049,14 @@ class MemoryStoreLite:
                 [*source_state_ids, *evidence_refs, candidate.source_pointer]
             ),
             revision_kind=candidate.revision_kind,
+            assertion_type=candidate.assertion_type,
+            operator=candidate.operator,
+            temporal_status=candidate.temporal_status,
+            source_span=dict(candidate.source_span),
+            relations=[
+                dict(relation) for relation in candidate.relations
+            ],
+            schema_layer=candidate.schema_layer,
         )
         claim.semantic_key = semantic_key
         self._claims[claim_id] = claim
@@ -1820,6 +1841,17 @@ class MemoryStoreLite:
     ) -> list[ClaimCard] | None:
         if not claims:
             return []
+        if any(
+            claim.schema_version.startswith("ccf.v3")
+            for claim in claims
+        ):
+            resolution = resolve_claim_conflicts(claims)
+            if resolution.status != "resolved":
+                return None
+            active_ids = set(resolution.active_claim_ids)
+            return [
+                claim for claim in claims if claim.claim_id in active_ids
+            ]
         policy = claims[-1].conflict_policy
         if policy in {
             "latest_explicit_state_wins",
@@ -2682,6 +2714,24 @@ class MemoryStoreLite:
                     revision_kind=str(item.get("revision_kind") or "asserted"),
                     temporal_scope=str(item.get("temporal_scope") or "cross_task"),
                     schema_version=str(item.get("schema_version") or "ccf.v2"),
+                    assertion_type=str(
+                        item.get("assertion_type") or "fact"
+                    ),
+                    operator=str(item.get("operator") or "eq"),
+                    temporal_status=str(
+                        item.get("temporal_status") or "unspecified"
+                    ),
+                    source_span=(
+                        dict(item.get("source_span"))
+                        if isinstance(item.get("source_span"), dict)
+                        else {}
+                    ),
+                    relations=[
+                        dict(relation)
+                        for relation in item.get("relations") or []
+                        if isinstance(relation, dict)
+                    ],
+                    schema_layer=str(item.get("schema_layer") or "core"),
                 )
             )
         return candidates

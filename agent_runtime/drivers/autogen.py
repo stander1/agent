@@ -57,7 +57,17 @@ from agent_runtime.reliability.memory_adoption_guard import (
 )
 from agent_runtime.reliability.review_conflict_guard import (
     build_review_blocker_claim,
+    decision_from_typed_review_event,
     evaluate_review_conflict,
+)
+from agent_runtime.reliability.typed_events import (
+    ArtifactRef,
+    DeliveryEvent,
+    DeliveryStatus,
+    ReliabilityEventLedger,
+    ReviewDecisionEvent,
+    VerifiedEventAuthority,
+    parse_reliability_metadata,
 )
 from agent_runtime.state.state_pool import StatePoolLite, StateRef
 from agent_runtime.state.structured_output import structured_state_payloads
@@ -88,6 +98,9 @@ CORE_RECEIVER_HYDRATE_ENV = "AGENTLITE_AUTOGEN_CORE_RECEIVER_HYDRATE"
 SHARED_MEMORY_ENV = "AGENTLITE_AUTOGEN_SHARED_MEMORY"
 MEMORY_SCOPE_ENV = "AGENTLITE_MEMORY_SCOPE"
 FINAL_DELIVERY_MARKER_ENV = "AGENTLITE_AUTOGEN_FINAL_MARKER"
+LEGACY_TEXT_REVIEW_MUTATION_ENV = (
+    "AGENTLITE_AUTOGEN_LEGACY_TEXT_REVIEW_MUTATION"
+)
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
 CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
 DRIVER_PHASE = "v5.14k"
@@ -397,6 +410,16 @@ class _TokenBoundViewSelection:
         return round(1 - (self.selected_tokens / self.source_tokens), 6)
 
 
+@dataclass(frozen=True, slots=True)
+class _TypedReliabilityProcessing:
+    metadata_present: bool = False
+    review_events_declared: bool = False
+    delivery_events_declared: bool = False
+    accepted_review_events: tuple[ReviewDecisionEvent, ...] = ()
+    accepted_delivery_events: tuple[DeliveryEvent, ...] = ()
+    errors: tuple[str, ...] = ()
+
+
 class AutoGenHookManager:
     """Transparent AutoGen instrumentation owned by the managed process."""
 
@@ -432,6 +455,9 @@ class AutoGenHookManager:
         self.final_delivery_marker = (
             os.getenv(FINAL_DELIVERY_MARKER_ENV, "FINAL_ANSWER_READY").strip()
             or "FINAL_ANSWER_READY"
+        )
+        self.legacy_text_review_mutation_enabled = _truthy_env(
+            os.getenv(LEGACY_TEXT_REVIEW_MUTATION_ENV, "")
         )
         self.memory_scope_id = _resolve_memory_scope_id(context)
         self.studio_appdir = configured_studio_appdir()
@@ -481,6 +507,19 @@ class AutoGenHookManager:
         self._user_task_history_by_group: dict[str, list[str]] = {}
         self._team_task_sequence_by_group: dict[str, int] = {}
         self._memory_injections_by_call: dict[str, list[_InjectedMemoryRecord]] = {}
+        self._reliability_ledger = ReliabilityEventLedger()
+        self._reliability_evidence_sources: dict[
+            tuple[str, str],
+            dict[str, str],
+        ] = {}
+        self._reliability_artifact_contents: dict[
+            tuple[str, str, str, int],
+            str,
+        ] = {}
+        self._typed_delivery_by_task: dict[
+            tuple[str, str],
+            DeliveryEvent,
+        ] = {}
         self._core_response_rewrite_depth = 0
         self._patched_methods: set[str] = set()
         self._patched_modules: set[str] = set()
@@ -1158,6 +1197,225 @@ class AutoGenHookManager:
             },
         )
 
+    def _process_typed_reliability_metadata(
+        self,
+        *,
+        context: HookCallContext,
+        decoded_messages: list[Any],
+        semantic_state_text: str,
+        state_refs: list[StateRef],
+    ) -> _TypedReliabilityProcessing:
+        parsed = parse_reliability_metadata(decoded_messages)
+        artifact_rows: list[dict[str, Any]] = []
+        review_rows: list[dict[str, Any]] = []
+        delivery_rows: list[dict[str, Any]] = []
+        errors = list(parsed.errors)
+        accepted_reviews: list[ReviewDecisionEvent] = []
+        accepted_deliveries: list[DeliveryEvent] = []
+
+        with self._memory_lock:
+            task_key = (
+                context.task.group_id,
+                context.task.task_id,
+            )
+            task_evidence_sources = (
+                self._reliability_evidence_sources.setdefault(
+                    task_key,
+                    {},
+                )
+            )
+            for state_ref in state_refs:
+                artifact = ArtifactRef.from_content(
+                    artifact_id=state_ref.state_id,
+                    version=state_ref.version,
+                    content=semantic_state_text,
+                    source_id=state_ref.state_id,
+                    scope_id=context.task.group_id,
+                    task_id=context.task.task_id,
+                )
+                validation = self._reliability_ledger.register_artifact(
+                    artifact,
+                    content=semantic_state_text,
+                    expected_scope_id=context.task.group_id,
+                    expected_task_id=context.task.task_id,
+                )
+                if validation.accepted:
+                    self._reliability_artifact_contents[
+                        artifact.identity
+                    ] = semantic_state_text
+                    task_evidence_sources[
+                        artifact.artifact_id
+                    ] = semantic_state_text
+                    task_evidence_sources[
+                        artifact.source_id
+                    ] = semantic_state_text
+                else:
+                    errors.extend(
+                        f"runtime_artifact:{artifact.artifact_id}:{reason}"
+                        for reason in validation.reasons
+                    )
+                artifact_rows.append(
+                    {
+                        "source": "runtime_state",
+                        "artifact_id": artifact.artifact_id,
+                        "version": artifact.version,
+                        **validation.to_dict(),
+                    }
+                )
+
+            for declaration in parsed.artifacts:
+                validation = self._reliability_ledger.register_artifact(
+                    declaration.artifact,
+                    content=declaration.content,
+                    expected_scope_id=context.task.group_id,
+                    expected_task_id=context.task.task_id,
+                )
+                if validation.accepted:
+                    self._reliability_artifact_contents[
+                        declaration.artifact.identity
+                    ] = declaration.content
+                    task_evidence_sources[
+                        declaration.artifact.artifact_id
+                    ] = declaration.content
+                    if declaration.artifact.source_id:
+                        task_evidence_sources[
+                            declaration.artifact.source_id
+                        ] = declaration.content
+                else:
+                    errors.extend(
+                        "declared_artifact:"
+                        f"{declaration.artifact.artifact_id}:{reason}"
+                        for reason in validation.reasons
+                    )
+                artifact_rows.append(
+                    {
+                        "source": "message_metadata",
+                        "artifact_id": declaration.artifact.artifact_id,
+                        "version": declaration.artifact.version,
+                        **validation.to_dict(),
+                    }
+                )
+
+            profile = self.kernel.capability_profiles.get(
+                context.agent.agent_id
+            )
+            capabilities = tuple(
+                dict.fromkeys(
+                    [
+                        *context.agent.capabilities,
+                        *(
+                            tuple(
+                                getattr(profile, "capabilities", ()) or ()
+                            )
+                            if profile is not None
+                            else ()
+                        ),
+                    ]
+                )
+            )
+            authority = VerifiedEventAuthority.from_runtime(
+                actor_id=context.agent.agent_id,
+                semantic_action=context.semantic_action,
+                capabilities=capabilities,
+                profile_version=int(
+                    getattr(profile, "profile_version", 0) or 0
+                ),
+            )
+            evidence_sources = dict(task_evidence_sources)
+            for event in parsed.review_events:
+                validation = self._reliability_ledger.record_review(
+                    event,
+                    authority=authority,
+                    evidence_sources=evidence_sources,
+                    expected_scope_id=context.task.group_id,
+                    expected_task_id=context.task.task_id,
+                )
+                if validation.accepted:
+                    accepted_reviews.append(event)
+                else:
+                    errors.extend(
+                        f"review_event:{event.event_id}:{reason}"
+                        for reason in validation.reasons
+                    )
+                review_rows.append(
+                    {
+                        "event_id": event.event_id,
+                        "decision": event.decision.value,
+                        "target_artifact_id": event.target.artifact_id,
+                        "target_version": event.target.version,
+                        **validation.to_dict(),
+                    }
+                )
+            for event in parsed.delivery_events:
+                artifact_content = self._reliability_artifact_contents.get(
+                    event.artifact.identity
+                )
+                validation = self._reliability_ledger.record_delivery(
+                    event,
+                    content=artifact_content,
+                    authority_actor_id=context.agent.agent_id,
+                    expected_scope_id=context.task.group_id,
+                    expected_task_id=context.task.task_id,
+                )
+                if validation.accepted:
+                    accepted_deliveries.append(event)
+                    key = (
+                        context.task.group_id,
+                        context.task.task_id,
+                    )
+                    previous = self._typed_delivery_by_task.get(key)
+                    if previous is None or event.sequence > previous.sequence:
+                        self._typed_delivery_by_task[key] = event
+                else:
+                    errors.extend(
+                        f"delivery_event:{event.event_id}:{reason}"
+                        for reason in validation.reasons
+                    )
+                delivery_rows.append(
+                    {
+                        "event_id": event.event_id,
+                        "status": event.status.value,
+                        "artifact_id": event.artifact.artifact_id,
+                        "artifact_version": event.artifact.version,
+                        **validation.to_dict(),
+                    }
+                )
+
+        if (
+            parsed.metadata_present
+            or parsed.errors
+            or review_rows
+            or delivery_rows
+        ):
+            self.trace.write(
+                "autogen_typed_reliability_metadata",
+                {
+                    "call_id": context.call_id,
+                    "task_id": context.task.task_id,
+                    "group_id": context.task.group_id,
+                    "agent_id": context.agent.agent_id,
+                    "semantic_action": context.semantic_action,
+                    "metadata_present": parsed.metadata_present,
+                    "parse_errors": list(parsed.errors),
+                    "validation_errors": errors,
+                    "artifacts": artifact_rows,
+                    "review_events": review_rows,
+                    "delivery_events": delivery_rows,
+                    "accepted_review_event_count": len(accepted_reviews),
+                    "accepted_delivery_event_count": len(
+                        accepted_deliveries
+                    ),
+                },
+            )
+        return _TypedReliabilityProcessing(
+            metadata_present=parsed.metadata_present,
+            review_events_declared=parsed.review_events_declared,
+            delivery_events_declared=parsed.delivery_events_declared,
+            accepted_review_events=tuple(accepted_reviews),
+            accepted_delivery_events=tuple(accepted_deliveries),
+            errors=tuple(errors),
+        )
+
     def _apply_review_conflict_governance(
         self,
         *,
@@ -1165,6 +1423,7 @@ class AutoGenHookManager:
         output_text: str,
         state_refs: list[StateRef],
         injected_records: list[_InjectedMemoryRecord],
+        typed_processing: _TypedReliabilityProcessing | None = None,
     ) -> Any | None:
         if context.target_kind != "agentchat_agent":
             return None
@@ -1186,24 +1445,58 @@ class AutoGenHookManager:
                 ]
             )
         )
-        decision = evaluate_review_conflict(
-            output_text=output_text,
-            semantic_action=context.semantic_action,
-            capabilities=capabilities,
-            memory_rows=[
-                {
-                    "memory_id": record.ref.memory_id,
-                    "revision_guard": record.revision_guard,
-                }
-                for record in injected_records
-            ],
+        memory_rows = [
+            {
+                "memory_id": record.ref.memory_id,
+                "revision_guard": record.revision_guard,
+            }
+            for record in injected_records
+        ]
+        accepted_typed_reviews = (
+            typed_processing.accepted_review_events
+            if typed_processing is not None
+            else ()
         )
+        if accepted_typed_reviews:
+            event = max(
+                accepted_typed_reviews,
+                key=lambda item: item.sequence,
+            )
+            decision = decision_from_typed_review_event(
+                event,
+                memory_rows=memory_rows,
+            )
+        elif typed_processing is not None and typed_processing.metadata_present:
+            decision = dataclass_replace(
+                evaluate_review_conflict(
+                    output_text="",
+                    semantic_action=context.semantic_action,
+                    capabilities=capabilities,
+                    memory_rows=memory_rows,
+                ),
+                decision_source="typed_event_invalid_or_nonreview",
+            )
+        else:
+            decision = evaluate_review_conflict(
+                output_text=output_text,
+                semantic_action=context.semantic_action,
+                capabilities=capabilities,
+                memory_rows=memory_rows,
+            )
+            if (
+                decision.authoritative
+                and self.legacy_text_review_mutation_enabled
+            ):
+                decision = dataclass_replace(
+                    decision,
+                    mutation_authorized=True,
+                )
         if not decision.authoritative:
             return None
 
         deprecation_event_ids: list[str] = []
         deprecated_memory_ids: list[str] = []
-        if decision.blocking:
+        if decision.blocking and decision.mutation_authorized:
             for memory_id in decision.targeted_memory_ids:
                 resolved_ref = self.kernel.memory_store.resolve_ref(memory_id)
                 if resolved_ref is None or resolved_ref.status not in {
@@ -1232,7 +1525,11 @@ class AutoGenHookManager:
                     deprecated_memory_ids.append(memory_id)
 
         admission_report = None
-        if decision.blocking and state_refs:
+        if (
+            decision.blocking
+            and decision.mutation_authorized
+            and state_refs
+        ):
             source_pointer = ",".join(ref.state_id for ref in state_refs)
             subject = f"collaboration:{context.task.group_id}"
             claim_card = build_review_blocker_claim(
@@ -1271,6 +1568,9 @@ class AutoGenHookManager:
                 "agent_id": context.agent.agent_id,
                 "semantic_action": context.semantic_action,
                 "capabilities": list(capabilities),
+                "legacy_text_mutation_enabled": (
+                    self.legacy_text_review_mutation_enabled
+                ),
                 "state_ref_count": len(state_refs),
                 **decision.to_dict(),
                 "deprecated_memory_ids": deprecated_memory_ids,
@@ -1295,6 +1595,7 @@ class AutoGenHookManager:
         decoded_messages: list[Any],
         text: str,
         state_refs: list[StateRef],
+        typed_processing: _TypedReliabilityProcessing | None = None,
     ) -> Any | None:
         if not self.shared_memory_enabled or not state_refs:
             return None
@@ -1316,31 +1617,104 @@ class AutoGenHookManager:
                 text,
             )
             memory_source_text = candidate_text
-            delivery_assessment = assess_final_delivery(
-                request=context.task.prompt,
-                content=candidate_text,
-                source=candidate_source,
-                marker=self.final_delivery_marker,
-                require_marker=True,
-                grounding_contexts=grounding_contexts,
-            )
-            if delivery_assessment.approved_prior_artifact:
-                approval_assessment = delivery_assessment
-                resolved = _resolve_approved_prior_artifact(
-                    messages=decoded_messages,
+            typed_delivery_event = None
+            if typed_processing is not None:
+                validated_events = [
+                    event
+                    for event in typed_processing.accepted_delivery_events
+                    if event.status is DeliveryStatus.VALIDATED
+                ]
+                if validated_events:
+                    typed_delivery_event = max(
+                        validated_events,
+                        key=lambda item: item.sequence,
+                    )
+            if typed_delivery_event is None:
+                with self._memory_lock:
+                    cached_delivery = self._typed_delivery_by_task.get(
+                        (
+                            context.task.group_id,
+                            context.task.task_id,
+                        )
+                    )
+                if (
+                    cached_delivery is not None
+                    and cached_delivery.status is DeliveryStatus.VALIDATED
+                ):
+                    typed_delivery_event = cached_delivery
+
+            if typed_delivery_event is not None:
+                with self._memory_lock:
+                    typed_content = self._reliability_artifact_contents.get(
+                        typed_delivery_event.artifact.identity
+                    )
+                if typed_content:
+                    candidate_text = typed_content
+                    candidate_source = (
+                        typed_delivery_event.artifact.source_id
+                        or typed_delivery_event.actor_id
+                    )
+                    memory_source_text = typed_content
+                    resolution_kind = "typed_validated_delivery"
+                    delivery_assessment = assess_final_delivery(
+                        request=context.task.prompt,
+                        content=typed_content,
+                        source=candidate_source,
+                        minimum_body_chars=0,
+                        grounding_contexts=grounding_contexts,
+                    )
+                else:
+                    resolution_kind = "typed_delivery_content_missing"
+                    delivery_assessment = assess_final_delivery(
+                        request=context.task.prompt,
+                        content="",
+                        source=candidate_source,
+                        minimum_body_chars=0,
+                        grounding_contexts=grounding_contexts,
+                    )
+            else:
+                delivery_assessment = assess_final_delivery(
                     request=context.task.prompt,
+                    content=candidate_text,
+                    source=candidate_source,
                     marker=self.final_delivery_marker,
+                    require_marker=True,
                     grounding_contexts=grounding_contexts,
                 )
-                if resolved is not None:
-                    (
-                        candidate_text,
-                        candidate_source,
-                        delivery_assessment,
-                    ) = resolved
-                    memory_source_text = candidate_text
-                    resolution_kind = "approved_prior_artifact"
-            if delivery_assessment.valid:
+                typed_delivery_declared = bool(
+                    typed_processing is not None
+                    and typed_processing.delivery_events_declared
+                )
+                if (
+                    delivery_assessment.approved_prior_artifact
+                    and not typed_delivery_declared
+                ):
+                    approval_assessment = delivery_assessment
+                    resolved = _resolve_approved_prior_artifact(
+                        messages=decoded_messages,
+                        request=context.task.prompt,
+                        marker=self.final_delivery_marker,
+                        grounding_contexts=grounding_contexts,
+                    )
+                    if resolved is not None:
+                        (
+                            candidate_text,
+                            candidate_source,
+                            delivery_assessment,
+                        ) = resolved
+                        memory_source_text = candidate_text
+                        resolution_kind = "approved_prior_artifact"
+                if typed_delivery_declared:
+                    resolution_kind = "typed_delivery_not_validated"
+            typed_delivery_required_but_missing = bool(
+                typed_processing is not None
+                and typed_processing.delivery_events_declared
+                and typed_delivery_event is None
+            )
+            if (
+                delivery_assessment.valid
+                and not typed_delivery_required_but_missing
+            ):
                 candidate_kind = "autogen_team_final"
                 confidence, importance, coverage = 0.86, 0.82, 0.78
             else:
@@ -1413,6 +1787,15 @@ class AutoGenHookManager:
                         else {}
                     ),
                     "resolution_kind": resolution_kind,
+                    "typed_delivery_event_id": (
+                        typed_delivery_event.event_id
+                        if (
+                            context.target_kind == "agentchat_team"
+                            and context.method_name == "run_stream"
+                            and typed_delivery_event is not None
+                        )
+                        else ""
+                    ),
                     "resolved_candidate_source": candidate_source,
                     "memory_refs": [
                         _memory_ref_payload(ref)
@@ -1789,6 +2172,7 @@ class AutoGenHookManager:
             "enforcement_failed",
         }
         state_refs: list[Any] = []
+        semantic_state_text = text
         if _has_semantic_payload(decoded_messages, text):
             semantic_state_text = _semantic_autogen_state_text(
                 decoded_messages,
@@ -1834,6 +2218,12 @@ class AutoGenHookManager:
                 ),
             )
             state_refs = list(written_state_refs or [])
+        typed_processing = self._process_typed_reliability_metadata(
+            context=context,
+            decoded_messages=decoded_messages,
+            semantic_state_text=semantic_state_text,
+            state_refs=list(state_refs),
+        )
         state_ref_payload = []
         for state_ref in state_refs:
             ref_payload = self._safe_kernel_call(
@@ -1849,6 +2239,7 @@ class AutoGenHookManager:
                 output_text=text,
                 state_refs=list(state_refs),
                 injected_records=injected_records,
+                typed_processing=typed_processing,
             )
             if admission_report is None:
                 admission_report = self._promote_autogen_output_to_memory(
@@ -1856,6 +2247,7 @@ class AutoGenHookManager:
                     decoded_messages=decoded_messages,
                     text=text,
                     state_refs=list(state_refs),
+                    typed_processing=typed_processing,
                 )
         admitted_refs = _admission_memory_refs(admission_report)
         admitted_memory_refs = [

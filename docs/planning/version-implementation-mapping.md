@@ -5424,3 +5424,40 @@ A1-A10/B1-B10 连续任务和 Native、Observed、Managed 三组正式对照。
 预注册文件与 v5.14y 验收器。生产代码仍不识别 Question A/B、业务实体、
 固定结论或固定 Agent 名称。详细说明见
 `docs/experiments/v5.14z-active-fact-terminal-delivery-formal.md`。
+
+## 90. v5.15a：通用语义桥与类型化可靠性事件
+
+v5.15a 不再沿着单个基准失败继续增加领域词表或表面正则，而是把事实进入
+共享记忆和审查结果选择交付物的路径收束为两个开放协议：
+
+- `CanonicalClaimCandidate -> SourceSpan 校验 -> 分层 Schema Registry ->
+  Conflict Resolver -> ClaimCard / MemoryView`；
+- `ArtifactRef -> ReviewDecisionEvent -> DeliveryEvent -> 精确交付物解析`。
+
+实现映射：
+
+- `agent_runtime/memory/claim_extractor.py`：从 JSON 标量、显式键值和 Markdown
+  表格等结构中产生开放谓词候选，并保留精确来源区间、引文和哈希；
+- `agent_runtime/memory/schema_registry.py`：区分核心、开发者和动态开放谓词
+  三层 Schema；动态注册只表示证据已验证，不表示系统猜出了领域含义；
+- `agent_runtime/memory/conflict_resolver.py`：处理等价、时态、显式修订和兼容
+  约束；无法安全决定的冲突保持未解析；
+- `agent_runtime/reliability/typed_events.py`：用带 scope、task、version 和 hash
+  的类型化事件表达审查与交付；权限来自运行时能力，不来自 Agent 名称；
+- `agent_runtime/drivers/autogen.py`：只从保留的 metadata 命名空间读取类型化
+  可靠性事件；可见审查文本默认仅观测，不再直接改写记忆或选择终稿；
+- `experiments/v5.15a-generic-semantic-bridge-acceptance/`：在 openEuler 上校验
+  跨域结构、语义变形、重放隔离、哈希绑定、任意角色名和提交后外部 holdout。
+
+通用边界：
+
+```text
+不识别 Question A/B、固定角色或已知业务实体；
+领域兼容解析器默认关闭，且不能绕过来源校验和记忆准入；
+歧义事实保持未解析或仅审计，不按最新时间或置信度猜测胜者；
+可见文本不具备类型化事件权限；
+机制验收通过不等同于跨所有领域的端到端质量或 Token 收益证明。
+```
+
+详细说明见
+`docs/planning/v5.15a-generic-semantic-bridge.md`。
