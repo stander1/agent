@@ -1927,12 +1927,30 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                     {},
                 )
                 hydrated = hydrated_args[0][0]["content"]
-                self.assertIn("AGENTLITE_RECEIVER_CAPABILITY_VIEW v1", hydrated)
-                self.assertIn("semantic_action=WRITE_OUTPUT", hydrated)
-                self.assertIn("capabilities=", hydrated)
+                self.assertIn("CURRENT_USER_TASK (highest priority):", hydrated)
+                self.assertIn("CAPABILITY_PROMPT_VIEW:", hydrated)
                 self.assertEqual(hydrated.count(SHARED_MEMORY_MARKER), 1)
+                self.assertNotIn("AGENTLITE_", hydrated)
+                self.assertNotIn("shp_wire=", hydrated)
                 self.assertNotIn("--- receiver: planner", hydrated)
                 self.assertNotIn("--- receiver: reviewer", hydrated)
+                hydrated_events = self._events(
+                    manager.output_dir / "trace.jsonl"
+                )
+                hydrated_rewrite = next(
+                    item
+                    for item in reversed(hydrated_events)
+                    if item.get("event_type")
+                    == "autogen_agent_input_real_rewrite"
+                    and item.get("payload", {}).get("call_id")
+                    == writer_context.call_id
+                )
+                self.assertEqual(
+                    hydrated_rewrite["payload"][
+                        "model_visible_protocol_marker_count"
+                    ],
+                    0,
+                )
 
                 self.assertTrue(second.display_restore_enabled)
                 applied_events = self._events(manager.output_dir / "trace.jsonl")
@@ -1981,6 +1999,23 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                 self.assertIn(
                     "AGENTLITE_TEAM_REAL_REWRITE v1",
                     internal_result.messages[0].content,
+                )
+                manager.record_call_end(second, display_result)
+                visible_output_events = self._events(
+                    manager.output_dir / "trace.jsonl"
+                )
+                visible_output = next(
+                    item
+                    for item in reversed(visible_output_events)
+                    if item.get("event_type") == "autogen_agent_output"
+                    and item.get("payload", {}).get("call_id")
+                    == second.call_id
+                )
+                self.assertEqual(
+                    visible_output["payload"][
+                        "model_visible_protocol_marker_count"
+                    ],
+                    0,
                 )
 
                 persisted = AutoGenHookManager(

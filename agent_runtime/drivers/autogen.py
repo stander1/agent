@@ -142,7 +142,7 @@ SEMANTIC_DEPENDENCY_MAX_TOKENS_ENV = (
 )
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
 CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
-DRIVER_PHASE = "v5.15h"
+DRIVER_PHASE = "v5.15i"
 _AUTOGEN_REPEATED_INSTANCE_ID_RE = re.compile(
     r"^(?P<logical>.+)_(?P<run>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
     r"[0-9a-f]{4}-[0-9a-f]{12})_(?P=run)$",
@@ -4502,14 +4502,6 @@ class AutoGenHookManager:
             and str(getattr(message, "source", "") or "").casefold() != "user"
         ]
         sections = [
-            "AGENTLITE_RECEIVER_CAPABILITY_VIEW v1",
-            f"receiver={context.agent.agent_id}",
-            f"semantic_action={receiver_view['semantic_action']}",
-            f"capability_profile_version={receiver_view['capability_profile_version']}",
-            "capabilities="
-            + json.dumps(receiver_view["capabilities"], ensure_ascii=False),
-            "information_fields="
-            + json.dumps(receiver_view["information_fields"], ensure_ascii=False),
             "CURRENT_USER_TASK (highest priority):",
             receiver_view["current_task"],
             _required_evidence_prompt_rule(
@@ -4523,16 +4515,6 @@ class AutoGenHookManager:
             receiver_view["prompt_view"],
         ]
         wire_envelope = receiver_view.get("wire_envelope", {})
-        if wire_envelope:
-            sections.insert(
-                3,
-                "shp_wire="
-                + json.dumps(
-                    wire_envelope,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
-            )
         if upstream:
             latest_source, latest_content = upstream[-1]
             sections.extend(
@@ -6454,12 +6436,13 @@ class AutoGenHookManager:
                             context,
                             item,
                         )
-                        last_item = guarded_item
-                        self.record_stream_item(context, guarded_item)
-                        yield self.restore_call_result_for_display(
+                        visible_item = self.restore_call_result_for_display(
                             context,
                             guarded_item,
                         )
+                        last_item = visible_item
+                        self.record_stream_item(context, visible_item)
+                        yield visible_item
                     self.record_call_end(context, last_item)
                 except Exception as exc:
                     self.record_call_error(context, exc)
@@ -6515,8 +6498,12 @@ class AutoGenHookManager:
                         send_message_entered = False
                     result = self.rewrite_call_result_if_safe(context, result)
                     result = self.guard_call_result_if_needed(context, result)
-                    self.record_call_end(context, result)
-                    return self.restore_call_result_for_display(context, result)
+                    visible_result = self.restore_call_result_for_display(
+                        context,
+                        result,
+                    )
+                    self.record_call_end(context, visible_result)
+                    return visible_result
                 except Exception as exc:
                     if send_message_entered:
                         self._exit_core_send_message(
@@ -6557,12 +6544,13 @@ class AutoGenHookManager:
                             context,
                             item,
                         )
-                        last_item = guarded_item
-                        self.record_stream_item(context, guarded_item)
-                        yield self.restore_call_result_for_display(
+                        visible_item = self.restore_call_result_for_display(
                             context,
                             guarded_item,
                         )
+                        last_item = visible_item
+                        self.record_stream_item(context, visible_item)
+                        yield visible_item
                     self.record_call_end(context, last_item)
                 except Exception as exc:
                     self.record_call_error(context, exc)
@@ -6595,8 +6583,12 @@ class AutoGenHookManager:
                 result = original(instance, *args, **kwargs)
                 result = self.rewrite_call_result_if_safe(context, result)
                 result = self.guard_call_result_if_needed(context, result)
-                self.record_call_end(context, result)
-                return self.restore_call_result_for_display(context, result)
+                visible_result = self.restore_call_result_for_display(
+                    context,
+                    result,
+                )
+                self.record_call_end(context, visible_result)
+                return visible_result
             except Exception as exc:
                 self.record_call_error(context, exc)
                 raise
