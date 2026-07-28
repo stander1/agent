@@ -69,7 +69,11 @@ class IntegratedAutoGenSemanticPreflightTest(unittest.TestCase):
                 },
                 {
                     "task_id": "t2",
-                    "required_fragments": ["45 mg/L", "42 mg/L"],
+                    "required_fragments": [
+                        "45 mg/L",
+                        "42 mg/L",
+                        "superseded measurement",
+                    ],
                 },
             ],
         }
@@ -107,7 +111,12 @@ class IntegratedAutoGenSemanticPreflightTest(unittest.TestCase):
                 {
                     "provider_calls": 3,
                     "provider_outputs": [
-                        {"content": "45 mg/L replaces 42 mg/L"}
+                        {
+                            "content": (
+                                "45 mg/L replaces 42 mg/L as the "
+                                "Superseded Measurement."
+                            )
+                        }
                     ],
                 },
             ],

@@ -36,6 +36,12 @@ def _integer(value: Any) -> int:
         return 0
 
 
+def _contains_fragment(text: str, fragment: str) -> bool:
+    """Match semantic evidence without treating capitalization as meaning."""
+
+    return fragment.casefold() in text.casefold()
+
+
 def build_report(
     *,
     implementation_commit: str,
@@ -77,9 +83,15 @@ def build_report(
             for value in expected.get("forbidden_fragments", [])
             if str(value)
         ]
-        missing = [value for value in required if value not in output_text]
+        missing = [
+            value
+            for value in required
+            if not _contains_fragment(output_text, value)
+        ]
         present_forbidden = [
-            value for value in forbidden if value in output_text
+            value
+            for value in forbidden
+            if _contains_fragment(output_text, value)
         ]
         grounded = not missing and not present_forbidden
         grounded_task_count += int(grounded)
