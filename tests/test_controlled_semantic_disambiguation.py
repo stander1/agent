@@ -143,6 +143,22 @@ class ControlledSemanticDisambiguationTest(unittest.TestCase):
         request_payload = json.loads(client.calls[0]["user_prompt"])
         self.assertEqual(request_payload["task_id"], "task-one")
         self.assertEqual(request_payload["source_text"], text)
+        system_prompt = client.calls[0]["system_prompt"]
+        self.assertIn("lower_snake_case", system_prompt)
+        self.assertIn(
+            'assertion_type=["constraint", "decision", "fact", '
+            '"observation", "preference"]',
+            system_prompt,
+        )
+        self.assertIn(
+            'operator=["eq", "ge", "gt", "le", "lt", "ne"]',
+            system_prompt,
+        )
+        self.assertIn(
+            'temporal_status=["current", "future", "historical", '
+            '"unspecified"]',
+            system_prompt,
+        )
 
     def test_rejects_quote_not_present_in_source(self) -> None:
         client = _FakeClient(
@@ -271,9 +287,9 @@ class ControlledSemanticDisambiguationTest(unittest.TestCase):
                         }
                     ],
                     usage={
-                        "prompt_tokens": 210,
-                        "completion_tokens": 140,
-                        "total_tokens": 350,
+                        "prompt_tokens": 700,
+                        "completion_tokens": 500,
+                        "total_tokens": 1200,
                     },
                 )
             ]
@@ -284,7 +300,7 @@ class ControlledSemanticDisambiguationTest(unittest.TestCase):
                 max_calls_per_task=2,
                 max_source_chars=100,
                 max_candidates_per_call=2,
-                max_control_tokens_per_task=300,
+                max_control_tokens_per_task=1000,
             ),
         )
         result = disambiguator.disambiguate(
@@ -296,7 +312,7 @@ class ControlledSemanticDisambiguationTest(unittest.TestCase):
 
         self.assertEqual(result.status, "budget_exhausted")
         self.assertFalse(result.candidates)
-        self.assertEqual(result.total_tokens, 350)
+        self.assertEqual(result.total_tokens, 1200)
         self.assertIn(
             "control_token_budget_exhausted",
             next_result.reasons,

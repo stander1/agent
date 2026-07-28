@@ -5518,3 +5518,15 @@ OpenAI-compatible Provider，验证它在提交后外部跨域样例上的可用
 该阶段只建立真实控制路径的成本质量基线，不产生
 Native/Observed/Managed Token 节省结论。详细说明见
 `docs/planning/v5.15c-real-provider-semantic-preflight.md`。
+
+## 93. v5.15d：控制协议契约补全
+
+v5.15d 根据首次真实 Provider 预检证据修复生产者与本地验证器之间的通用
+协议错位。控制提示此前只给出字段名，没有声明枚举值，导致模型返回自然语言
+Schema 值并被严格验证器拒绝。
+
+`agent_runtime/memory/semantic_disambiguator.py` 现在直接从本地允许集合生成
+完整枚举契约，并要求开放式 `lower_snake_case` 谓词、响应版本和精确唯一
+引文。验证器仍严格失败关闭，不新增同义词猜测、领域词典或直接准入路径。
+
+详细说明见 `docs/planning/v5.15d-control-protocol-contract.md`。
