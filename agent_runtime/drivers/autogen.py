@@ -51,6 +51,7 @@ from agent_runtime.memory.memory_store import (
     MemoryStoreLite,
     classify_memory_quality_envelope,
 )
+from agent_runtime.memory.schema_registry import canonical_claim_polarity
 from agent_runtime.memory.semantic_disambiguator import (
     ControlledSemanticDependencyAnalyzer,
     ControlledSemanticDisambiguator,
@@ -146,7 +147,7 @@ SEMANTIC_DEPENDENCY_MAX_TOKENS_ENV = (
 )
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
 CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
-DRIVER_PHASE = "v5.15j"
+DRIVER_PHASE = "v5.15l"
 _AUTOGEN_REPEATED_INSTANCE_ID_RE = re.compile(
     r"^(?P<logical>.+)_(?P<run>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
     r"[0-9a-f]{4}-[0-9a-f]{12})_(?P=run)$",
@@ -8544,8 +8545,23 @@ def _structured_fact_value_identity(
             str(fact.get("value_type") or "string"),
             str(fact.get("unit") or ""),
         ),
-        str(fact.get("polarity") or "positive"),
+        _structured_fact_polarity(fact),
     )
+
+
+def _structured_fact_operator(fact: Mapping[str, Any]) -> str:
+    operator = str(fact.get("operator") or "").strip().casefold()
+    if operator in {"eq", "ne", "lt", "le", "gt", "ge"}:
+        return operator
+    return (
+        "ne"
+        if str(fact.get("polarity") or "positive") == "negative"
+        else "eq"
+    )
+
+
+def _structured_fact_polarity(fact: Mapping[str, Any]) -> str:
+    return canonical_claim_polarity(_structured_fact_operator(fact))
 
 
 def _matching_structured_claim(
@@ -8561,7 +8577,7 @@ def _matching_structured_claim(
     )
     expected_unit = str(fact.get("unit") or "")
     expected_value_type = str(fact.get("value_type") or "string")
-    expected_polarity = str(fact.get("polarity") or "positive")
+    expected_polarity = _structured_fact_polarity(fact)
     for claim in claims:
         if str(claim.get("slot_id") or "") != expected_slot:
             continue
@@ -8621,7 +8637,8 @@ def _matching_structured_fact_literal(
     return {
         "raw_text": raw_value,
         "summary": raw_value,
-        "polarity": str(fact.get("polarity") or "positive"),
+        "polarity": _structured_fact_polarity(fact),
+        "operator": _structured_fact_operator(fact),
         "match_mode": "canonical_value_literal",
     }
 

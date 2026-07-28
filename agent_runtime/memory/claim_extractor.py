@@ -11,6 +11,7 @@ from agent_runtime.memory.schema_registry import (
     ClaimRelation,
     SchemaRegistryLite,
     SourceSpan,
+    canonical_claim_polarity,
 )
 
 
@@ -290,7 +291,7 @@ def _build_canonical_candidate(
         if operator in {"lt", "le", "gt", "ge", "ne"}
         else "fact"
     )
-    polarity = "negative" if operator == "ne" else "positive"
+    polarity = canonical_claim_polarity(operator)
     span = SourceSpan.from_text(
         source_id=source_id,
         text=source_text,

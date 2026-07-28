@@ -6,6 +6,16 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 
+def canonical_claim_polarity(operator: Any) -> str:
+    """Return logical assertion polarity, independent of scalar sign."""
+
+    return (
+        "negative"
+        if str(operator or "").strip().casefold() == "ne"
+        else "positive"
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class SourceSpan:
     """Exact evidence location for a claim candidate."""

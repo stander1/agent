@@ -29,6 +29,77 @@ class ArbitraryTextMessage:
 
 
 class MemoryAdoptionGuardTest(unittest.TestCase):
+    def test_signed_scalar_is_not_treated_as_logical_negation(self) -> None:
+        signed = _structured_memory_adoption_evidence(
+            revision_guard={
+                "subject": "project:generic",
+                "semantic_key": "generic|slot.open.offset|general",
+                "active_facts": [
+                    {
+                        "slot_id": "slot.open.offset",
+                        "scope": "general",
+                        "value": "-18.7",
+                        "value_type": "number",
+                        "unit": "kilometres per second",
+                        "polarity": "negative",
+                        "operator": "eq",
+                    }
+                ],
+                "historical_facts": [],
+            },
+            current_task_text="Use the earlier validated observation.",
+            output_text=(
+                "The current observation is -18.7 kilometres per second."
+            ),
+            explicit_reference=False,
+        )
+        boolean_false = _structured_memory_adoption_evidence(
+            revision_guard={
+                "subject": "project:generic",
+                "semantic_key": "generic|slot.open.flag|general",
+                "active_facts": [
+                    {
+                        "slot_id": "slot.open.flag",
+                        "scope": "general",
+                        "value": "false",
+                        "value_type": "boolean",
+                        "unit": "",
+                        "polarity": "negative",
+                        "operator": "eq",
+                    }
+                ],
+                "historical_facts": [],
+            },
+            current_task_text="Use the earlier validated flag.",
+            output_text="The current feature flag remains false.",
+            explicit_reference=False,
+        )
+        logical_negative = _structured_memory_adoption_evidence(
+            revision_guard={
+                "subject": "project:generic",
+                "semantic_key": "generic|slot.open.state|general",
+                "active_facts": [
+                    {
+                        "slot_id": "slot.open.state",
+                        "scope": "general",
+                        "value": "dormant",
+                        "value_type": "string",
+                        "unit": "",
+                        "polarity": "positive",
+                        "operator": "ne",
+                    }
+                ],
+                "historical_facts": [],
+            },
+            current_task_text="Use the earlier state constraint.",
+            output_text="The state is not dormant.",
+            explicit_reference=False,
+        )
+
+        self.assertEqual(signed["status"], "useful")
+        self.assertEqual(boolean_false["status"], "useful")
+        self.assertEqual(logical_negative["status"], "unassessed")
+
     def test_identical_active_and_historical_facts_are_not_a_conflict(self) -> None:
         evidence = _structured_memory_adoption_evidence(
             revision_guard={

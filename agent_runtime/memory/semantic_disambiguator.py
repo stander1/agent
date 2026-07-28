@@ -9,6 +9,7 @@ from agent_runtime.memory.schema_registry import (
     CanonicalClaimCandidate,
     ClaimRelation,
     SourceSpan,
+    canonical_claim_polarity,
 )
 
 
@@ -686,6 +687,7 @@ def _render_prompts(
         "the source, not a paraphrase. The value and unit must preserve the "
         "literal semantic value present in that quote: keep descriptive "
         "values as strings and do not rewrite them as booleans. "
+        "Polarity follows operator: ne is negative; all others are positive. "
         "Use only this canonical enum contract: "
         f"assertion_type={json.dumps(sorted(_ALLOWED_ASSERTION_TYPES))}; "
         f"operator={json.dumps(sorted(_ALLOWED_OPERATORS))}; "
@@ -772,7 +774,9 @@ def _candidate_from_proposal(
     operator = str(proposal.get("operator") or "eq").strip()
     value_type = str(proposal.get("value_type") or "string").strip()
     unit = str(proposal.get("unit") or "").strip()
-    polarity = str(proposal.get("polarity") or "positive").strip()
+    proposed_polarity = str(
+        proposal.get("polarity") or "positive"
+    ).strip()
     modality = str(proposal.get("modality") or "asserted").strip()
     temporal_status = str(
         proposal.get("temporal_status") or "unspecified"
@@ -790,7 +794,7 @@ def _candidate_from_proposal(
         reasons.append("unsupported_operator")
     if value_type not in _ALLOWED_VALUE_TYPES:
         reasons.append("unsupported_value_type")
-    if polarity not in _ALLOWED_POLARITIES:
+    if proposed_polarity not in _ALLOWED_POLARITIES:
         reasons.append("unsupported_polarity")
     if modality not in _ALLOWED_MODALITIES:
         reasons.append("unsupported_modality")
@@ -848,6 +852,7 @@ def _candidate_from_proposal(
     if reasons:
         return None, list(dict.fromkeys(reasons))
 
+    polarity = canonical_claim_polarity(operator)
     start, end = quote_spans[0]
     source_span = SourceSpan.from_text(
         source_id=request.source_id,

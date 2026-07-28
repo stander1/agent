@@ -9,7 +9,10 @@ from agent_runtime.memory.claim_extractor import (
     extract_claim_cards,
 )
 from agent_runtime.memory.memory_store import MemoryAdmissionReport, MemoryStoreLite
-from agent_runtime.memory.schema_registry import SourceSpan
+from agent_runtime.memory.schema_registry import (
+    SourceSpan,
+    canonical_claim_polarity,
+)
 from agent_runtime.memory.semantic_disambiguator import (
     SemanticDisambiguationRequest,
     SemanticDisambiguationResult,
@@ -607,6 +610,9 @@ class StateToMemoryBridgeLite:
         )
         enriched.setdefault("assertion_type", "fact")
         enriched.setdefault("operator", "eq")
+        enriched["polarity"] = canonical_claim_polarity(
+            enriched["operator"]
+        )
         enriched.setdefault("temporal_status", "unspecified")
         enriched.setdefault("relations", [])
         enriched.setdefault("schema_layer", "developer")
@@ -680,7 +686,9 @@ class StateToMemoryBridgeLite:
             "summary": raw_text,
             "certainty": certainty,
             "modality": str(candidate.get("modality") or "asserted"),
-            "polarity": str(candidate.get("polarity") or "positive"),
+            "polarity": canonical_claim_polarity(
+                candidate.get("operator") or "eq"
+            ),
             "confidence": float(candidate.get("confidence") or 0.0),
             "revision_kind": revision_kind,
             "temporal_scope": "cross_task",

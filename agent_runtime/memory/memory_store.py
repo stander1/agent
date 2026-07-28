@@ -19,7 +19,11 @@ from agent_runtime.memory.references import (
     MemoryReferenceManagerLite,
     MemoryReferenceRecord,
 )
-from agent_runtime.memory.schema_registry import SchemaRegistryLite, SlotPolicy
+from agent_runtime.memory.schema_registry import (
+    SchemaRegistryLite,
+    SlotPolicy,
+    canonical_claim_polarity,
+)
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+|[\u3400-\u4dbf\u4e00-\u9fff]")
 
@@ -1492,6 +1496,7 @@ class MemoryStoreLite:
                     "value_type": claim.value_type,
                     "unit": claim.unit,
                     "polarity": claim.polarity,
+                    "operator": claim.operator,
                     "claim_id": claim.claim_id,
                 }
                 for claim in active_claims
@@ -1509,6 +1514,7 @@ class MemoryStoreLite:
                     "value_type": claim.value_type,
                     "unit": claim.unit,
                     "polarity": claim.polarity,
+                    "operator": claim.operator,
                     "schema_version": claim.schema_version,
                     "claim_type": claim.claim_type,
                     "exclude_from_negative_attribution": (
@@ -1528,6 +1534,7 @@ class MemoryStoreLite:
                     "value_type": claim.value_type,
                     "unit": claim.unit,
                     "polarity": claim.polarity,
+                    "operator": claim.operator,
                     "claim_id": claim.claim_id,
                 }
                 for claim in historical_claims
@@ -2708,6 +2715,10 @@ class MemoryStoreLite:
             subject = str(item.get("subject") or task_topic)
             predicate = str(item.get("raw_slot_text") or item.get("scope") or "claims")
             obj = str(item.get("value") or "")
+            operator = str(item.get("operator") or "eq")
+            polarity = str(item.get("polarity") or "positive")
+            if "operator" in item:
+                polarity = canonical_claim_polarity(operator)
             condition = str(item.get("condition") or "")
             resolved_source = str(item.get("source_pointer") or source_pointer)
             confidence = self._float_between(
@@ -2736,14 +2747,14 @@ class MemoryStoreLite:
                     summary=str(item.get("summary") or item.get("raw_text") or obj),
                     certainty=str(item.get("certainty") or "asserted"),
                     modality=str(item.get("modality") or "asserted"),
-                    polarity=str(item.get("polarity") or "positive"),
+                    polarity=polarity,
                     revision_kind=str(item.get("revision_kind") or "asserted"),
                     temporal_scope=str(item.get("temporal_scope") or "cross_task"),
                     schema_version=str(item.get("schema_version") or "ccf.v2"),
                     assertion_type=str(
                         item.get("assertion_type") or "fact"
                     ),
-                    operator=str(item.get("operator") or "eq"),
+                    operator=operator,
                     temporal_status=str(
                         item.get("temporal_status") or "unspecified"
                     ),

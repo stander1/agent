@@ -20,7 +20,28 @@ class FactLevelMemoryTest(unittest.TestCase):
         unit: str = "ms",
         confidence: float = 0.9,
         revision_kind: str = "asserted",
+        operator: str | None = None,
+        polarity: str = "positive",
     ):
+        claim_card = {
+            "subject": subject,
+            "raw_slot_text": scope,
+            "slot_id": slot_id,
+            "scope": scope,
+            "value": value,
+            "value_type": value_type,
+            "unit": unit,
+            "raw_text": f"{scope}={value}",
+            "summary": f"{scope}={value}",
+            "certainty": "confirmed",
+            "modality": "asserted",
+            "polarity": polarity,
+            "confidence": confidence,
+            "revision_kind": revision_kind,
+            "source_pointer": f"state:{task_id}",
+        }
+        if operator is not None:
+            claim_card["operator"] = operator
         return store.write_memory_candidate_with_report(
             task_id=task_id,
             source_agent="ConfigurationAgent",
@@ -33,25 +54,7 @@ class FactLevelMemoryTest(unittest.TestCase):
                 "reuse_scope": ["demo-chain"],
                 "slot_hint": slot_id,
             },
-            claim_cards=[
-                {
-                    "subject": subject,
-                    "raw_slot_text": scope,
-                    "slot_id": slot_id,
-                    "scope": scope,
-                    "value": value,
-                    "value_type": value_type,
-                    "unit": unit,
-                    "raw_text": f"{scope}={value}",
-                    "summary": f"{scope}={value}",
-                    "certainty": "confirmed",
-                    "modality": "asserted",
-                    "polarity": "positive",
-                    "confidence": confidence,
-                    "revision_kind": revision_kind,
-                    "source_pointer": f"state:{task_id}",
-                }
-            ],
+            claim_cards=[claim_card],
             tags=["demo-chain", task_id],
             slot_hint=slot_id,
             source_state_ids=[f"state_{task_id}"],
@@ -59,6 +62,38 @@ class FactLevelMemoryTest(unittest.TestCase):
             reuse_intent="reuse in the same project chain",
             fallback_summary=f"{scope}={value}",
         )
+
+    def test_store_canonicalizes_logical_polarity_from_explicit_operator(
+        self,
+    ) -> None:
+        store = MemoryStoreLite()
+        signed = self._write_claim(
+            store,
+            task_id="P1",
+            scope="measurement.offset",
+            value="-18.7",
+            value_type="number",
+            unit="m",
+            operator="eq",
+            polarity="negative",
+        )
+        excluded = self._write_claim(
+            store,
+            task_id="P2",
+            scope="measurement.excluded_value",
+            value="4",
+            value_type="number",
+            unit="m",
+            operator="ne",
+            polarity="positive",
+        )
+
+        signed_claim = store._claims[signed.claim_ids[0]]
+        excluded_claim = store._claims[excluded.claim_ids[0]]
+        self.assertEqual(signed_claim.operator, "eq")
+        self.assertEqual(signed_claim.polarity, "positive")
+        self.assertEqual(excluded_claim.operator, "ne")
+        self.assertEqual(excluded_claim.polarity, "negative")
 
     def test_same_fact_merges_evidence_and_search_returns_one_view(self) -> None:
         store = MemoryStoreLite()

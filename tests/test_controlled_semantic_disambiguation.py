@@ -190,6 +190,81 @@ class ControlledSemanticDisambiguationTest(unittest.TestCase):
         self.assertFalse(result.accepted)
         self.assertIn("claim_0:source_quote_not_found", result.reasons)
 
+    def test_scalar_sign_and_boolean_value_do_not_change_logical_polarity(
+        self,
+    ) -> None:
+        text = (
+            "The offset is -18.7 units. "
+            "The feature flag is false. "
+            "The state is not equal to dormant."
+        )
+        client = _FakeClient(
+            [
+                _response(
+                    [
+                        {
+                            "predicate": "offset",
+                            "assertion_type": "observation",
+                            "operator": "eq",
+                            "value": "-18.7",
+                            "value_type": "number",
+                            "unit": "units",
+                            "polarity": "negative",
+                            "modality": "observed",
+                            "temporal_status": "current",
+                            "source_quote": "The offset is -18.7 units.",
+                            "confidence": 0.9,
+                            "relations": [],
+                        },
+                        {
+                            "predicate": "feature_flag",
+                            "assertion_type": "fact",
+                            "operator": "eq",
+                            "value": "false",
+                            "value_type": "boolean",
+                            "unit": "",
+                            "polarity": "negative",
+                            "modality": "asserted",
+                            "temporal_status": "current",
+                            "source_quote": "The feature flag is false.",
+                            "confidence": 0.9,
+                            "relations": [],
+                        },
+                        {
+                            "predicate": "state",
+                            "assertion_type": "constraint",
+                            "operator": "ne",
+                            "value": "dormant",
+                            "value_type": "string",
+                            "unit": "",
+                            "polarity": "positive",
+                            "modality": "asserted",
+                            "temporal_status": "current",
+                            "source_quote": (
+                                "The state is not equal to dormant."
+                            ),
+                            "confidence": 0.9,
+                            "relations": [],
+                        },
+                    ]
+                )
+            ]
+        )
+
+        result = ControlledSemanticDisambiguator(client).disambiguate(
+            _request(text)
+        )
+
+        self.assertTrue(result.accepted, result.reasons)
+        self.assertEqual(
+            [item["polarity"] for item in result.candidates],
+            ["positive", "positive", "negative"],
+        )
+        self.assertIn(
+            "Polarity follows operator",
+            client.calls[0]["system_prompt"],
+        )
+
     def test_rejects_repeated_quote_without_guessing_span(self) -> None:
         client = _FakeClient(
             [
@@ -288,7 +363,7 @@ class ControlledSemanticDisambiguationTest(unittest.TestCase):
                 max_calls_per_task=1,
                 max_source_chars=100,
                 max_candidates_per_call=2,
-                max_control_tokens_per_task=500,
+                max_control_tokens_per_task=700,
             ),
         )
         first = disambiguator.disambiguate(
@@ -413,7 +488,7 @@ class ControlledSemanticDisambiguationTest(unittest.TestCase):
                 max_calls_per_task=1,
                 max_source_chars=100,
                 max_candidates_per_call=1,
-                max_control_tokens_per_task=500,
+                max_control_tokens_per_task=700,
             ),
         ).disambiguate(_request("alpha beta", task_id="candidate-limit"))
         self.assertIn(
