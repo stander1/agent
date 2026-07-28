@@ -566,6 +566,29 @@ FINAL_ANSWER_READY"""
         self.assertTrue(assessment.review_only)
         self.assertTrue(assessment.approved_prior_artifact)
 
+    def test_dynamic_agent_latest_artifact_is_recognized_as_approved(
+        self,
+    ) -> None:
+        content = """## Review history
+The first submitted draft failed and required revision.
+## Final acceptance
+The latest DomainAgent17 submitted artifact is validated and approved as the
+final delivery.
+FINAL_ANSWER_READY"""
+
+        assessment = assess_final_delivery(
+            request="Deliver the complete implementation report.",
+            content=content,
+            source="reviewer",
+            expected_source="reviewer",
+            marker="FINAL_ANSWER_READY",
+            require_marker=True,
+        )
+
+        self.assertFalse(assessment.valid)
+        self.assertTrue(assessment.review_only)
+        self.assertTrue(assessment.approved_prior_artifact)
+
     def test_plain_current_result_after_history_is_still_enforced(self) -> None:
         content = """## 最终可交付方案
 

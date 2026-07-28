@@ -65,9 +65,11 @@ _SUBMITTED_ARTIFACT_REFERENCE_RE = re.compile(
     r")"
 )
 _LATEST_ARTIFACT_REFERENCE_RE = re.compile(
-    r"(?is)(?:(?:最新|最近|当前)(?:提交的?)?"
-    r"(?:成果|草稿|报告|产出)|"
+    r"(?is)(?:(?:最新|最近|当前)\s*"
+    r"(?:[A-Za-z][A-Za-z0-9_.-]{1,63}\s*)?"
+    r"(?:提交的?)?(?:成果|草稿|报告|产出)|"
     r"(?:latest|most\s+recent|current)\s+"
+    r"(?:[A-Za-z][A-Za-z0-9_.-]{1,63}\s+)?"
     r"(?:submitted\s+)?(?:artifact|draft|report|output))"
 )
 _REVIEW_PROCESS_SIGNAL_RE = re.compile(
