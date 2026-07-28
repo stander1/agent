@@ -122,6 +122,13 @@ class TaskMetricRow:
     retry_budget_exhausted_count: int = 0
     retrieved_memory_tokens: int = 0
     control_llm_tokens: int = 0
+    control_llm_call_count: int = 0
+    control_llm_prompt_tokens: int = 0
+    control_llm_completion_tokens: int = 0
+    control_llm_retry_count: int = 0
+    control_llm_latency_ms: float = 0.0
+    semantic_disambiguation_accepted_count: int = 0
+    semantic_disambiguation_rejected_count: int = 0
     retry_tokens: int = 0
     llm_call_count: int = 0
     llm_prompt_tokens: int = 0
@@ -648,6 +655,37 @@ class MetricsCollector:
         row.communication_gate_degraded_count += int(gate_status == "degraded")
         row.control_budget_exhausted_count += int(not budget_allowed)
 
+    def record_control_llm(
+        self,
+        *,
+        task_id: str,
+        round_id: int,
+        mode: Mode,
+        call_count: int = 0,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        total_tokens: int = 0,
+        retry_count: int = 0,
+        latency_ms: float = 0.0,
+        accepted_candidate_count: int = 0,
+        rejected_candidate_count: int = 0,
+    ) -> None:
+        row = self._row(task_id, round_id, mode)
+        row.control_llm_call_count += max(0, call_count)
+        row.control_llm_prompt_tokens += max(0, prompt_tokens)
+        row.control_llm_completion_tokens += max(0, completion_tokens)
+        row.control_llm_tokens += max(0, total_tokens)
+        row.control_llm_retry_count += max(0, retry_count)
+        row.control_llm_latency_ms += max(0.0, latency_ms)
+        row.semantic_disambiguation_accepted_count += max(
+            0,
+            accepted_candidate_count,
+        )
+        row.semantic_disambiguation_rejected_count += max(
+            0,
+            rejected_candidate_count,
+        )
+
     def record_background_memory_job(
         self,
         *,
@@ -745,6 +783,13 @@ class MetricsCollector:
                 "success_count": 0,
                 "retrieved_memory_tokens": 0,
                 "control_llm_tokens": 0,
+                "control_llm_call_count": 0,
+                "control_llm_prompt_tokens": 0,
+                "control_llm_completion_tokens": 0,
+                "control_llm_retry_count": 0,
+                "control_llm_latency_ms": 0.0,
+                "semantic_disambiguation_accepted_count": 0,
+                "semantic_disambiguation_rejected_count": 0,
                 "retry_tokens": 0,
                 "llm_call_count": 0,
                 "llm_prompt_tokens": 0,
@@ -851,6 +896,21 @@ class MetricsCollector:
             bucket["success_count"] += int(row.success)
             bucket["retrieved_memory_tokens"] += row.retrieved_memory_tokens
             bucket["control_llm_tokens"] += row.control_llm_tokens
+            bucket["control_llm_call_count"] += row.control_llm_call_count
+            bucket["control_llm_prompt_tokens"] += (
+                row.control_llm_prompt_tokens
+            )
+            bucket["control_llm_completion_tokens"] += (
+                row.control_llm_completion_tokens
+            )
+            bucket["control_llm_retry_count"] += row.control_llm_retry_count
+            bucket["control_llm_latency_ms"] += row.control_llm_latency_ms
+            bucket["semantic_disambiguation_accepted_count"] += (
+                row.semantic_disambiguation_accepted_count
+            )
+            bucket["semantic_disambiguation_rejected_count"] += (
+                row.semantic_disambiguation_rejected_count
+            )
             bucket["retry_tokens"] += row.retry_tokens
             bucket["llm_call_count"] += row.llm_call_count
             bucket["llm_prompt_tokens"] += row.llm_prompt_tokens

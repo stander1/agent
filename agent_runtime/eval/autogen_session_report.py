@@ -354,6 +354,22 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
     prompt_view = _int(token_summary.get("prompt_view_tokens"))
     retrieved = _int(token_summary.get("retrieved_memory_tokens"))
     control = _int(token_summary.get("control_llm_tokens"))
+    control_calls = _int(token_summary.get("control_llm_call_count"))
+    control_prompt = _int(
+        token_summary.get("control_llm_prompt_tokens")
+    )
+    control_completion = _int(
+        token_summary.get("control_llm_completion_tokens")
+    )
+    control_retries = _int(
+        token_summary.get("control_llm_retry_count")
+    )
+    disambiguation_accepted = _int(
+        token_summary.get("semantic_disambiguation_accepted_count")
+    )
+    disambiguation_rejected = _int(
+        token_summary.get("semantic_disambiguation_rejected_count")
+    )
     retry = _int(token_summary.get("retry_tokens"))
     llm_prompt = _int(token_summary.get("llm_prompt_tokens"))
     llm_completion = _int(token_summary.get("llm_completion_tokens"))
@@ -1103,7 +1119,41 @@ def _metric_rows(token_summary: dict[str, Any]) -> list[dict[str, Any]]:
             review_governance["safe_event_count"],
             "Review governance events whose authority and lifecycle effects were consistent.",
         ),
-        _row("agentlite_control_llm_tokens", control, "控制模块 LLM 成本"),
+        _row(
+            "agentlite_control_llm_call_count",
+            control_calls,
+            "Bounded control LLM calls.",
+        ),
+        _row(
+            "agentlite_control_llm_prompt_tokens",
+            control_prompt,
+            "Control LLM prompt tokens.",
+        ),
+        _row(
+            "agentlite_control_llm_completion_tokens",
+            control_completion,
+            "Control LLM completion tokens.",
+        ),
+        _row(
+            "agentlite_control_llm_tokens",
+            control,
+            "Total control LLM tokens included in collaboration cost.",
+        ),
+        _row(
+            "agentlite_control_llm_retry_count",
+            control_retries,
+            "Control LLM provider retries.",
+        ),
+        _row(
+            "agentlite_semantic_disambiguation_accepted_count",
+            disambiguation_accepted,
+            "Evidence-bound semantic proposals accepted for validation.",
+        ),
+        _row(
+            "agentlite_semantic_disambiguation_rejected_count",
+            disambiguation_rejected,
+            "Semantic proposals rejected before admission.",
+        ),
         _row("agentlite_retry_tokens", retry, "重试带来的额外成本"),
         _row("actual_agentlite_transport_tokens", runtime, "真实应用或回退后的 AgentLite 传输成本"),
         _row("actual_transport_token_savings", savings, "真实审计范围内的传输成本差额"),

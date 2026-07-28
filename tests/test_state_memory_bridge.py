@@ -1,10 +1,162 @@
+import json
 import unittest
 
 from agent_runtime.bridge.state_memory_bridge import StateToMemoryBridgeLite
 from agent_runtime.memory.memory_store import MemoryStoreLite
+from agent_runtime.memory.semantic_disambiguator import (
+    ControlledSemanticDisambiguator,
+)
+
+
+class _SemanticClient:
+    def __init__(self, claims: list[dict[str, object]]) -> None:
+        self.claims = claims
+        self.call_count = 0
+
+    def complete(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> dict[str, object]:
+        del system_prompt, user_prompt
+        self.call_count += 1
+        return {
+            "content": json.dumps(
+                {
+                    "schema_version": (
+                        "agentlite.semantic-disambiguation.response.v1"
+                    ),
+                    "claims": self.claims,
+                }
+            ),
+            "usage": {
+                "prompt_tokens": 45,
+                "completion_tokens": 15,
+                "total_tokens": 60,
+            },
+            "model": "fixture-control-model",
+        }
 
 
 class StateToMemoryBridgeLiteTest(unittest.TestCase):
+    def test_controlled_disambiguation_uses_normal_admission_path(
+        self,
+    ) -> None:
+        source = (
+            "At the final checkpoint, the waveform remained quiescent."
+        )
+        client = _SemanticClient(
+            [
+                {
+                    "predicate": "waveform_state",
+                    "assertion_type": "observation",
+                    "operator": "eq",
+                    "value": "quiescent",
+                    "value_type": "string",
+                    "modality": "observed",
+                    "temporal_status": "current",
+                    "source_quote": "the waveform remained quiescent",
+                    "confidence": 0.7,
+                }
+            ]
+        )
+        store = MemoryStoreLite()
+        bridge = StateToMemoryBridgeLite(
+            store,
+            semantic_disambiguator=ControlledSemanticDisambiguator(client),
+        )
+
+        report, validation = bridge.promote(
+            task_id="semantic-one",
+            scope_id="scope-isolated",
+            source_agent="specialist",
+            task_topic="unseen physical process",
+            fallback_summary=source,
+            tags=["generic"],
+            slot_hint="reuse_strategy",
+            source_state_ids=["state-semantic"],
+            evidence_refs=["state-semantic"],
+            reuse_intent="reuse validated observation",
+        )
+
+        self.assertTrue(validation.allowed, validation.reasons)
+        self.assertEqual(validation.disambiguation_status, "accepted")
+        self.assertEqual(validation.disambiguation_call_count, 1)
+        self.assertEqual(
+            validation.disambiguation_accepted_candidate_count,
+            1,
+        )
+        self.assertEqual(validation.control_total_tokens, 60)
+        self.assertEqual(report.admission_status, "admitted")
+        self.assertEqual(report.memory_write_count, 1)
+        claim = store.snapshot()["claim_cards"][0]
+        self.assertEqual(
+            claim["source_span"]["quote"],
+            "the waveform remained quiescent",
+        )
+
+    def test_deterministic_candidate_skips_control_llm(self) -> None:
+        client = _SemanticClient([])
+        bridge = StateToMemoryBridgeLite(
+            MemoryStoreLite(),
+            semantic_disambiguator=ControlledSemanticDisambiguator(client),
+        )
+
+        report, validation = bridge.promote(
+            task_id="deterministic-one",
+            scope_id="scope-isolated",
+            source_agent="specialist",
+            task_topic="unseen physical process",
+            fallback_summary="phase_index: 17 qx",
+            tags=["generic"],
+            slot_hint="reuse_strategy",
+            source_state_ids=["state-structured"],
+            evidence_refs=["state-structured"],
+            reuse_intent="reuse validated scalar",
+        )
+
+        self.assertEqual(client.call_count, 0)
+        self.assertEqual(validation.disambiguation_status, "not_requested")
+        self.assertEqual(report.admission_status, "admitted")
+
+    def test_failed_disambiguation_remains_audit_only(self) -> None:
+        client = _SemanticClient(
+            [
+                {
+                    "predicate": "waveform_state",
+                    "value": "quiescent",
+                    "source_quote": "fabricated source quote",
+                }
+            ]
+        )
+        bridge = StateToMemoryBridgeLite(
+            MemoryStoreLite(),
+            semantic_disambiguator=ControlledSemanticDisambiguator(client),
+        )
+
+        report, validation = bridge.promote(
+            task_id="semantic-rejected",
+            scope_id="scope-isolated",
+            source_agent="specialist",
+            task_topic="unseen physical process",
+            fallback_summary="The waveform state was not resolved.",
+            tags=["generic"],
+            slot_hint="reuse_strategy",
+            source_state_ids=["state-rejected"],
+            evidence_refs=["state-rejected"],
+            reuse_intent="retain source for audit",
+        )
+
+        self.assertFalse(validation.allowed)
+        self.assertEqual(validation.disambiguation_status, "rejected")
+        self.assertIn(
+            "semantic_disambiguation_rejected",
+            validation.reasons,
+        )
+        self.assertEqual(report.admission_status, "audit_only")
+        self.assertEqual(report.memory_write_count, 0)
+
     def test_bridge_promotes_valid_state_into_admitted_memory_candidate(self) -> None:
         store = MemoryStoreLite()
         bridge = StateToMemoryBridgeLite(store)

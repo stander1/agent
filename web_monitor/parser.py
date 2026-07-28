@@ -577,6 +577,18 @@ def _mode_token_breakdown(row: dict[str, Any]) -> dict[str, int]:
     prompt_view = _int(row.get("prompt_view_tokens"))
     retrieved = _int(row.get("retrieved_memory_tokens"))
     control = _int(row.get("control_llm_tokens"))
+    control_calls = _int(row.get("control_llm_call_count"))
+    control_prompt = _int(row.get("control_llm_prompt_tokens"))
+    control_completion = _int(
+        row.get("control_llm_completion_tokens")
+    )
+    control_retries = _int(row.get("control_llm_retry_count"))
+    disambiguation_accepted = _int(
+        row.get("semantic_disambiguation_accepted_count")
+    )
+    disambiguation_rejected = _int(
+        row.get("semantic_disambiguation_rejected_count")
+    )
     retry = _int(row.get("retry_tokens"))
     llm_prompt = _int(row.get("llm_prompt_tokens"))
     llm_completion = _int(row.get("llm_completion_tokens"))
@@ -592,6 +604,16 @@ def _mode_token_breakdown(row: dict[str, Any]) -> dict[str, int]:
         "prompt_view_tokens": prompt_view,
         "retrieved_memory_tokens": retrieved,
         "control_llm_tokens": control,
+        "control_llm_call_count": control_calls,
+        "control_llm_prompt_tokens": control_prompt,
+        "control_llm_completion_tokens": control_completion,
+        "control_llm_retry_count": control_retries,
+        "semantic_disambiguation_accepted_count": (
+            disambiguation_accepted
+        ),
+        "semantic_disambiguation_rejected_count": (
+            disambiguation_rejected
+        ),
         "retry_tokens": retry,
         "llm_prompt_tokens": llm_prompt,
         "llm_completion_tokens": llm_completion,
@@ -607,6 +629,13 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
         "prompt_view_tokens": 0,
         "retrieved_memory_tokens": 0,
         "control_llm_tokens": 0,
+        "control_llm_call_count": 0,
+        "control_llm_prompt_tokens": 0,
+        "control_llm_completion_tokens": 0,
+        "control_llm_retry_count": 0,
+        "control_llm_latency_ms": 0.0,
+        "semantic_disambiguation_accepted_count": 0,
+        "semantic_disambiguation_rejected_count": 0,
         "retry_tokens": 0,
         "llm_prompt_tokens": 0,
         "llm_completion_tokens": 0,
@@ -880,6 +909,38 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
             continue
         if event_type == "state_memory_bridge":
             breakdown["state_memory_bridge_event_count"] += 1
+            semantic = (
+                payload.get("semantic_disambiguation")
+                if isinstance(
+                    payload.get("semantic_disambiguation"),
+                    dict,
+                )
+                else {}
+            )
+            breakdown["control_llm_call_count"] += _int(
+                semantic.get("call_count")
+            )
+            breakdown["control_llm_prompt_tokens"] += _int(
+                semantic.get("prompt_tokens")
+            )
+            breakdown["control_llm_completion_tokens"] += _int(
+                semantic.get("completion_tokens")
+            )
+            breakdown["control_llm_tokens"] += _int(
+                semantic.get("total_tokens")
+            )
+            breakdown["control_llm_retry_count"] += _int(
+                semantic.get("retry_count")
+            )
+            breakdown["control_llm_latency_ms"] += _float(
+                semantic.get("latency_ms")
+            )
+            breakdown["semantic_disambiguation_accepted_count"] += _int(
+                semantic.get("accepted_candidate_count")
+            )
+            breakdown["semantic_disambiguation_rejected_count"] += _int(
+                semantic.get("rejected_candidate_count")
+            )
             breakdown["raw_claim_count"] += _int(
                 payload.get("raw_claim_count")
             )
@@ -1213,6 +1274,9 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
             breakdown["end_to_end_collaboration_tokens"] += runtime
         else:
             breakdown["end_to_end_collaboration_tokens"] += direct + prompt_view
+    breakdown["end_to_end_collaboration_tokens"] += breakdown[
+        "control_llm_tokens"
+    ]
     runtime_total = breakdown["end_to_end_collaboration_tokens"]
     native_total = breakdown["native_baseline_tokens"]
     savings = native_total - runtime_total if native_total else 0
@@ -1501,6 +1565,13 @@ def _int(value: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _float(value: Any) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _empty_mode_snapshot() -> dict[str, Any]:

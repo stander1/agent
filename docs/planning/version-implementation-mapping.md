@@ -5461,3 +5461,39 @@ v5.15a 不再沿着单个基准失败继续增加领域词表或表面正则，�
 
 详细说明见
 `docs/planning/v5.15a-generic-semantic-bridge.md`。
+
+## 91. v5.15b：受控语义消歧与完整成本归集
+
+v5.15b 在 v5.15a 的确定性结构提取之后增加一个默认关闭、预算受限的
+语义候选提议路径。该路径只在确定性提取没有得到可验证 Claim 时运行；
+LLM 只能提出候选，不能直接写入共享记忆、注册权威 Schema 或解决冲突。
+
+实现映射：
+
+- `agent_runtime/memory/semantic_disambiguator.py`：定义开放式语义候选协议、
+  task/scope 双重预算、严格 JSON 响应、精确唯一引文定位和失败关闭；
+- `agent_runtime/bridge/state_memory_bridge.py`：仅在确定性候选为空时请求
+  消歧，并把候选重新送入来源校验、Schema Registry、Conflict Resolver
+  和正常记忆准入链；
+- `agent_runtime/drivers/autogen.py`：通过
+  `AGENTLITE_AUTOGEN_SEMANTIC_DISAMBIGUATION=1` 显式启用；凭据只保留为
+  环境变量名，不进入配置快照、trace 或归档；
+- `agent_runtime/eval/metrics.py`、`agent_runtime/eval/autogen_session_report.py`
+  和 `web_monitor/parser.py`：独立记录控制调用、输入/输出 Token、重试、
+  延迟和候选结果，并把控制 Token 纳入端到端协作成本；
+- `experiments/v5.15b-controlled-semantic-disambiguation/`：用跨域语义变形、
+  伪造/重复引文、Provider 失败、预算门禁和提交后外部 holdout 校验机制。
+
+通用边界：
+
+```text
+确定性结构提取始终优先；
+控制 LLM 只提出开放候选，不获得记忆准入、冲突裁决或事件权限；
+来源区间、引文哈希和语义字段由本地验证器复核；
+默认关闭，按 scope/task 限流，任何失败均保持审计或未解析状态；
+控制调用的全部可得成本必须进入端到端核算；
+脚本化机制门禁不替代真实 Provider 的成本与质量预检。
+```
+
+详细说明见
+`docs/planning/v5.15b-controlled-semantic-disambiguation.md`。

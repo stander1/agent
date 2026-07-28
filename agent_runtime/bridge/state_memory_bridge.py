@@ -10,6 +10,11 @@ from agent_runtime.memory.claim_extractor import (
 )
 from agent_runtime.memory.memory_store import MemoryAdmissionReport, MemoryStoreLite
 from agent_runtime.memory.schema_registry import SourceSpan
+from agent_runtime.memory.semantic_disambiguator import (
+    SemanticDisambiguationRequest,
+    SemanticDisambiguationResult,
+    SemanticDisambiguator,
+)
 
 
 @dataclass(slots=True)
@@ -45,6 +50,17 @@ class SemanticValidationResult:
     canonical_candidate_valid_count: int = 0
     dynamic_schema_registration_count: int = 0
     unresolved_schema_count: int = 0
+    disambiguation_status: str = "not_requested"
+    disambiguation_call_count: int = 0
+    disambiguation_accepted_candidate_count: int = 0
+    disambiguation_rejected_candidate_count: int = 0
+    control_prompt_tokens: int = 0
+    control_completion_tokens: int = 0
+    control_total_tokens: int = 0
+    control_usage_estimated: bool = False
+    control_retry_count: int = 0
+    control_model: str = ""
+    control_latency_ms: float = 0.0
 
 
 class PromotionViewRenderer:
@@ -273,6 +289,7 @@ class StateToMemoryBridgeLite:
         compiler: MemoryPromotionCompiler | None = None,
         validator: SemanticValidatorLite | None = None,
         canonical_validator: CanonicalClaimSemanticValidator | None = None,
+        semantic_disambiguator: SemanticDisambiguator | None = None,
         allow_dynamic_schema: bool = True,
     ) -> None:
         self.memory_store = memory_store
@@ -282,6 +299,7 @@ class StateToMemoryBridgeLite:
         self.canonical_validator = (
             canonical_validator or CanonicalClaimSemanticValidator()
         )
+        self.semantic_disambiguator = semantic_disambiguator
         self.allow_dynamic_schema = allow_dynamic_schema
 
     def promote(
@@ -296,6 +314,7 @@ class StateToMemoryBridgeLite:
         source_state_ids: list[str],
         evidence_refs: list[str],
         reuse_intent: str,
+        scope_id: str = "",
         control: dict[str, Any] | None = None,
         degraded: bool = False,
     ) -> tuple[MemoryAdmissionReport, SemanticValidationResult]:
@@ -314,6 +333,37 @@ class StateToMemoryBridgeLite:
             slot_hint=slot_hint,
             degraded=degraded,
         )
+        disambiguation = SemanticDisambiguationResult(
+            status="not_requested",
+        )
+        disambiguation_reasons: list[str] = []
+        if (
+            self.semantic_disambiguator is not None
+            and not candidate.claim_cards
+            and not candidate.canonical_claim_candidates
+        ):
+            disambiguation = self.semantic_disambiguator.disambiguate(
+                SemanticDisambiguationRequest(
+                    scope_id=scope_id.strip() or task_topic.strip(),
+                    task_id=task_id,
+                    subject=task_topic,
+                    source_id=(
+                        candidate.evidence_refs[0]
+                        if candidate.evidence_refs
+                        else "promotion_view"
+                    ),
+                    source_text=candidate.source_text,
+                )
+            )
+            if disambiguation.accepted:
+                candidate.canonical_claim_candidates = [
+                    dict(item) for item in disambiguation.candidates
+                ]
+            else:
+                disambiguation_reasons.append(
+                    f"semantic_disambiguation_{disambiguation.status}"
+                )
+                disambiguation_reasons.extend(disambiguation.reasons)
         validation = self.validator.validate(candidate)
         canonical_reasons: list[str] = []
         canonical_valid_count = 0
@@ -376,6 +426,7 @@ class StateToMemoryBridgeLite:
                 validation.allowed
                 and not explicit_reasons
                 and not canonical_reasons
+                and not disambiguation_reasons
             ),
             reasons=list(
                 dict.fromkeys(
@@ -383,6 +434,7 @@ class StateToMemoryBridgeLite:
                         *validation.reasons,
                         *explicit_reasons,
                         *canonical_reasons,
+                        *disambiguation_reasons,
                     ]
                 )
             ),
@@ -394,6 +446,21 @@ class StateToMemoryBridgeLite:
             canonical_candidate_valid_count=canonical_valid_count,
             dynamic_schema_registration_count=dynamic_registration_count,
             unresolved_schema_count=unresolved_schema_count,
+            disambiguation_status=disambiguation.status,
+            disambiguation_call_count=disambiguation.call_count,
+            disambiguation_accepted_candidate_count=len(
+                disambiguation.candidates
+            ),
+            disambiguation_rejected_candidate_count=(
+                disambiguation.rejected_candidate_count
+            ),
+            control_prompt_tokens=disambiguation.prompt_tokens,
+            control_completion_tokens=disambiguation.completion_tokens,
+            control_total_tokens=disambiguation.total_tokens,
+            control_usage_estimated=disambiguation.usage_estimated,
+            control_retry_count=disambiguation.retry_count,
+            control_model=disambiguation.model,
+            control_latency_ms=disambiguation.latency_ms,
         )
         memory_card = dict(candidate.memory_card)
         if not validation.allowed:

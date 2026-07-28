@@ -40,11 +40,17 @@ from agent_runtime.drivers.loader import DriverActivation
 from agent_runtime.eval.metrics import MetricsCollector
 from agent_runtime.eval.token_counter import TokenCounter
 from agent_runtime.eval.trace_logger import TraceLogger
+from agent_runtime.llm.client import OpenAICompatibleChatClient
+from agent_runtime.llm.config import LlmConfig
 from agent_runtime.memory.claim_extractor import (
     extract_claim_cards,
     normalized_value,
 )
 from agent_runtime.memory.memory_store import MemoryRef, MemoryStoreLite
+from agent_runtime.memory.semantic_disambiguator import (
+    ControlledSemanticDisambiguator,
+    SemanticDisambiguationBudget,
+)
 from agent_runtime.memory.context_views import (
     build_minimal_context_view,
     consumer_context_from_profile,
@@ -100,6 +106,33 @@ MEMORY_SCOPE_ENV = "AGENTLITE_MEMORY_SCOPE"
 FINAL_DELIVERY_MARKER_ENV = "AGENTLITE_AUTOGEN_FINAL_MARKER"
 LEGACY_TEXT_REVIEW_MUTATION_ENV = (
     "AGENTLITE_AUTOGEN_LEGACY_TEXT_REVIEW_MUTATION"
+)
+SEMANTIC_DISAMBIGUATION_ENV = (
+    "AGENTLITE_AUTOGEN_SEMANTIC_DISAMBIGUATION"
+)
+SEMANTIC_DISAMBIGUATION_BASE_URL_ENV = (
+    "AGENTLITE_SEMANTIC_DISAMBIGUATION_BASE_URL"
+)
+SEMANTIC_DISAMBIGUATION_MODEL_ENV = (
+    "AGENTLITE_SEMANTIC_DISAMBIGUATION_MODEL"
+)
+SEMANTIC_DISAMBIGUATION_API_KEY_ENV = (
+    "AGENTLITE_SEMANTIC_DISAMBIGUATION_API_KEY_ENV"
+)
+SEMANTIC_DISAMBIGUATION_AUTH_SCHEME_ENV = (
+    "AGENTLITE_SEMANTIC_DISAMBIGUATION_AUTH_SCHEME"
+)
+SEMANTIC_DISAMBIGUATION_MAX_CALLS_ENV = (
+    "AGENTLITE_SEMANTIC_DISAMBIGUATION_MAX_CALLS_PER_TASK"
+)
+SEMANTIC_DISAMBIGUATION_MAX_SOURCE_CHARS_ENV = (
+    "AGENTLITE_SEMANTIC_DISAMBIGUATION_MAX_SOURCE_CHARS"
+)
+SEMANTIC_DISAMBIGUATION_MAX_CANDIDATES_ENV = (
+    "AGENTLITE_SEMANTIC_DISAMBIGUATION_MAX_CANDIDATES_PER_CALL"
+)
+SEMANTIC_DISAMBIGUATION_MAX_TOKENS_ENV = (
+    "AGENTLITE_SEMANTIC_DISAMBIGUATION_MAX_CONTROL_TOKENS_PER_TASK"
 )
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
 CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
@@ -459,6 +492,14 @@ class AutoGenHookManager:
         self.legacy_text_review_mutation_enabled = _truthy_env(
             os.getenv(LEGACY_TEXT_REVIEW_MUTATION_ENV, "")
         )
+        self.semantic_disambiguation_enabled = _truthy_env(
+            os.getenv(SEMANTIC_DISAMBIGUATION_ENV, "")
+        )
+        semantic_disambiguator = (
+            _build_semantic_disambiguator_from_env()
+            if self.semantic_disambiguation_enabled
+            else None
+        )
         self.memory_scope_id = _resolve_memory_scope_id(context)
         self.studio_appdir = configured_studio_appdir()
         memory_store = (
@@ -478,6 +519,7 @@ class AutoGenHookManager:
             trace=self.trace,
             state_pool=StatePoolLite(self.output_dir / "state"),
             memory_store=memory_store,
+            semantic_disambiguator=semantic_disambiguator,
         )
         self.kernel_session = self.kernel.open_session(
             framework="autogen",
@@ -491,6 +533,9 @@ class AutoGenHookManager:
                 "handoff_rewrite_enabled": self.handoff_rewrite_enabled,
                 "tool_summary_rewrite_enabled": self.tool_summary_rewrite_enabled,
                 "shared_memory_enabled": self.shared_memory_enabled,
+                "semantic_disambiguation_enabled": (
+                    self.semantic_disambiguation_enabled
+                ),
                 "memory_scope_id": self.memory_scope_id,
                 "final_delivery_marker": self.final_delivery_marker,
                 "studio_appdir": str(self.studio_appdir or ""),
@@ -6790,6 +6835,105 @@ def _resolve_core_receiver_hydrate_mode(value: str) -> str:
 
 def _truthy_env(value: str) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _build_semantic_disambiguator_from_env(
+) -> ControlledSemanticDisambiguator:
+    defaults = LlmConfig()
+    api_key_env = os.getenv(
+        SEMANTIC_DISAMBIGUATION_API_KEY_ENV,
+        "",
+    ).strip()
+    if not api_key_env:
+        if os.getenv("MIMO_API_KEY"):
+            api_key_env = "MIMO_API_KEY"
+        elif os.getenv("OPENAI_API_KEY"):
+            api_key_env = "OPENAI_API_KEY"
+        else:
+            api_key_env = defaults.api_key_env
+
+    auth_scheme = os.getenv(
+        SEMANTIC_DISAMBIGUATION_AUTH_SCHEME_ENV,
+        "authorization_bearer",
+    ).strip()
+    if auth_scheme not in {"authorization_bearer", "api_key"}:
+        auth_scheme = "authorization_bearer"
+
+    config = LlmConfig(
+        provider="openai-compatible-control",
+        base_url=(
+            os.getenv(SEMANTIC_DISAMBIGUATION_BASE_URL_ENV, "").strip()
+            or os.getenv("OPENAI_BASE_URL", "").strip()
+            or defaults.base_url
+        ),
+        model=(
+            os.getenv(SEMANTIC_DISAMBIGUATION_MODEL_ENV, "").strip()
+            or os.getenv("OPENAI_MODEL", "").strip()
+            or defaults.model
+        ),
+        api_key_env=api_key_env,
+        auth_scheme=auth_scheme,
+        timeout_seconds=_positive_float_env(
+            "OPENAI_TIMEOUT_SECONDS",
+            defaults.timeout_seconds,
+        ),
+        max_retries=_nonnegative_int_env(
+            "OPENAI_MAX_RETRIES",
+            defaults.max_retries,
+        ),
+        retry_backoff_seconds=_positive_float_env(
+            "OPENAI_RETRY_BACKOFF_SECONDS",
+            defaults.retry_backoff_seconds,
+        ),
+        temperature=0.0,
+        top_p=1.0,
+    )
+    budget = SemanticDisambiguationBudget(
+        max_calls_per_task=_positive_int_env(
+            SEMANTIC_DISAMBIGUATION_MAX_CALLS_ENV,
+            1,
+        ),
+        max_source_chars=_positive_int_env(
+            SEMANTIC_DISAMBIGUATION_MAX_SOURCE_CHARS_ENV,
+            8_000,
+        ),
+        max_candidates_per_call=_positive_int_env(
+            SEMANTIC_DISAMBIGUATION_MAX_CANDIDATES_ENV,
+            8,
+        ),
+        max_control_tokens_per_task=_positive_int_env(
+            SEMANTIC_DISAMBIGUATION_MAX_TOKENS_ENV,
+            2_048,
+        ),
+    )
+    return ControlledSemanticDisambiguator(
+        OpenAICompatibleChatClient(config),
+        budget=budget,
+    )
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def _nonnegative_int_env(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 0 else default
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
 
 
 def _fallback_buckets(reasons: Iterable[str]) -> list[str]:

@@ -111,6 +111,55 @@ class AutoGenSessionReportTest(unittest.TestCase):
             0,
         )
 
+    def test_control_disambiguation_cost_is_reported_end_to_end(
+        self,
+    ) -> None:
+        summary = _autogen_token_summary(
+            [
+                {
+                    "event_type": "state_memory_bridge",
+                    "payload": {
+                        "semantic_disambiguation": {
+                            "status": "accepted",
+                            "call_count": 1,
+                            "accepted_candidate_count": 2,
+                            "rejected_candidate_count": 1,
+                            "prompt_tokens": 30,
+                            "completion_tokens": 10,
+                            "total_tokens": 40,
+                            "retry_count": 1,
+                            "latency_ms": 15.5,
+                        }
+                    },
+                }
+            ]
+        )
+
+        self.assertEqual(summary["control_llm_call_count"], 1)
+        self.assertEqual(summary["control_llm_prompt_tokens"], 30)
+        self.assertEqual(summary["control_llm_completion_tokens"], 10)
+        self.assertEqual(summary["control_llm_tokens"], 40)
+        self.assertEqual(summary["control_llm_retry_count"], 1)
+        self.assertEqual(
+            summary["semantic_disambiguation_accepted_count"],
+            2,
+        )
+        self.assertEqual(
+            summary["semantic_disambiguation_rejected_count"],
+            1,
+        )
+        self.assertEqual(summary["end_to_end_collaboration_tokens"], 40)
+
+        rows = {
+            item["metric"]: item["value"]
+            for item in _metric_rows(summary)
+        }
+        self.assertEqual(rows["agentlite_control_llm_tokens"], 40)
+        self.assertEqual(
+            rows["agentlite_semantic_disambiguation_accepted_count"],
+            2,
+        )
+
     def test_review_governance_trace_is_aggregated_with_safety_failures(self) -> None:
         summary = _autogen_token_summary(
             [

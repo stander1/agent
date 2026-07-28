@@ -25,6 +25,7 @@ from agent_runtime.memory.memory_store import (
     MemoryRef,
     MemoryStoreLite,
 )
+from agent_runtime.memory.semantic_disambiguator import SemanticDisambiguator
 from agent_runtime.protocol.shp import build_handoff_envelope
 from agent_runtime.reliability.contract_guard import (
     ContractContext,
@@ -105,6 +106,7 @@ class CollaborationKernel:
         trace: TraceLogger,
         state_pool: StatePoolLite | None = None,
         memory_store: MemoryStoreLite | None = None,
+        semantic_disambiguator: SemanticDisambiguator | None = None,
     ) -> None:
         agent_list = list(agents)
         self.token_counter = token_counter
@@ -112,7 +114,10 @@ class CollaborationKernel:
         self.trace = trace
         self.state_pool = state_pool or StatePoolLite(Path("runs") / "state")
         self.memory_store = memory_store or MemoryStoreLite()
-        self.state_memory_bridge = StateToMemoryBridgeLite(self.memory_store)
+        self.state_memory_bridge = StateToMemoryBridgeLite(
+            self.memory_store,
+            semantic_disambiguator=semantic_disambiguator,
+        )
         self.readiness_barrier = ReadinessBarrierLite()
         self.capability_profiles = CapabilityProfileManagerLite(agent_list)
         self.capability_router = CapabilityRouterLite(self.capability_profiles)
@@ -816,6 +821,7 @@ class CollaborationKernel:
             slot_hint=slot_hint,
             source_state_ids=source_state_ids,
             evidence_refs=evidence_refs,
+            scope_id=task.group_id,
             reuse_intent=f"供 {task.group_id} 后续 AutoGen 任务复用",
             control={
                 "memory_card": memory_card,
@@ -823,6 +829,24 @@ class CollaborationKernel:
             },
             degraded=False,
         )
+        if validation.disambiguation_status != "not_requested":
+            self.metrics.record_control_llm(
+                task_id=task.task_id,
+                round_id=round_id,
+                mode=mode,
+                call_count=validation.disambiguation_call_count,
+                prompt_tokens=validation.control_prompt_tokens,
+                completion_tokens=validation.control_completion_tokens,
+                total_tokens=validation.control_total_tokens,
+                retry_count=validation.control_retry_count,
+                latency_ms=validation.control_latency_ms,
+                accepted_candidate_count=(
+                    validation.disambiguation_accepted_candidate_count
+                ),
+                rejected_candidate_count=(
+                    validation.disambiguation_rejected_candidate_count
+                ),
+            )
         self.metrics.record_memory_admission(
             task_id=task.task_id,
             round_id=round_id,
@@ -889,6 +913,25 @@ class CollaborationKernel:
                 "candidate_kind": candidate_kind,
                 "validation_allowed": validation.allowed,
                 "validation_reasons": validation.reasons,
+                "semantic_disambiguation": {
+                    "status": validation.disambiguation_status,
+                    "call_count": validation.disambiguation_call_count,
+                    "accepted_candidate_count": (
+                        validation.disambiguation_accepted_candidate_count
+                    ),
+                    "rejected_candidate_count": (
+                        validation.disambiguation_rejected_candidate_count
+                    ),
+                    "prompt_tokens": validation.control_prompt_tokens,
+                    "completion_tokens": (
+                        validation.control_completion_tokens
+                    ),
+                    "total_tokens": validation.control_total_tokens,
+                    "usage_estimated": validation.control_usage_estimated,
+                    "retry_count": validation.control_retry_count,
+                    "model": validation.control_model,
+                    "latency_ms": validation.control_latency_ms,
+                },
                 "admission_status": admission_report.admission_status,
                 "admission_reasons": admission_report.admission_reasons,
                 "deduplicated_claim_count": (
