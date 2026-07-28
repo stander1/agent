@@ -1850,6 +1850,65 @@ class AutoGenHookManager:
             )
         return report
 
+    def _promote_team_task_source_evidence(
+        self,
+        *,
+        context: HookCallContext,
+        task_text: str,
+    ) -> Any | None:
+        if (
+            not self.shared_memory_enabled
+            or not self.semantic_disambiguation_enabled
+            or context.target_kind != "agentchat_team"
+            or context.method_name != "run_stream"
+            or not task_text.strip()
+        ):
+            return None
+        source_id = f"{context.call_id}:framework_user_task"
+        report = self._safe_kernel_call(
+            "autogen_promote_team_task_source_evidence",
+            lambda: self.kernel.promote_source_evidence(
+                task=context.task,
+                round_id=1,
+                mode="runtime_lite",
+                source_id=source_id,
+                source_kind="framework_user_task",
+                content=task_text,
+                task_topic=(
+                    f"autogen.{_safe_identifier(context.task.group_id)}."
+                    "source_evidence"
+                ),
+            ),
+        )
+        if report is not None:
+            self.trace.write(
+                "autogen_source_evidence_promotion",
+                {
+                    "call_id": context.call_id,
+                    "task_id": context.task.task_id,
+                    "group_id": context.task.group_id,
+                    "source_id": source_id,
+                    "source_kind": "framework_user_task",
+                    "candidate_id": getattr(report, "candidate_id", ""),
+                    "admission_status": getattr(
+                        report,
+                        "admission_status",
+                        "",
+                    ),
+                    "admission_reasons": getattr(
+                        report,
+                        "admission_reasons",
+                        [],
+                    ),
+                    "memory_refs": [
+                        _memory_ref_payload(ref)
+                        for ref in _admission_memory_refs(report)
+                    ],
+                },
+            )
+            self._write_pool_snapshot(context.task)
+        return report
+
     def _write_pool_snapshot(self, task: TaskSpec) -> None:
         snapshot = {
             "task_id": task.task_id,
@@ -2010,6 +2069,7 @@ class AutoGenHookManager:
             expected_agents=[agent.agent_id],
         )
         task_sequence_index = 0
+        task_text = ""
         if target_kind == "agentchat_team":
             task_value, _ = _extract_team_task_argument(args, kwargs)
             task_text, _ = _team_task_display_identity(task_value)
@@ -2086,6 +2146,10 @@ class AutoGenHookManager:
                 != "user"
                 and str(getattr(message, "content_text", "") or "").strip()
             ),
+        )
+        self._promote_team_task_source_evidence(
+            context=hook_context,
+            task_text=task_text,
         )
         if target_kind == "agentchat_agent":
             self._safe_kernel_call(

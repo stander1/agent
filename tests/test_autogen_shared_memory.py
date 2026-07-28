@@ -29,6 +29,9 @@ from agent_runtime.drivers.autogen import (
 )
 from agent_runtime.eval.token_counter import TokenCounter
 from agent_runtime.memory.memory_store import MemoryRef
+from agent_runtime.memory.semantic_disambiguator import (
+    ControlledSemanticDisambiguator,
+)
 
 
 @dataclass
@@ -45,6 +48,45 @@ class FakeTaskResult:
 
 class FakeTeam:
     _participant_names = ["planner", "writer", "reviewer"]
+
+
+class FakeSourceSemanticClient:
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    def complete(self, *, system_prompt: str, user_prompt: str):
+        del system_prompt, user_prompt
+        self.call_count += 1
+        return {
+            "content": json.dumps(
+                {
+                    "schema_version": (
+                        "agentlite.semantic-disambiguation.response.v1"
+                    ),
+                    "claims": [
+                        {
+                            "predicate": "waveform_level",
+                            "assertion_type": "observation",
+                            "operator": "eq",
+                            "value": "17",
+                            "value_type": "number",
+                            "unit": "qx",
+                            "polarity": "positive",
+                            "modality": "observed",
+                            "temporal_status": "current",
+                            "source_quote": "The waveform level remains 17 qx.",
+                            "confidence": 0.84,
+                        }
+                    ],
+                }
+            ),
+            "usage": {
+                "prompt_tokens": 40,
+                "completion_tokens": 20,
+                "total_tokens": 60,
+            },
+            "model": "fixture-control-model",
+        }
 
 
 class OtherFakeTeam:
@@ -82,6 +124,74 @@ class ProfiledTeam:
 
 
 class AutoGenSharedMemoryTest(unittest.TestCase):
+    def test_team_task_source_evidence_is_admitted_after_current_retrieval(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            client = FakeSourceSemanticClient()
+            disambiguator = ControlledSemanticDisambiguator(client)
+            env = {
+                "AGENTLITE_AUTOGEN_BROADCAST_MODE": "real-rewrite",
+                "AGENTLITE_AUTOGEN_TEAM_REWRITE": "1",
+                "AGENTLITE_AUTOGEN_SHARED_MEMORY": "1",
+                "AGENTLITE_AUTOGEN_SEMANTIC_DISAMBIGUATION": "1",
+                "AGENTLITE_MEMORY_SCOPE": "source-evidence-test",
+            }
+            with (
+                patch.dict("os.environ", env, clear=False),
+                patch(
+                    "agent_runtime.drivers.autogen."
+                    "_build_semantic_disambiguator_from_env",
+                    return_value=disambiguator,
+                ),
+            ):
+                manager = AutoGenHookManager(
+                    self._context(root, "launch_source_evidence")
+                )
+                source_task = (
+                    'A verified source states: "The waveform level remains '
+                    '17 qx." Use it in the next operation.'
+                )
+
+                first = manager.record_call_start(
+                    instance=OtherFakeTeam(),
+                    method_name="run_stream",
+                    target_kind="agentchat_team",
+                    args=(),
+                    kwargs={"task": source_task},
+                )
+
+                self.assertEqual(first.memory_context.refs, [])
+                self.assertEqual(client.call_count, 1)
+                snapshot = manager.kernel.memory_store.snapshot()
+                self.assertEqual(len(snapshot["memories"]), 1)
+                self.assertEqual(
+                    snapshot["claim_cards"][0]["source_span"]["quote"],
+                    "The waveform level remains 17 qx.",
+                )
+
+                follow_up = manager.record_call_start(
+                    instance=OtherFakeTeam(),
+                    method_name="run_stream",
+                    target_kind="agentchat_team",
+                    args=(),
+                    kwargs={"task": "Reuse the preceding verified level."},
+                )
+
+                self.assertEqual(len(follow_up.memory_context.refs), 1)
+                events = self._events(manager.output_dir / "trace.jsonl")
+                source_event = next(
+                    item
+                    for item in events
+                    if item.get("event_type")
+                    == "autogen_source_evidence_promotion"
+                )
+                self.assertEqual(
+                    source_event["payload"]["admission_status"],
+                    "admitted",
+                )
+
     def test_autogen_routing_metadata_is_not_business_state(self) -> None:
         routing = (
             "082e0b93-0bc3-4863-a8b1-3e4c7cf51d50: "

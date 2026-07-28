@@ -795,6 +795,7 @@ class CollaborationKernel:
         importance_hint: float,
         coverage_score: float,
         claim_cards: list[dict[str, Any]] | None = None,
+        disambiguation_policy: str = "fallback",
     ) -> MemoryAdmissionReport:
         """Pass a framework output through the canonical rules-first admission path."""
         self._ensure_open()
@@ -828,6 +829,7 @@ class CollaborationKernel:
                 "claim_cards": list(claim_cards or []),
             },
             degraded=False,
+            disambiguation_policy=disambiguation_policy,
         )
         if validation.disambiguation_status != "not_requested":
             self.metrics.record_control_llm(
@@ -931,6 +933,7 @@ class CollaborationKernel:
                     "retry_count": validation.control_retry_count,
                     "model": validation.control_model,
                     "latency_ms": validation.control_latency_ms,
+                    "policy": validation.disambiguation_policy,
                 },
                 "admission_status": admission_report.admission_status,
                 "admission_reasons": admission_report.admission_reasons,
@@ -980,6 +983,102 @@ class CollaborationKernel:
             },
         )
         return admission_report
+
+    def promote_source_evidence(
+        self,
+        *,
+        task: TaskSpec,
+        round_id: int,
+        mode: Mode,
+        source_id: str,
+        source_kind: str,
+        content: str,
+        task_topic: str,
+        slot_hint: str = "source_evidence",
+    ) -> MemoryAdmissionReport:
+        """Promote direct framework evidence through required semantic control."""
+        self._ensure_open()
+        normalized_source_id = source_id.strip()
+        normalized_source_kind = source_kind.strip()
+        normalized_content = content.strip()
+        if not normalized_source_id:
+            raise ValueError("source_id must not be empty")
+        if not normalized_source_kind:
+            raise ValueError("source_kind must not be empty")
+        if not normalized_content:
+            raise ValueError("content must not be empty")
+
+        content_hash = hashlib.sha256(
+            normalized_content.encode("utf-8")
+        ).hexdigest()
+        state_ref, state, state_reused = self.state_pool.write_state_with_report(
+            task_id=task.task_id,
+            source_agent=normalized_source_id,
+            state_type="source_evidence_state",
+            payload={
+                "schema_version": "agentlite.source-evidence.v1",
+                "source_kind": normalized_source_kind,
+                "content_hash": content_hash,
+                "content_chars": len(normalized_content),
+            },
+            summary=self._summary(normalized_content, 240),
+            usage_hint="semantic_promotion_source",
+            payload_kind="structured_non_text",
+            contains_embedding_refs=False,
+            tier="hot",
+            access_policy="audit_only",
+            audit_payload={
+                "source_kind": normalized_source_kind,
+                "content": normalized_content,
+                "content_hash": content_hash,
+            },
+            downstream_need=0.9,
+            confidence=0.95,
+            novelty=0.8,
+        )
+        if not state_reused:
+            self.metrics.record_state_write(
+                task_id=task.task_id,
+                round_id=round_id,
+                mode=mode,
+                state_type=state.state_type,
+                payload_bytes=state.size_bytes,
+                tier=state.tier,
+            )
+        self.trace.write(
+            "source_evidence_state_reused"
+            if state_reused
+            else "source_evidence_state_written",
+            {
+                "task_id": task.task_id,
+                "round_id": round_id,
+                "mode": mode,
+                "source_id": normalized_source_id,
+                "source_kind": normalized_source_kind,
+                "content_hash": content_hash,
+                "state_reused": state_reused,
+                "state": asdict(state),
+            },
+        )
+        return self.promote_memory_candidate(
+            task=task,
+            round_id=round_id,
+            mode=mode,
+            agent=AgentDescriptor(
+                agent_id=normalized_source_id,
+                role="source_evidence",
+                capabilities=("provide_direct_evidence",),
+            ),
+            summary=normalized_content,
+            state_refs=[state_ref],
+            slot_hint=slot_hint,
+            task_topic=task_topic,
+            candidate_kind=f"source_evidence:{normalized_source_kind}",
+            confidence=0.9,
+            importance_hint=0.8,
+            coverage_score=0.8,
+            disambiguation_policy="control_required",
+        )
 
     def build_handoff(
         self,

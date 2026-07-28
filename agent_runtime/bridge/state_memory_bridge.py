@@ -16,6 +16,8 @@ from agent_runtime.memory.semantic_disambiguator import (
     SemanticDisambiguator,
 )
 
+DISAMBIGUATION_POLICIES = {"fallback", "control_required"}
+
 
 @dataclass(slots=True)
 class PromotionViewDraft:
@@ -61,6 +63,7 @@ class SemanticValidationResult:
     control_retry_count: int = 0
     control_model: str = ""
     control_latency_ms: float = 0.0
+    disambiguation_policy: str = "fallback"
 
 
 class PromotionViewRenderer:
@@ -317,7 +320,13 @@ class StateToMemoryBridgeLite:
         scope_id: str = "",
         control: dict[str, Any] | None = None,
         degraded: bool = False,
+        disambiguation_policy: str = "fallback",
     ) -> tuple[MemoryAdmissionReport, SemanticValidationResult]:
+        if disambiguation_policy not in DISAMBIGUATION_POLICIES:
+            raise ValueError(
+                "disambiguation_policy must be one of "
+                f"{sorted(DISAMBIGUATION_POLICIES)}"
+            )
         promotion_view = self.renderer.render(
             task_topic=task_topic,
             source_agent=source_agent,
@@ -337,11 +346,29 @@ class StateToMemoryBridgeLite:
             status="not_requested",
         )
         disambiguation_reasons: list[str] = []
-        if (
-            self.semantic_disambiguator is not None
-            and not candidate.claim_cards
-            and not candidate.canonical_claim_candidates
-        ):
+        if disambiguation_policy == "control_required":
+            candidate.claim_cards = []
+            candidate.canonical_claim_candidates = []
+        disambiguation_required = (
+            disambiguation_policy == "control_required"
+            or (
+                not candidate.claim_cards
+                and not candidate.canonical_claim_candidates
+            )
+        )
+        if disambiguation_required and self.semantic_disambiguator is None:
+            if disambiguation_policy == "control_required":
+                disambiguation = SemanticDisambiguationResult(
+                    status="unavailable",
+                    reasons=("semantic_disambiguator_unavailable",),
+                )
+                disambiguation_reasons.extend(
+                    (
+                        "semantic_disambiguation_required",
+                        "semantic_disambiguator_unavailable",
+                    )
+                )
+        elif disambiguation_required:
             disambiguation = self.semantic_disambiguator.disambiguate(
                 SemanticDisambiguationRequest(
                     scope_id=scope_id.strip() or task_topic.strip(),
@@ -461,6 +488,7 @@ class StateToMemoryBridgeLite:
             control_retry_count=disambiguation.retry_count,
             control_model=disambiguation.model,
             control_latency_ms=disambiguation.latency_ms,
+            disambiguation_policy=disambiguation_policy,
         )
         memory_card = dict(candidate.memory_card)
         if not validation.allowed:

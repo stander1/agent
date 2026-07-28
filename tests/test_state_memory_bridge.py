@@ -40,6 +40,95 @@ class _SemanticClient:
 
 
 class StateToMemoryBridgeLiteTest(unittest.TestCase):
+    def test_required_control_replaces_coarse_deterministic_candidate(self) -> None:
+        source = (
+            'A verified source states: "The flux remains 17 qx." '
+            "Use that source in the next operation."
+        )
+        client = _SemanticClient(
+            [
+                {
+                    "predicate": "flux",
+                    "assertion_type": "observation",
+                    "operator": "eq",
+                    "value": "17",
+                    "value_type": "number",
+                    "unit": "qx",
+                    "modality": "observed",
+                    "temporal_status": "current",
+                    "source_quote": "The flux remains 17 qx.",
+                    "confidence": 0.82,
+                }
+            ]
+        )
+        store = MemoryStoreLite()
+        bridge = StateToMemoryBridgeLite(
+            store,
+            semantic_disambiguator=ControlledSemanticDisambiguator(client),
+        )
+
+        report, validation = bridge.promote(
+            task_id="mixed-source-one",
+            scope_id="scope-isolated",
+            source_agent="framework-user",
+            task_topic="unseen process",
+            fallback_summary=source,
+            tags=["generic"],
+            slot_hint="source_evidence",
+            source_state_ids=["state-source"],
+            evidence_refs=["state-source"],
+            reuse_intent="reuse direct source evidence",
+            disambiguation_policy="control_required",
+        )
+
+        self.assertTrue(validation.allowed, validation.reasons)
+        self.assertEqual(validation.disambiguation_policy, "control_required")
+        self.assertEqual(client.call_count, 1)
+        self.assertEqual(report.admission_status, "admitted")
+        claim = store.snapshot()["claim_cards"][0]
+        self.assertEqual(claim["value"], "17")
+        self.assertEqual(
+            claim["source_span"]["quote"],
+            "The flux remains 17 qx.",
+        )
+
+    def test_required_control_failure_cannot_fall_back_to_coarse_candidate(
+        self,
+    ) -> None:
+        source = "verified_level: 17 qx. Apply it downstream."
+        client = _SemanticClient(
+            [
+                {
+                    "predicate": "verified_level",
+                    "value": "19",
+                    "source_quote": "fabricated quote",
+                }
+            ]
+        )
+        store = MemoryStoreLite()
+        bridge = StateToMemoryBridgeLite(
+            store,
+            semantic_disambiguator=ControlledSemanticDisambiguator(client),
+        )
+
+        report, validation = bridge.promote(
+            task_id="mixed-source-rejected",
+            scope_id="scope-isolated",
+            source_agent="framework-user",
+            task_topic="unseen process",
+            fallback_summary=source,
+            tags=["generic"],
+            slot_hint="source_evidence",
+            source_state_ids=["state-source"],
+            evidence_refs=["state-source"],
+            reuse_intent="retain rejected source for audit",
+            disambiguation_policy="control_required",
+        )
+
+        self.assertFalse(validation.allowed)
+        self.assertNotEqual(report.admission_status, "admitted")
+        self.assertEqual(store.snapshot()["memories"], [])
+
     def test_controlled_disambiguation_uses_normal_admission_path(
         self,
     ) -> None:
