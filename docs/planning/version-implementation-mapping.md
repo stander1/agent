@@ -5542,3 +5542,26 @@ v5.15e 继续依据真实 Provider 失败证据补全通用协议。模型已遵
 未知字段和无证据改写仍失败关闭。
 
 详细说明见 `docs/planning/v5.15e-closed-claim-field-contract.md`。
+
+## 95. v5.15f：真实 AutoGen 集成语义预检
+
+v5.15f 不再重复孤立 Claim 调用，而是把受控语义提议、正常记忆准入和
+最小上下文注入放入真实 AutoGen 多 Agent 任务链。任务与能力配置均为仓库外、
+提交后绑定输入；测试 Agent 使用任意能力名称，生产运行时不依赖
+Planner、Writer 或 Reviewer。
+
+实现映射：
+
+- `run_autogen_preflight_app.py`：使用同一 AutoGen Team 连续执行任务，
+  每个任务后清空原生 Team 状态但保留 AgentLite memory scope，并保存每个
+  业务 Agent 的完整输出及 Provider usage；
+- `verify_acceptance.py`：检查动态能力画像、控制调用、状态记忆桥、真实
+  注入与下游采用、错误记忆、当前任务保真和协议泄漏；
+- 成本账本把业务 Provider、控制 Provider 和扣除已计控制调用后的协作传输
+  分开统计，避免同一控制 Token 重复计数；
+- `run_openeuler.sh`：冻结外部场景和 Team 配置，导出 AgentLite session
+  report，并在失败时仍打包完整不可变证据。
+
+通过该门禁只允许进入小规模 Native/Observed/Managed 对照预检，不直接形成
+正式 Token 节省或质量非劣结论。详细说明见
+`docs/planning/v5.15f-integrated-autogen-semantic-preflight.md`。
