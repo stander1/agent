@@ -168,8 +168,9 @@ class MemoryAdoptionGuardTest(unittest.TestCase):
                 ],
             },
             current_task_text=(
-                "Publish a two-state record: current threshold 31.8 units; "
-                "archived threshold 32.4 units."
+                "Publish a two-state record for the current threshold "
+                "31.8 units. Preserve and label the former threshold as "
+                "archived."
             ),
             output_text=(
                 "Current threshold: 31.8 units. "
@@ -189,8 +190,9 @@ class MemoryAdoptionGuardTest(unittest.TestCase):
         self.assertEqual(evidence["matched_historical_fact_count"], 0)
         self.assertEqual(
             evidence["historical_current_task_duplicate_fact_count"],
-            1,
+            0,
         )
+        self.assertEqual(evidence["authorized_historical_fact_count"], 1)
         self.assertEqual(decision.status, "safe")
 
     def test_unrequested_historical_value_remains_blocked(self) -> None:
@@ -227,6 +229,61 @@ class MemoryAdoptionGuardTest(unittest.TestCase):
         )
 
         self.assertEqual(evidence["status"], "wrong")
+        self.assertEqual(evidence["matched_historical_fact_count"], 1)
+
+    def test_historical_value_requires_observed_active_fact_from_same_slot(
+        self,
+    ) -> None:
+        evidence = _structured_memory_adoption_evidence(
+            revision_guard={
+                "subject": "project:generic",
+                "active_facts": [
+                    {
+                        "semantic_key": "generic|slot.open.primary|general",
+                        "slot_id": "slot.open.primary",
+                        "scope": "general",
+                        "value": "31.8",
+                        "value_type": "number",
+                        "unit": "units",
+                        "polarity": "positive",
+                        "operator": "eq",
+                    },
+                    {
+                        "semantic_key": "generic|slot.open.secondary|general",
+                        "slot_id": "slot.open.secondary",
+                        "scope": "general",
+                        "value": "enabled",
+                        "value_type": "string",
+                        "unit": "",
+                        "polarity": "positive",
+                        "operator": "eq",
+                    },
+                ],
+                "historical_facts": [
+                    {
+                        "semantic_key": "generic|slot.open.primary|general",
+                        "slot_id": "slot.open.primary",
+                        "scope": "general",
+                        "value": "32.4",
+                        "value_type": "number",
+                        "unit": "units",
+                        "polarity": "positive",
+                        "operator": "eq",
+                    }
+                ],
+            },
+            current_task_text=(
+                "Publish a two-state record. Preserve the current settings "
+                "and label former settings archived."
+            ),
+            output_text=(
+                "Current secondary setting: enabled. "
+                "Archived primary setting: 32.4 units."
+            ),
+            explicit_reference=False,
+        )
+
+        self.assertEqual(evidence["authorized_historical_fact_count"], 0)
         self.assertEqual(evidence["matched_historical_fact_count"], 1)
 
     def test_guard_ignores_unsafe_row_when_historical_value_equals_active(self) -> None:

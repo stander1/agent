@@ -262,10 +262,18 @@ class FactLevelMemoryTest(unittest.TestCase):
             store._memories[old.memory_ref.memory_id].claim_id,
             budget_chars=12000,
         )
+        historical_prompt = store.render_historical_prompt_view(
+            current.memory_ref,
+        )
 
         self.assertEqual(len(prompt_views), 1)
         self.assertIn('"value":"2000"', prompt_views[0])
         self.assertNotIn('"value":"5000"', prompt_views[0])
+        self.assertIn("historical_fact=", historical_prompt)
+        self.assertIn('"value":"5000"', historical_prompt)
+        self.assertIn('"status":"superseded"', historical_prompt)
+        self.assertNotIn('"value":"2000"', historical_prompt)
+        self.assertNotIn("confidence", historical_prompt)
         self.assertIn('"value": "5000"', audit_view)
         self.assertIn('"view_type": "evidence_expansion"', evidence)
         self.assertIn('"value": "5000"', evidence)

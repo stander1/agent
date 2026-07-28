@@ -64,7 +64,7 @@ _GENERIC_REVISION_RE = re.compile(
 )
 _GENERIC_TEMPORAL_HISTORICAL_RE = re.compile(
     r"(?i)(?:(?<![A-Za-z0-9])"
-    r"(?:previous|former|old|initial|historical|deprecated|superseded)"
+    r"(?:previous|former|old|initial|historical|archived|deprecated|superseded)"
     r"(?![A-Za-z0-9])|"
     r"此前|之前|原(?:先|有)?|旧(?:版|值)?|历史|已废弃|已取代)"
 )
@@ -79,6 +79,15 @@ _GENERIC_TEMPORAL_FUTURE_RE = re.compile(
     r"(?:future|planned|proposed|pending)"
     r"(?![A-Za-z0-9])|"
     r"未来|计划|拟定|待确认)"
+)
+_GENERIC_PAIRED_TEMPORAL_REQUEST_RE = re.compile(
+    r"(?i)(?:(?<![A-Za-z0-9])"
+    r"(?:both|two[-\s]?state|compare|comparison|history|timeline|"
+    r"preserve|include|show|list|record|report|label|retain)"
+    r"(?![A-Za-z0-9])|"
+    r"\u4e24\u8005|\u53cc\u72b6\u6001|\u5bf9\u6bd4|\u6bd4\u8f83|"
+    r"\u5386\u53f2|\u65f6\u95f4\u7ebf|\u4fdd\u7559|\u5305\u542b|"
+    r"\u5c55\u793a|\u5217\u51fa|\u8bb0\u5f55|\u6807\u6ce8)"
 )
 
 
@@ -368,6 +377,57 @@ def _infer_temporal_status(text: str) -> str:
         return "future"
     return "unspecified"
 
+
+def requests_historical_state(text: str) -> bool:
+    """Return whether the task requests a current/history paired view."""
+
+    source = str(text or "")
+    return bool(
+        _GENERIC_TEMPORAL_HISTORICAL_RE.search(source)
+        and _GENERIC_TEMPORAL_CURRENT_RE.search(source)
+        and _GENERIC_PAIRED_TEMPORAL_REQUEST_RE.search(source)
+    )
+
+
+def value_has_temporal_status(
+    text: str,
+    value: Any,
+    *,
+    status: str,
+) -> bool:
+    """Check a value's local clause for a generic temporal label."""
+
+    raw_value = "" if value is None else str(value).strip()
+    source = str(text or "")
+    if not raw_value or not source:
+        return False
+    pattern = re.compile(re.escape(raw_value), re.IGNORECASE)
+    clause_markers = ("\n", ".", ";", "\u3002", "\uff1b")
+    for match in pattern.finditer(source):
+        clause_start = max(
+            source.rfind(marker, 0, match.start()) + len(marker)
+            for marker in clause_markers
+        )
+        clause_end_candidates = [
+            position
+            for marker in clause_markers
+            if (position := source.find(marker, match.end())) >= 0
+        ]
+        clause_end = (
+            min(clause_end_candidates)
+            if clause_end_candidates
+            else len(source)
+        )
+        clause = source[clause_start:clause_end]
+        if status == "historical" and _GENERIC_TEMPORAL_HISTORICAL_RE.search(
+            clause
+        ):
+            return True
+        if status == "current" and _GENERIC_TEMPORAL_CURRENT_RE.search(clause):
+            return True
+        if status == "future" and _GENERIC_TEMPORAL_FUTURE_RE.search(clause):
+            return True
+    return False
 
 def _clean_open_predicate(text: str) -> str:
     cleaned = re.sub(r"[*_`#]+", " ", str(text or ""))

@@ -8,6 +8,8 @@ from agent_runtime.bridge.state_memory_bridge import (
 )
 from agent_runtime.memory.claim_extractor import (
     extract_canonical_claim_candidates,
+    requests_historical_state,
+    value_has_temporal_status,
 )
 from agent_runtime.memory.schema_registry import SourceSpan
 from agent_runtime.memory.schema_registry import SchemaRegistryLite
@@ -91,6 +93,43 @@ destination_choice: Yixing
         )
         self.assertTrue(
             self.validator.validate(candidate, source_text=text).allowed
+        )
+
+    def test_paired_temporal_request_and_local_value_label_are_generic(
+        self,
+    ) -> None:
+        request = (
+            "Produce a two-state record. Preserve the current reading and "
+            "label the former reading archived."
+        )
+        output = "Current reading: 8.2 units. Archived reading: 7.9 units."
+
+        self.assertTrue(requests_historical_state(request))
+        self.assertTrue(
+            value_has_temporal_status(
+                output,
+                "7.9",
+                status="historical",
+            )
+        )
+        self.assertTrue(
+            value_has_temporal_status(
+                "Archived enabled flag: false.",
+                False,
+                status="historical",
+            )
+        )
+        self.assertTrue(
+            value_has_temporal_status(
+                "Former retry count: 0.",
+                0,
+                status="historical",
+            )
+        )
+        self.assertFalse(
+            requests_historical_state(
+                "Publish only the current reading and ignore old discussion."
+            )
         )
 
     def test_reordering_does_not_change_semantic_values(self) -> None:

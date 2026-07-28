@@ -146,6 +146,93 @@ class ProfiledTeam:
 
 
 class AutoGenSharedMemoryTest(unittest.TestCase):
+    def test_role_memory_context_fetches_typed_history_only_when_requested(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = {
+                "AGENTLITE_AUTOGEN_BROADCAST_MODE": "real-rewrite",
+                "AGENTLITE_AUTOGEN_TEAM_REWRITE": "1",
+                "AGENTLITE_AUTOGEN_SHARED_MEMORY": "1",
+                "AGENTLITE_MEMORY_SCOPE": "typed-history-fetch-test",
+            }
+            with patch.dict("os.environ", env, clear=False):
+                manager = AutoGenHookManager(
+                    self._context(root, "launch_history_fetch")
+                )
+                agent = ProfiledAgent(
+                    "TemporalRecordAssembler",
+                    "Assemble current and historical records.",
+                    "Preserve typed facts and their temporal status.",
+                )
+                context = manager.record_call_start(
+                    instance=agent,
+                    method_name="on_messages",
+                    target_kind="agentchat_agent",
+                    args=(
+                        [
+                            {
+                                "type": "TextMessage",
+                                "source": "user",
+                                "content": "Prepare the requested record.",
+                            }
+                        ],
+                    ),
+                    kwargs={},
+                )
+                ref = MemoryRef(
+                    memory_id="mem_history_1",
+                    version_id=2,
+                    status="active",
+                    task_topic="generic.record",
+                    memory_view_id="view_history_1",
+                    slot_id="slot.runtime.config",
+                )
+                context.memory_context = MemoryContext(
+                    refs=[ref],
+                    prompt_views=[
+                        (
+                            "[memory_view:view_history_1] "
+                            "slot=slot.runtime.config; claim=claim_current; "
+                            'active_fact={"slot_id":"slot.runtime.config",'
+                            '"scope":"record.reading","value":"8.2",'
+                            '"value_type":"number","unit":"units",'
+                            '"operator":"eq","polarity":"positive",'
+                            '"status":"active"}; tags=[generic]'
+                        )
+                    ],
+                )
+                manager._current_team_task_by_group[context.task.group_id] = (
+                    "Produce a two-state record. Preserve the current reading "
+                    "and label the former reading archived."
+                )
+                historical = (
+                    'historical_fact={"slot_id":"slot.runtime.config",'
+                    '"scope":"record.reading","value":"7.9",'
+                    '"value_type":"number","unit":"units","operator":"eq",'
+                    '"polarity":"positive","status":"superseded"}'
+                )
+
+                with patch.object(
+                    manager.kernel.memory_store,
+                    "render_historical_prompt_view",
+                    return_value=historical,
+                ) as render_history:
+                    selection = manager._select_role_memory_context(
+                        context=context,
+                        receiver_id=agent.name,
+                        state_prompt_views=[],
+                    )
+
+                render_history.assert_called_once_with(ref)
+                self.assertIn(
+                    '"value":"7.9"',
+                    "\n".join(selection.source_prompt_views),
+                )
+                self.assertEqual(selection.field_fetch_count, 1)
+                self.assertGreater(selection.field_fetch_tokens, 0)
+
     def test_team_task_source_evidence_is_admitted_after_current_retrieval(
         self,
     ) -> None:

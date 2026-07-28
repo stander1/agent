@@ -45,6 +45,8 @@ from agent_runtime.llm.config import LlmConfig
 from agent_runtime.memory.claim_extractor import (
     extract_claim_cards,
     normalized_value,
+    requests_historical_state,
+    value_has_temporal_status,
 )
 from agent_runtime.memory.memory_store import (
     MemoryRef,
@@ -147,7 +149,7 @@ SEMANTIC_DEPENDENCY_MAX_TOKENS_ENV = (
 )
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
 CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
-DRIVER_PHASE = "v5.15m"
+DRIVER_PHASE = "v5.15n"
 _AUTOGEN_REPEATED_INSTANCE_ID_RE = re.compile(
     r"^(?P<logical>.+)_(?P<run>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
     r"[0-9a-f]{4}-[0-9a-f]{12})_(?P=run)$",
@@ -6024,9 +6026,31 @@ class AutoGenHookManager:
             target_kind=context.target_kind,
         )
         base.semantic_action = semantic_action
+        historical_prompt_views: list[str] = []
+        historical_memory_view_ids: list[str] = []
+        if requests_historical_state(query):
+            for memory_ref in base.refs:
+                prompt_view = self._safe_kernel_call(
+                    "autogen_memory_historical_prompt_view",
+                    lambda ref=memory_ref: (
+                        self.kernel.memory_store.render_historical_prompt_view(
+                            ref,
+                        )
+                    ),
+                )
+                if not str(prompt_view or "").strip():
+                    continue
+                historical_prompt_views.append(str(prompt_view))
+                historical_memory_view_ids.append(
+                    str(getattr(memory_ref, "memory_view_id", "") or "")
+                )
+        initial_prompt_views = [
+            *base.prompt_views,
+            *historical_prompt_views,
+        ]
         initial = build_minimal_context_view(
             query=query,
-            prompt_views=base.prompt_views,
+            prompt_views=initial_prompt_views,
             consumer=consumer,
             action=semantic_action,
         )
@@ -6073,7 +6097,7 @@ class AutoGenHookManager:
                         break
                 if len(fetched_views) >= 2:
                     break
-        source_prompt_views = [*base.prompt_views, *fetched_views]
+        source_prompt_views = [*initial_prompt_views, *fetched_views]
         final_view = build_minimal_context_view(
             query=query,
             prompt_views=source_prompt_views,
@@ -6099,13 +6123,15 @@ class AutoGenHookManager:
         base.role_view_selection_mode = selected_view.selection_mode
         base.role_view_no_expansion_fallback = selected_view.no_expansion_fallback
         base.role_view_reduction_ratio = selected_view.reduction_ratio
-        base.field_fetch_count = len(fetched_views)
+        base.field_fetch_count = len(fetched_views) + len(
+            historical_prompt_views
+        )
         base.field_fetch_tokens = _count_tokens(
             self.token_counter,
-            "\n".join(fetched_views),
+            "\n".join([*historical_prompt_views, *fetched_views]),
         )
         base.field_fetch_state_ids = fetched_state_ids
-        if fetched_views:
+        if fetched_views or historical_prompt_views:
             self.trace.write(
                 "autogen_memory_field_fetch",
                 {
@@ -6120,9 +6146,19 @@ class AutoGenHookManager:
                     "requested_fields": list(initial.requested_fields),
                     "initial_missing_fields": list(initial.missing_fields),
                     "final_missing_fields": list(final_view.missing_fields),
-                    "field_fetch_count": len(fetched_views),
+                    "field_fetch_count": (
+                        len(fetched_views) + len(historical_prompt_views)
+                    ),
                     "field_fetch_tokens": base.field_fetch_tokens,
                     "state_ids": fetched_state_ids,
+                    "historical_field_fetch_count": len(
+                        historical_prompt_views
+                    ),
+                    "historical_field_fetch_memory_view_ids": [
+                        item
+                        for item in historical_memory_view_ids
+                        if item
+                    ],
                 },
             )
         return base
@@ -8390,9 +8426,11 @@ def _structured_memory_adoption_evidence(
     ]
 
     matched_active: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    observed_active: list[tuple[dict[str, Any], dict[str, Any]]] = []
     matched_historical: list[tuple[dict[str, Any], dict[str, Any]]] = []
     excluded_current: list[dict[str, Any]] = []
     excluded_historical_current: list[dict[str, Any]] = []
+    authorized_historical: list[dict[str, Any]] = []
     for fact in active_facts:
         current_match = _matching_structured_claim(
             fact,
@@ -8402,6 +8440,8 @@ def _structured_memory_adoption_evidence(
             fact,
             output_claims,
         ) or _matching_structured_fact_literal(fact, output_text)
+        if output_match is not None and str(output_match.get("polarity")) != "negative":
+            observed_active.append((fact, output_match))
         if current_match is not None:
             excluded_current.append(fact)
             continue
@@ -8424,6 +8464,20 @@ def _structured_memory_adoption_evidence(
             output_claims,
         ) or _matching_structured_fact_literal(fact, output_text)
         if output_match is None or str(output_match.get("polarity")) == "negative":
+            continue
+        if (
+            requests_historical_state(current_task_text)
+            and any(
+                _same_structured_fact_slot(active_fact, fact)
+                for active_fact, _ in observed_active
+            )
+            and value_has_temporal_status(
+                output_text,
+                fact.get("value"),
+                status="historical",
+            )
+        ):
+            authorized_historical.append(fact)
             continue
         matched_historical.append((fact, output_match))
 
@@ -8486,6 +8540,15 @@ def _structured_memory_adoption_evidence(
         "historical_current_task_duplicate_fact_previews": [
             _structured_fact_preview(fact)
             for fact in excluded_historical_current[:3]
+        ],
+        "authorized_historical_fact_count": len(authorized_historical),
+        "authorized_historical_fact_fingerprints": [
+            _structured_fact_fingerprint(fact)
+            for fact in authorized_historical[:5]
+        ],
+        "authorized_historical_fact_previews": [
+            _structured_fact_preview(fact)
+            for fact in authorized_historical[:3]
         ],
         "matched_historical_fact_count": len(matched_historical),
         "matched_historical_fact_fingerprints": [
@@ -8584,6 +8647,21 @@ def _structured_fact_operator(fact: Mapping[str, Any]) -> str:
 
 def _structured_fact_polarity(fact: Mapping[str, Any]) -> str:
     return canonical_claim_polarity(_structured_fact_operator(fact))
+
+
+def _same_structured_fact_slot(
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+) -> bool:
+    left_key = str(left.get("semantic_key") or "").strip()
+    right_key = str(right.get("semantic_key") or "").strip()
+    if left_key and right_key:
+        return left_key == right_key
+    return (
+        str(left.get("slot_id") or "") == str(right.get("slot_id") or "")
+        and str(left.get("scope") or "general")
+        == str(right.get("scope") or "general")
+    )
 
 
 def _matching_structured_claim(

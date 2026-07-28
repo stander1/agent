@@ -1647,6 +1647,50 @@ class MemoryStoreLite:
         }
         return json.dumps(payload, ensure_ascii=False, indent=2)[:budget_chars]
 
+    def render_historical_prompt_view(
+        self,
+        memory_ref: MemoryRef,
+        *,
+        budget_chars: int = 1200,
+        max_facts: int = 4,
+    ) -> str:
+        """Return complete typed historical facts for an explicit field fetch."""
+
+        memory = self._memories[memory_ref.memory_id]
+        view = self._views[memory.memory_view_id]
+        if (
+            not view.schema_version.startswith("ccf.v2")
+            or view.resolution_status != "resolved"
+        ):
+            return ""
+        claims = [
+            self._claims[claim_id]
+            for claim_id in view.historical_claim_ids[-max(1, max_facts) :]
+            if claim_id in self._claims
+        ]
+        lines: list[str] = []
+        for claim in claims:
+            payload = {
+                "slot_id": claim.slot_id,
+                "scope": claim.scope,
+                "value": claim.value,
+                "value_type": claim.value_type,
+                "unit": claim.unit,
+                "operator": claim.operator,
+                "polarity": claim.polarity,
+                "status": claim.status,
+            }
+            line = "historical_fact=" + json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            projected = len("\n".join([*lines, line]))
+            if lines and projected > budget_chars:
+                break
+            lines.append(line)
+        return "\n".join(lines)
+
     def expand_evidence(
         self,
         memory_view_id: str,
