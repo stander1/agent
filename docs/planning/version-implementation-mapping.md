@@ -5497,3 +5497,24 @@ LLM 只能提出候选，不能直接写入共享记忆、注册权威 Schema �
 
 详细说明见
 `docs/planning/v5.15b-controlled-semantic-disambiguation.md`。
+
+## 92. v5.15c：真实 Provider 语义预检
+
+v5.15c 不修改生产语义规则，而是把 v5.15b 的受控候选路径放入真实
+OpenAI-compatible Provider，验证它在提交后外部跨域样例上的可用性、成本
+完整性和正常记忆准入。
+
+实现映射：
+
+- `experiments/v5.15c-real-provider-semantic-preflight/run_provider_preflight.py`：
+  记录完整模型输出、Provider usage、重试和延迟，不记录提示、请求头或凭据；
+- 同一脚本通过 `StateToMemoryBridgeLite` 复核来源、Schema、冲突和记忆准入，
+  并按预注册开放语义字段评分；
+- `run_openeuler.sh`：要求仓库外、提交后绑定的场景文件和仅存在于环境中的
+  API Key，保存环境指纹并打包不可变证据；
+- `tests/test_v515c_real_provider_semantic_preflight.py`：用脚本化 Provider
+  验证成本不重复计算、提交绑定和凭据边界。
+
+该阶段只建立真实控制路径的成本质量基线，不产生
+Native/Observed/Managed Token 节省结论。详细说明见
+`docs/planning/v5.15c-real-provider-semantic-preflight.md`。
