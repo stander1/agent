@@ -3,6 +3,10 @@ import unittest
 from pathlib import Path
 
 from agent_runtime.drivers.autogen import _memory_adoption_evidence
+from agent_runtime.memory.context_views import (
+    ConsumerCapabilityContext,
+    build_minimal_context_view,
+)
 from agent_runtime.memory.memory_store import MemoryStoreLite
 
 
@@ -142,8 +146,8 @@ class FactLevelMemoryTest(unittest.TestCase):
 
         prompt = store.render_prompt_view(new.memory_ref, budget_chars=1600)
         guard = store.revision_guard(new.memory_ref)
-        self.assertIn("active_value=2000", prompt)
-        self.assertNotIn("active_value=5000", prompt)
+        self.assertIn('"value":"2000"', prompt)
+        self.assertNotIn('"value":"5000"', prompt)
         self.assertEqual(guard["active_facts"][0]["value"], "2000")
         self.assertEqual(guard["historical_facts"][0]["value"], "5000")
         self.assertEqual(
@@ -260,11 +264,59 @@ class FactLevelMemoryTest(unittest.TestCase):
         )
 
         self.assertEqual(len(prompt_views), 1)
-        self.assertIn("active_value=2000", prompt_views[0])
-        self.assertNotIn("active_value=5000", prompt_views[0])
+        self.assertIn('"value":"2000"', prompt_views[0])
+        self.assertNotIn('"value":"5000"', prompt_views[0])
         self.assertIn('"value": "5000"', audit_view)
         self.assertIn('"view_type": "evidence_expansion"', evidence)
         self.assertIn('"value": "5000"', evidence)
+
+    def test_model_visible_facts_are_atomic_and_exclude_audit_confidence(
+        self,
+    ) -> None:
+        store = MemoryStoreLite()
+        elevation = self._write_claim(
+            store,
+            task_id="M1",
+            slot_id="slot.runtime.config",
+            scope="observation.reference_elevation",
+            value="-32.4 metres relative to datum",
+            value_type="string",
+            unit="",
+            confidence=0.72,
+        )
+        flag = self._write_claim(
+            store,
+            task_id="M2",
+            slot_id="slot.runtime.config",
+            scope="observation.exclusion_flag",
+            value="false",
+            value_type="boolean",
+            unit="",
+            confidence=0.72,
+        )
+        prompt_views = [
+            store.render_prompt_view(elevation.memory_ref, budget_chars=700),
+            store.render_prompt_view(flag.memory_ref, budget_chars=700),
+        ]
+
+        role_view = build_minimal_context_view(
+            query=(
+                "Include the signed reference elevation and the exact "
+                "exclusion flag."
+            ),
+            prompt_views=prompt_views,
+            consumer=ConsumerCapabilityContext(
+                consumer_id="arbitrary_measurement_consumer",
+            ),
+            action="HANDLE_TASK",
+            budget_chars=700,
+        )
+
+        self.assertEqual(role_view.text.count("active_fact="), 2)
+        self.assertIn('"value":"-32.4 metres relative to datum"', role_view.text)
+        self.assertIn('"value":"false"', role_view.text)
+        self.assertIn('"value_type":"boolean"', role_view.text)
+        self.assertNotIn("confidence", role_view.text)
 
     def test_loaded_legacy_document_claim_is_audit_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -147,7 +147,7 @@ SEMANTIC_DEPENDENCY_MAX_TOKENS_ENV = (
 )
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
 CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
-DRIVER_PHASE = "v5.15l"
+DRIVER_PHASE = "v5.15m"
 _AUTOGEN_REPEATED_INSTANCE_ID_RE = re.compile(
     r"^(?P<logical>.+)_(?P<run>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
     r"[0-9a-f]{4}-[0-9a-f]{12})_(?P=run)$",
@@ -8392,6 +8392,7 @@ def _structured_memory_adoption_evidence(
     matched_active: list[tuple[dict[str, Any], dict[str, Any]]] = []
     matched_historical: list[tuple[dict[str, Any], dict[str, Any]]] = []
     excluded_current: list[dict[str, Any]] = []
+    excluded_historical_current: list[dict[str, Any]] = []
     for fact in active_facts:
         current_match = _matching_structured_claim(
             fact,
@@ -8408,6 +8409,16 @@ def _structured_memory_adoption_evidence(
             matched_active.append((fact, output_match))
 
     for fact in historical_facts:
+        current_match = _matching_structured_claim(
+            fact,
+            task_claims,
+        ) or _matching_structured_fact_literal(fact, current_task_text)
+        if current_match is not None:
+            # This value is grounded directly in the current user request.
+            # It is therefore not evidence of adopting stale memory, even
+            # though the same value is historical in the MemoryView.
+            excluded_historical_current.append(fact)
+            continue
         output_match = _matching_structured_claim(
             fact,
             output_claims,
@@ -8465,6 +8476,17 @@ def _structured_memory_adoption_evidence(
             for fact in historical_facts[:5]
         ],
         "historical_fact_count": len(historical_facts),
+        "historical_current_task_duplicate_fact_count": len(
+            excluded_historical_current
+        ),
+        "historical_current_task_duplicate_fact_fingerprints": [
+            _structured_fact_fingerprint(fact)
+            for fact in excluded_historical_current[:5]
+        ],
+        "historical_current_task_duplicate_fact_previews": [
+            _structured_fact_preview(fact)
+            for fact in excluded_historical_current[:3]
+        ],
         "matched_historical_fact_count": len(matched_historical),
         "matched_historical_fact_fingerprints": [
             _structured_fact_fingerprint(fact)

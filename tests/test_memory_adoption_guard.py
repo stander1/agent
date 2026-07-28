@@ -137,6 +137,98 @@ class MemoryAdoptionGuardTest(unittest.TestCase):
         self.assertEqual(evidence["historical_fact_count"], 0)
         self.assertEqual(evidence["matched_historical_fact_count"], 0)
 
+    def test_historical_value_provided_by_current_task_is_not_stale_adoption(
+        self,
+    ) -> None:
+        evidence = _structured_memory_adoption_evidence(
+            revision_guard={
+                "subject": "project:generic",
+                "semantic_key": "generic|slot.open.threshold|general",
+                "active_facts": [
+                    {
+                        "slot_id": "slot.open.threshold",
+                        "scope": "general",
+                        "value": "31.8",
+                        "value_type": "number",
+                        "unit": "units",
+                        "polarity": "positive",
+                        "operator": "eq",
+                    }
+                ],
+                "historical_facts": [
+                    {
+                        "slot_id": "slot.open.threshold",
+                        "scope": "general",
+                        "value": "32.4",
+                        "value_type": "number",
+                        "unit": "units",
+                        "polarity": "positive",
+                        "operator": "eq",
+                    }
+                ],
+            },
+            current_task_text=(
+                "Publish a two-state record: current threshold 31.8 units; "
+                "archived threshold 32.4 units."
+            ),
+            output_text=(
+                "Current threshold: 31.8 units. "
+                "Archived threshold: 32.4 units."
+            ),
+            explicit_reference=False,
+        )
+        decision = guard_memory_adoption_output(
+            output_text=(
+                "Current threshold: 31.8 units. "
+                "Archived threshold: 32.4 units."
+            ),
+            evidence_rows=[evidence],
+        )
+
+        self.assertEqual(evidence["status"], "unassessed")
+        self.assertEqual(evidence["matched_historical_fact_count"], 0)
+        self.assertEqual(
+            evidence["historical_current_task_duplicate_fact_count"],
+            1,
+        )
+        self.assertEqual(decision.status, "safe")
+
+    def test_unrequested_historical_value_remains_blocked(self) -> None:
+        evidence = _structured_memory_adoption_evidence(
+            revision_guard={
+                "subject": "project:generic",
+                "semantic_key": "generic|slot.open.threshold|general",
+                "active_facts": [
+                    {
+                        "slot_id": "slot.open.threshold",
+                        "scope": "general",
+                        "value": "31.8",
+                        "value_type": "number",
+                        "unit": "units",
+                        "polarity": "positive",
+                        "operator": "eq",
+                    }
+                ],
+                "historical_facts": [
+                    {
+                        "slot_id": "slot.open.threshold",
+                        "scope": "general",
+                        "value": "32.4",
+                        "value_type": "number",
+                        "unit": "units",
+                        "polarity": "positive",
+                        "operator": "eq",
+                    }
+                ],
+            },
+            current_task_text="Publish only the current threshold.",
+            output_text="Current threshold: 32.4 units.",
+            explicit_reference=False,
+        )
+
+        self.assertEqual(evidence["status"], "wrong")
+        self.assertEqual(evidence["matched_historical_fact_count"], 1)
+
     def test_guard_ignores_unsafe_row_when_historical_value_equals_active(self) -> None:
         decision = guard_memory_adoption_output(
             output_text="Use alert_id=alert_071.",

@@ -1444,18 +1444,15 @@ class MemoryStoreLite:
         reserved = len(prefix) + len(suffix) + len(guard)
         summary_budget = max(0, budget_chars - reserved)
         if view.active_value is not None and view.schema_version.startswith("ccf.v2"):
-            active = view.active_value
-            summary = (
-                f"semantic_key={view.semantic_key}; "
-                f"active_value={active.get('value', '')}; "
-                f"value_type={active.get('value_type', 'string')}; "
-                f"unit={active.get('unit', '')}; "
-                f"confidence={active.get('confidence', 0.0):.2f}; "
-                "status=active"
-            )[:summary_budget]
+            summary = self._render_model_fact(view)
         else:
             summary = view.prompt_summary[:summary_budget]
         rendered = f"{prefix}{summary}{suffix}{guard}"
+        if view.schema_version.startswith("ccf.v2"):
+            # A typed fact and its revision policy are atomic safety records.
+            # Returning a complete record is safer than slicing JSON into
+            # independently selectable field fragments.
+            return rendered
         return rendered[:budget_chars]
 
     def revision_guard(self, memory_ref: MemoryRef) -> dict[str, Any]:
@@ -2246,13 +2243,7 @@ class MemoryStoreLite:
                 selected_by=best.conflict_policy,
             )
             if view.schema_version.startswith("ccf.v2"):
-                value = str(view.active_value.get("value", "") or "")
-                unit = str(view.active_value.get("unit", "") or "")
-                view.prompt_summary = (
-                    f"{view.subject}.{view.scope}={value}{unit}; "
-                    f"confidence={view.active_value.get('confidence', 0.0):.2f}; "
-                    "status=active"
-                )
+                view.prompt_summary = self._render_model_fact(view)
         else:
             view.active_value = None
         view.historical_values = [
@@ -2288,6 +2279,7 @@ class MemoryStoreLite:
             "unit": claim.unit,
             "confidence": claim.confidence,
             "polarity": claim.polarity,
+            "operator": claim.operator,
             "valid_from": claim.valid_from,
             "valid_to": claim.valid_to,
             "supported_by": supported_by or [claim.claim_id],
@@ -2655,16 +2647,28 @@ class MemoryStoreLite:
             return ""
         if view.schema_version.startswith("ccf.v2") and view.active_value is not None:
             active = view.active_value
+            payload = {
+                "policy": "active_authoritative_for_current_state",
+                "resolution": view.resolution_status,
+                "slot_id": view.slot_id,
+                "scope": view.scope,
+                "active_value": active.get("value", ""),
+                "value_type": active.get("value_type", "string"),
+                "unit": active.get("unit", ""),
+                "historical_claim_count": len(view.historical_claim_ids),
+            }
             return (
-                "\n[revision_guard "
-                f"policy={view.downstream_policy}; "
-                f"resolution={view.resolution_status}; "
-                f"semantic_key={view.semantic_key}; "
-                f"active_value={active.get('value', '')}; "
-                f"unit={active.get('unit', '')}; "
-                f"superseded_claim_count={len(view.historical_claim_ids)}] "
-                "Use only the active value for this semantic key. "
-                "Contradictory values in native message history are audit-only."
+                "\n[revision_guard] "
+                + json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                + "\nUse the active fact for current-state assertions. "
+                "A historical value may appear only when the current user task "
+                "provides it directly or a provenance-bound historical "
+                "expansion authorizes it; it must remain labeled historical "
+                "and never replace the active fact."
             )
         active_claims = ",".join(view.active_claim_ids)
         return (
@@ -2675,6 +2679,25 @@ class MemoryStoreLite:
             f"superseded_claim_count={len(view.historical_claim_ids)}] "
             "Use active claim values as authoritative. Ignore contradictory values "
             "from native message history; historical claims are audit-only."
+        )
+
+    @staticmethod
+    def _render_model_fact(view: MemoryView) -> str:
+        active = view.active_value or {}
+        payload = {
+            "slot_id": view.slot_id,
+            "scope": view.scope,
+            "value": active.get("value", ""),
+            "value_type": active.get("value_type", "string"),
+            "unit": active.get("unit", ""),
+            "operator": active.get("operator", "eq"),
+            "polarity": active.get("polarity", "positive"),
+            "status": "active",
+        }
+        return "active_fact=" + json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
         )
 
     def _record_feedback_hits(
