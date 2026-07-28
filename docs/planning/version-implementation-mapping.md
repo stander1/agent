@@ -5407,3 +5407,20 @@ v5.14y 根据 v5.14x 的真实失败证据，修复四类通用根因：预算�
 
 详细说明见
 `docs/experiments/v5.14y-active-fact-terminal-delivery.md`。
+
+## 89. v5.14z：活跃事实与终态交付正式回归
+
+v5.14z 将 v5.14y 已通过 openEuler 机制验收的修复放回真实 MiMo Provider、
+A1-A10/B1-B10 连续任务和 Native、Observed、Managed 三组正式对照。
+
+正式实验继续冻结：
+
+- 任务与能力型 Agent 配置；
+- 模型、温度和九轮上限；
+- Provider Token、端到端协作成本与匿名质量评分口径；
+- 交付完整性、错误记忆、审查治理、状态类型和协议卫生阈值。
+
+新增血缘绑定仅证明正式运行提交继承 v5.14y 机制发布，并绑定 v5.14x
+预注册文件与 v5.14y 验收器。生产代码仍不识别 Question A/B、业务实体、
+固定结论或固定 Agent 名称。详细说明见
+`docs/experiments/v5.14z-active-fact-terminal-delivery-formal.md`。
