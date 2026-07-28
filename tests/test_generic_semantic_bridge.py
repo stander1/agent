@@ -50,6 +50,32 @@ destination_choice: Yixing
             "Yixing",
         )
 
+    def test_open_value_parser_requires_a_complete_measurement(self) -> None:
+        text = """transfer_rate: -1.8 qx
+operating_mode: 17 qx standby
+interval: 1 to 3 qx
+"""
+        candidates = extract_canonical_claim_candidates(
+            text,
+            subject="process:generic",
+            source_id="state:complete-measurement",
+        )
+        by_predicate = {item["predicate"]: item for item in candidates}
+
+        self.assertEqual(by_predicate["transfer_rate"]["value"], "-1.8")
+        self.assertEqual(by_predicate["transfer_rate"]["value_type"], "number")
+        self.assertEqual(by_predicate["transfer_rate"]["unit"], "qx")
+        self.assertEqual(
+            by_predicate["operating_mode"]["value"],
+            "17 qx standby",
+        )
+        self.assertEqual(
+            by_predicate["operating_mode"]["value_type"],
+            "string",
+        )
+        self.assertEqual(by_predicate["interval"]["value"], "1 to 3 qx")
+        self.assertEqual(by_predicate["interval"]["value_type"], "string")
+
     def test_source_span_is_exact_and_revalidated(self) -> None:
         text = "throughput_limit: >= 1200 req/s\n"
         candidate = extract_canonical_claim_candidates(

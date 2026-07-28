@@ -64,6 +64,7 @@ class SemanticValidationResult:
     disambiguation_accepted_candidate_count: int = 0
     disambiguation_rejected_candidate_count: int = 0
     disambiguation_locally_rebound_candidate_count: int = 0
+    disambiguation_locally_normalized_candidate_count: int = 0
     disambiguation_diagnostics: list[str] = field(default_factory=list)
     control_prompt_tokens: int = 0
     control_completion_tokens: int = 0
@@ -495,6 +496,9 @@ class StateToMemoryBridgeLite:
             ),
             disambiguation_locally_rebound_candidate_count=(
                 disambiguation.locally_rebound_candidate_count
+            ),
+            disambiguation_locally_normalized_candidate_count=(
+                disambiguation.locally_normalized_candidate_count
             ),
             disambiguation_diagnostics=list(disambiguation.reasons),
             control_prompt_tokens=disambiguation.prompt_tokens,

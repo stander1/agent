@@ -6,6 +6,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Mapping, Protocol
 
+from agent_runtime.memory.claim_extractor import parse_complete_measurement
 from agent_runtime.memory.schema_registry import (
     CanonicalClaimCandidate,
     ClaimRelation,
@@ -44,8 +45,6 @@ _ALLOWED_RELATION_TYPES = {
     "supports",
     "contradicts",
 }
-
-
 class CompletionClient(Protocol):
     def complete(
         self,
@@ -104,6 +103,7 @@ class SemanticDisambiguationResult:
     call_count: int = 0
     rejected_candidate_count: int = 0
     locally_rebound_candidate_count: int = 0
+    locally_normalized_candidate_count: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
@@ -314,8 +314,14 @@ class ControlledSemanticDisambiguator:
         accepted: list[dict[str, Any]] = []
         rejection_reasons: list[str] = []
         locally_rebound_count = 0
+        locally_normalized_count = 0
         for index, proposal in enumerate(claims):
-            candidate, reasons, locally_rebound = _candidate_from_proposal(
+            (
+                candidate,
+                reasons,
+                locally_rebound,
+                locally_normalized,
+            ) = _candidate_from_proposal(
                 proposal,
                 request=request,
             )
@@ -326,6 +332,7 @@ class ControlledSemanticDisambiguator:
                 continue
             accepted.append(candidate.to_dict())
             locally_rebound_count += int(locally_rebound)
+            locally_normalized_count += int(locally_normalized)
 
         if not accepted:
             return SemanticDisambiguationResult(
@@ -344,6 +351,7 @@ class ControlledSemanticDisambiguator:
             reasons=tuple(dict.fromkeys(rejection_reasons)),
             rejected_candidate_count=len(claims) - len(accepted),
             locally_rebound_candidate_count=locally_rebound_count,
+            locally_normalized_candidate_count=locally_normalized_count,
             **common,
         )
 
@@ -690,8 +698,13 @@ def _render_prompts(
         "Each predicate must be a concise lower_snake_case open name. "
         "Each source_quote must be one exact, unique substring copied from "
         "the source, not a paraphrase. The value and unit must preserve the "
-        "literal semantic value present in that quote: keep descriptive "
-        "values as strings and do not rewrite them as booleans. "
+        "literal semantic value present in that quote. For a numeric "
+        "measurement, value must contain only the exact signed numeric "
+        "literal (including decimal or exponent), value_type must be number, "
+        "and unit must contain the exact adjacent unit without repeating it "
+        "inside value. JSON logical literals true and false use value_type "
+        "boolean. Keep descriptive values as strings even when they contain "
+        "status words, and do not rewrite them as booleans. "
         "Polarity follows operator: ne is negative; all others are positive. "
         "Use only this canonical enum contract: "
         f"assertion_type={json.dumps(sorted(_ALLOWED_ASSERTION_TYPES))}; "
@@ -703,6 +716,12 @@ def _render_prompts(
         f"{json.dumps(sorted(_ALLOWED_TEMPORAL_STATUSES))}; "
         "relation_type="
         f"{json.dumps(sorted(_ALLOWED_RELATION_TYPES))}. "
+        "Each relation object may contain only relation_type, target_value, "
+        "and target_candidate_id. target_candidate_id must be an empty "
+        "string because this proposal component cannot know internal IDs. "
+        "target_value must be an exact relation-target phrase or literal "
+        "copied from the same source_quote. Do not emit target_predicate, "
+        "description, reason, or any other nested field. "
         "Do not invent aliases such as 'equals', 'numeric', 'factual', "
         "'present', 'state', 'property', or 'measurement'. "
         "Use relations only for explicit relations stated in the same quote."
@@ -750,9 +769,9 @@ def _candidate_from_proposal(
     proposal: Any,
     *,
     request: SemanticDisambiguationRequest,
-) -> tuple[CanonicalClaimCandidate | None, list[str], bool]:
+) -> tuple[CanonicalClaimCandidate | None, list[str], bool, bool]:
     if not isinstance(proposal, dict):
-        return None, ["proposal_not_object"], False
+        return None, ["proposal_not_object"], False, False
     allowed_fields = {
         "predicate",
         "assertion_type",
@@ -768,7 +787,7 @@ def _candidate_from_proposal(
         "relations",
     }
     if set(proposal) - allowed_fields:
-        return None, ["proposal_has_unknown_fields"], False
+        return None, ["proposal_has_unknown_fields"], False, False
 
     predicate = str(proposal.get("predicate") or "").strip()
     value = _stringify_scalar(proposal.get("value"))
@@ -824,6 +843,24 @@ def _candidate_from_proposal(
     elif len(quote_spans) > 1:
         reasons.append("source_quote_not_unique")
 
+    locally_normalized = False
+    if len(quote_spans) == 1:
+        start, end = quote_spans[0]
+        (
+            value,
+            value_type,
+            unit,
+            locally_normalized,
+            normalization_reason,
+        ) = _normalize_evidence_bound_measurement(
+            value=value,
+            value_type=value_type,
+            unit=unit,
+            source_quote=request.source_text[start:end],
+        )
+        if normalization_reason:
+            reasons.append(normalization_reason)
+
     relations: list[ClaimRelation] = []
     raw_relations = proposal.get("relations") or []
     if not isinstance(raw_relations, list):
@@ -833,12 +870,20 @@ def _candidate_from_proposal(
             if not isinstance(relation, dict):
                 reasons.append("relation_not_object")
                 continue
-            if set(relation) - {
-                "relation_type",
-                "target_value",
-                "target_candidate_id",
-            }:
-                reasons.append("relation_has_unknown_fields")
+            unknown_relation_fields = sorted(
+                _diagnostic_field_name(field_name)
+                for field_name in set(relation)
+                - {
+                    "relation_type",
+                    "target_value",
+                    "target_candidate_id",
+                }
+            )
+            if unknown_relation_fields:
+                reasons.append(
+                    "relation_has_unknown_fields:"
+                    + ",".join(unknown_relation_fields)
+                )
                 continue
             relation_type = str(
                 relation.get("relation_type") or ""
@@ -846,15 +891,19 @@ def _candidate_from_proposal(
             if relation_type not in _ALLOWED_RELATION_TYPES:
                 reasons.append("unsupported_relation_type")
                 continue
+            target_candidate_id = str(
+                relation.get("target_candidate_id") or ""
+            ).strip()
+            if target_candidate_id:
+                reasons.append("relation_target_candidate_id_not_empty")
+                continue
             relations.append(
                 ClaimRelation(
                     relation_type=relation_type,
                     target_value=_stringify_scalar(
                         relation.get("target_value")
                     ),
-                    target_candidate_id=str(
-                        relation.get("target_candidate_id") or ""
-                    ).strip(),
+                    target_candidate_id="",
                 )
             )
 
@@ -867,7 +916,7 @@ def _candidate_from_proposal(
         confidence = 0.0
         reasons.append("invalid_confidence")
     if reasons:
-        return None, list(dict.fromkeys(reasons)), False
+        return None, list(dict.fromkeys(reasons)), False, False
 
     polarity = canonical_claim_polarity(operator)
     start, end = quote_spans[0]
@@ -913,14 +962,14 @@ def _candidate_from_proposal(
             confidence=confidence,
             source_span=source_span,
             relations=tuple(relations),
-            schema_status=(
-                "llm_proposed_locally_rebound"
-                if locally_rebound
-                else "llm_proposed_unresolved"
+            schema_status=_local_schema_status(
+                locally_rebound=locally_rebound,
+                locally_normalized=locally_normalized,
             ),
         ),
         [],
         locally_rebound,
+        locally_normalized,
     )
 
 
@@ -947,6 +996,53 @@ def _stringify_scalar(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     return str(value).strip()
+
+
+def _diagnostic_field_name(value: Any) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9_.-]", "_", str(value))[:48]
+    return normalized or "unnamed"
+
+
+def _normalize_evidence_bound_measurement(
+    *,
+    value: str,
+    value_type: str,
+    unit: str,
+    source_quote: str,
+) -> tuple[str, str, str, bool, str]:
+    """Split a complete numeric measurement only when evidence is exact."""
+
+    if value_type not in {"string", "number"}:
+        return value, value_type, unit, False, ""
+    measurement = parse_complete_measurement(value)
+    if measurement is None:
+        return value, value_type, unit, False, ""
+    if source_quote.count(value) != 1:
+        return (
+            value,
+            value_type,
+            unit,
+            False,
+            "measurement_value_not_unique_in_source_quote",
+        )
+    normalized_value, parsed_unit = measurement
+    if unit and unit.casefold() != parsed_unit.casefold():
+        return value, value_type, unit, False, "measurement_unit_mismatch"
+    return normalized_value, "number", parsed_unit, True, ""
+
+
+def _local_schema_status(
+    *,
+    locally_rebound: bool,
+    locally_normalized: bool,
+) -> str:
+    if locally_rebound and locally_normalized:
+        return "llm_proposed_locally_rebound_and_normalized"
+    if locally_rebound:
+        return "llm_proposed_locally_rebound"
+    if locally_normalized:
+        return "llm_proposed_locally_normalized"
+    return "llm_proposed_unresolved"
 
 
 def _locally_rebind_source_span(

@@ -141,9 +141,9 @@ class StateToMemoryBridgeLiteTest(unittest.TestCase):
                         "predicate": "phase_drift",
                         "assertion_type": "observation",
                         "operator": "eq",
-                        "value": "-2.4",
-                        "value_type": "number",
-                        "unit": "qx",
+                        "value": "-2.4 qx",
+                        "value_type": "string",
+                        "unit": "",
                         "modality": "observed",
                         "temporal_status": "current",
                         "source_quote": "The phase drift is -2.4 qx",
@@ -162,9 +162,9 @@ class StateToMemoryBridgeLiteTest(unittest.TestCase):
                         "predicate": "phase_drift",
                         "assertion_type": "observation",
                         "operator": "eq",
-                        "value": "-1.8",
-                        "value_type": "number",
-                        "unit": "qx",
+                        "value": "-1.8 qx",
+                        "value_type": "string",
+                        "unit": "",
                         "modality": "observed",
                         "temporal_status": "current",
                         "source_quote": (
@@ -234,6 +234,10 @@ class StateToMemoryBridgeLiteTest(unittest.TestCase):
         self.assertEqual(second_report.resolved_conflict_count, 1)
         self.assertEqual(
             second_validation.disambiguation_locally_rebound_candidate_count,
+            1,
+        )
+        self.assertEqual(
+            second_validation.disambiguation_locally_normalized_candidate_count,
             1,
         )
         self.assertIn(

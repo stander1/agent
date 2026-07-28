@@ -927,6 +927,9 @@ class CollaborationKernel:
                     "locally_rebound_candidate_count": (
                         validation.disambiguation_locally_rebound_candidate_count
                     ),
+                    "locally_normalized_candidate_count": (
+                        validation.disambiguation_locally_normalized_candidate_count
+                    ),
                     "diagnostics": validation.disambiguation_diagnostics,
                     "prompt_tokens": validation.control_prompt_tokens,
                     "completion_tokens": (

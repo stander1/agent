@@ -168,6 +168,217 @@ class ControlledSemanticDisambiguationTest(unittest.TestCase):
             "do not rewrite them as booleans",
             system_prompt,
         )
+        self.assertIn(
+            "value must contain only the exact signed numeric literal",
+            system_prompt,
+        )
+        self.assertIn(
+            "Each relation object may contain only relation_type",
+            system_prompt,
+        )
+        self.assertIn(
+            "target_candidate_id must be an empty string",
+            system_prompt,
+        )
+
+    def test_normalizes_complete_measurement_from_exact_evidence(self) -> None:
+        text = "The transfer coefficient is -1.8 qx."
+        client = _FakeClient(
+            [
+                _response(
+                    [
+                        {
+                            "predicate": "transfer_coefficient",
+                            "value": "-1.8 qx",
+                            "value_type": "string",
+                            "unit": "",
+                            "source_quote": text,
+                        }
+                    ]
+                )
+            ]
+        )
+
+        result = ControlledSemanticDisambiguator(client).disambiguate(
+            _request(text, task_id="normalize-measurement")
+        )
+
+        self.assertTrue(result.accepted, result.reasons)
+        self.assertEqual(result.locally_normalized_candidate_count, 1)
+        candidate = result.candidates[0]
+        self.assertEqual(candidate["value"], "-1.8")
+        self.assertEqual(candidate["value_type"], "number")
+        self.assertEqual(candidate["unit"], "qx")
+        self.assertEqual(
+            candidate["schema_status"],
+            "llm_proposed_locally_normalized",
+        )
+        validation = CanonicalClaimSemanticValidator().validate(
+            candidate,
+            source_text=text,
+        )
+        self.assertTrue(validation.allowed, validation.reasons)
+
+    def test_rejects_repeated_measurement_inside_one_quote(self) -> None:
+        text = "The twin readings are -1.8 qx and -1.8 qx."
+        client = _FakeClient(
+            [
+                _response(
+                    [
+                        {
+                            "predicate": "twin_reading",
+                            "value": "-1.8 qx",
+                            "value_type": "string",
+                            "source_quote": text,
+                        }
+                    ]
+                )
+            ]
+        )
+
+        result = ControlledSemanticDisambiguator(client).disambiguate(
+            _request(text, task_id="repeated-measurement")
+        )
+
+        self.assertFalse(result.accepted)
+        self.assertIn(
+            "claim_0:measurement_value_not_unique_in_source_quote",
+            result.reasons,
+        )
+
+    def test_does_not_normalize_descriptions_or_ranges(self) -> None:
+        text = (
+            "The operating mode is 17 qx standby. "
+            "The interval is 1 to 3 qx."
+        )
+        client = _FakeClient(
+            [
+                _response(
+                    [
+                        {
+                            "predicate": "operating_mode",
+                            "value": "17 qx standby",
+                            "value_type": "string",
+                            "source_quote": (
+                                "The operating mode is 17 qx standby."
+                            ),
+                        },
+                        {
+                            "predicate": "interval",
+                            "value": "1 to 3 qx",
+                            "value_type": "string",
+                            "source_quote": "The interval is 1 to 3 qx.",
+                        },
+                    ]
+                )
+            ]
+        )
+
+        result = ControlledSemanticDisambiguator(client).disambiguate(
+            _request(text, task_id="preserve-descriptions")
+        )
+
+        self.assertTrue(result.accepted, result.reasons)
+        self.assertEqual(result.locally_normalized_candidate_count, 0)
+        self.assertEqual(
+            [candidate["value_type"] for candidate in result.candidates],
+            ["string", "string"],
+        )
+
+    def test_rejects_measurement_unit_mismatch(self) -> None:
+        text = "The transfer coefficient is -1.8 qx."
+        client = _FakeClient(
+            [
+                _response(
+                    [
+                        {
+                            "predicate": "transfer_coefficient",
+                            "value": "-1.8 qx",
+                            "value_type": "string",
+                            "unit": "ms",
+                            "source_quote": text,
+                        }
+                    ]
+                )
+            ]
+        )
+
+        result = ControlledSemanticDisambiguator(client).disambiguate(
+            _request(text, task_id="reject-unit-mismatch")
+        )
+
+        self.assertFalse(result.accepted)
+        self.assertIn("claim_0:measurement_unit_mismatch", result.reasons)
+
+    def test_relation_contract_names_unknown_nested_fields(self) -> None:
+        text = "The reading is 9 qx, replacing the former reading."
+        client = _FakeClient(
+            [
+                _response(
+                    [
+                        {
+                            "predicate": "reading",
+                            "value": "9",
+                            "value_type": "number",
+                            "unit": "qx",
+                            "source_quote": text,
+                            "relations": [
+                                {
+                                    "relation_type": "supersedes_value",
+                                    "target_value": "former reading",
+                                    "target_predicate": "reading",
+                                }
+                            ],
+                        }
+                    ]
+                )
+            ]
+        )
+
+        result = ControlledSemanticDisambiguator(client).disambiguate(
+            _request(text, task_id="unknown-relation-field")
+        )
+
+        self.assertFalse(result.accepted)
+        self.assertIn(
+            "claim_0:relation_has_unknown_fields:target_predicate",
+            result.reasons,
+        )
+
+    def test_provider_cannot_bind_internal_relation_identifier(self) -> None:
+        text = "The reading is 9 qx, replacing the former reading."
+        client = _FakeClient(
+            [
+                _response(
+                    [
+                        {
+                            "predicate": "reading",
+                            "value": "9",
+                            "value_type": "number",
+                            "unit": "qx",
+                            "source_quote": text,
+                            "relations": [
+                                {
+                                    "relation_type": "supersedes_value",
+                                    "target_value": "former reading",
+                                    "target_candidate_id": "provider_guess",
+                                }
+                            ],
+                        }
+                    ]
+                )
+            ]
+        )
+
+        result = ControlledSemanticDisambiguator(client).disambiguate(
+            _request(text, task_id="provider-relation-id")
+        )
+
+        self.assertFalse(result.accepted)
+        self.assertIn(
+            "claim_0:relation_target_candidate_id_not_empty",
+            result.reasons,
+        )
 
     def test_rejects_quote_not_present_in_source(self) -> None:
         client = _FakeClient(
@@ -280,9 +491,9 @@ class ControlledSemanticDisambiguationTest(unittest.TestCase):
                             "predicate": "phase_drift",
                             "assertion_type": "observation",
                             "operator": "eq",
-                            "value": -1.8,
-                            "value_type": "number",
-                            "unit": "qx",
+                            "value": "-1.8 qx",
+                            "value_type": "string",
+                            "unit": "",
                             "modality": "observed",
                             "temporal_status": "current",
                             "source_quote": (
@@ -330,13 +541,14 @@ class ControlledSemanticDisambiguationTest(unittest.TestCase):
         self.assertEqual(len(result.candidates), 2)
         self.assertEqual(result.rejected_candidate_count, 1)
         self.assertEqual(result.locally_rebound_candidate_count, 1)
+        self.assertEqual(result.locally_normalized_candidate_count, 1)
         self.assertIn("claim_2:source_quote_not_found", result.reasons)
         scalar, flag = result.candidates
         self.assertEqual(scalar["value"], "-1.8")
         self.assertEqual(flag["value"], "false")
         self.assertEqual(
             scalar["schema_status"],
-            "llm_proposed_locally_rebound",
+            "llm_proposed_locally_rebound_and_normalized",
         )
         self.assertIn("replacing the former drift", scalar["source_span"]["quote"])
         for candidate in result.candidates:

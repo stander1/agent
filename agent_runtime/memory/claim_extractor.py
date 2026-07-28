@@ -52,10 +52,10 @@ _GENERIC_JSON_FIELD_RE = re.compile(
     r'[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)'
 )
 _GENERIC_NUMBER_RE = re.compile(
-    r"^[+-]?(?P<number>(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|"
+    r"^(?P<number>[+-]?(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|"
     r"\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)"
     r"(?:\s*(?P<unit>[%‰°A-Za-z\u3400-\u4dbf\u4e00-\u9fff/._-]{1,16}))?"
-    r"(?:\s|$)"
+    r"$"
 )
 _GENERIC_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:[T ][^\s]+)?$")
 _GENERIC_REVISION_RE = re.compile(
@@ -282,13 +282,13 @@ def _build_canonical_candidate(
     relation: ClaimRelation | None = None
     revision = _GENERIC_REVISION_RE.match(value_text)
     if revision:
-        old_value, _, _, _ = _parse_open_value(revision.group("old"))
+        old_value, _, _, _ = parse_open_value(revision.group("old"))
         value_text = revision.group("new").strip()
         relation = ClaimRelation(
             relation_type="supersedes_value",
             target_value=old_value,
         )
-    value, value_type, unit, operator = _parse_open_value(value_text)
+    value, value_type, unit, operator = parse_open_value(value_text)
     if not value:
         return None
     quote = source_text[start:end]
@@ -331,7 +331,7 @@ def _build_canonical_candidate(
     )
 
 
-def _parse_open_value(text: str) -> tuple[str, str, str, str]:
+def parse_open_value(text: str) -> tuple[str, str, str, str]:
     cleaned = _clean_structured_value(text)
     operator = "eq"
     operator_patterns = (
@@ -356,16 +356,43 @@ def _parse_open_value(text: str) -> tuple[str, str, str, str]:
             cleaned = updated.strip()
             operator = resolved_operator
             break
-    if _GENERIC_DATE_RE.fullmatch(cleaned):
-        return cleaned, "date", "", operator
-    number = _GENERIC_NUMBER_RE.match(cleaned)
+    scalar_text = _strip_terminal_temporal_annotation(cleaned)
+    if _GENERIC_DATE_RE.fullmatch(scalar_text):
+        return scalar_text, "date", "", operator
+    number = _GENERIC_NUMBER_RE.fullmatch(scalar_text)
     if number:
         normalized_number = number.group("number").replace(",", "")
         unit = str(number.group("unit") or "")
         return normalized_number, "number", unit, operator
-    if cleaned.casefold() in {"true", "false", "yes", "no"}:
-        return cleaned.casefold(), "boolean", "", operator
+    if scalar_text.casefold() in {"true", "false", "yes", "no"}:
+        return scalar_text.casefold(), "boolean", "", operator
     return cleaned, "string", "", operator
+
+
+def _strip_terminal_temporal_annotation(text: str) -> str:
+    match = re.fullmatch(r"(?s)(?P<value>.+?)\s*\((?P<label>[^()]*)\)\s*", text)
+    if match is None:
+        return text
+    label = match.group("label").strip()
+    temporal_patterns = (
+        _GENERIC_TEMPORAL_CURRENT_RE,
+        _GENERIC_TEMPORAL_HISTORICAL_RE,
+        _GENERIC_TEMPORAL_FUTURE_RE,
+    )
+    if not any(pattern.fullmatch(label) for pattern in temporal_patterns):
+        return text
+    return match.group("value").strip()
+
+
+def parse_complete_measurement(text: str) -> tuple[str, str] | None:
+    """Return a typed number/unit pair only for one complete measurement."""
+
+    cleaned = _clean_structured_value(text)
+    number = _GENERIC_NUMBER_RE.fullmatch(cleaned)
+    if number is None or not number.group("unit"):
+        return None
+    normalized_number = number.group("number").replace(",", "")
+    return normalized_number, str(number.group("unit"))
 
 
 def _infer_temporal_status(text: str) -> str:
