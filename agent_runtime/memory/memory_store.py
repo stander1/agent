@@ -978,6 +978,20 @@ class MemoryStoreLite:
             canonical.value_type,
             canonical.unit,
         )
+        candidate.relations = self._bind_predecessor_relations(
+            relations=candidate.relations,
+            semantic_key=semantic_key,
+            value=canonical.value,
+            value_type=canonical.value_type,
+            unit=canonical.unit,
+            polarity=canonical.polarity,
+        )
+        if any(
+            relation.get("relation_type") == "supersedes_value"
+            and relation.get("target_candidate_id")
+            for relation in candidate.relations
+        ):
+            candidate.revision_kind = "replaces"
         existing_claim = next(
             (
                 claim
@@ -1147,6 +1161,61 @@ class MemoryStoreLite:
             promotion_view_id=promotion_view_id,
         )
         return memory, resolved.alias_hit, False, False, False
+
+    def _bind_predecessor_relations(
+        self,
+        *,
+        relations: list[dict[str, Any]],
+        semantic_key: str,
+        value: str,
+        value_type: str,
+        unit: str,
+        polarity: str,
+    ) -> list[dict[str, Any]]:
+        active_predecessors = [
+            claim
+            for claim in self._claims.values()
+            if claim.semantic_key == semantic_key
+            and claim.status in {"active", "provisional_active"}
+            and (
+                normalized_value(claim.value, claim.value_type, claim.unit)
+                != normalized_value(value, value_type, unit)
+                or claim.polarity != polarity
+            )
+        ]
+        if not active_predecessors:
+            return [dict(relation) for relation in relations]
+
+        bound: list[dict[str, Any]] = []
+        for relation in relations:
+            current = dict(relation)
+            if (
+                current.get("relation_type") != "supersedes_value"
+                or current.get("target_candidate_id")
+            ):
+                bound.append(current)
+                continue
+            target_value = str(current.get("target_value") or "").strip()
+            matching = [
+                claim
+                for claim in active_predecessors
+                if target_value
+                and normalized_value(
+                    claim.value,
+                    claim.value_type,
+                    claim.unit,
+                )
+                == normalized_value(target_value, claim.value_type, claim.unit)
+            ]
+            targets = matching or (
+                active_predecessors if len(active_predecessors) == 1 else []
+            )
+            if len(targets) == 1:
+                current["target_candidate_id"] = (
+                    targets[0].candidate_id or targets[0].claim_id
+                )
+            bound.append(current)
+        return bound
 
     def search_memory(
         self,

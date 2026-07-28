@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Mapping, Protocol
 
@@ -102,6 +103,7 @@ class SemanticDisambiguationResult:
     reasons: tuple[str, ...] = ()
     call_count: int = 0
     rejected_candidate_count: int = 0
+    locally_rebound_candidate_count: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
@@ -311,8 +313,9 @@ class ControlledSemanticDisambiguator:
 
         accepted: list[dict[str, Any]] = []
         rejection_reasons: list[str] = []
+        locally_rebound_count = 0
         for index, proposal in enumerate(claims):
-            candidate, reasons = _candidate_from_proposal(
+            candidate, reasons, locally_rebound = _candidate_from_proposal(
                 proposal,
                 request=request,
             )
@@ -322,6 +325,7 @@ class ControlledSemanticDisambiguator:
                 )
                 continue
             accepted.append(candidate.to_dict())
+            locally_rebound_count += int(locally_rebound)
 
         if not accepted:
             return SemanticDisambiguationResult(
@@ -339,6 +343,7 @@ class ControlledSemanticDisambiguator:
             candidates=tuple(accepted),
             reasons=tuple(dict.fromkeys(rejection_reasons)),
             rejected_candidate_count=len(claims) - len(accepted),
+            locally_rebound_candidate_count=locally_rebound_count,
             **common,
         )
 
@@ -745,9 +750,9 @@ def _candidate_from_proposal(
     proposal: Any,
     *,
     request: SemanticDisambiguationRequest,
-) -> tuple[CanonicalClaimCandidate | None, list[str]]:
+) -> tuple[CanonicalClaimCandidate | None, list[str], bool]:
     if not isinstance(proposal, dict):
-        return None, ["proposal_not_object"]
+        return None, ["proposal_not_object"], False
     allowed_fields = {
         "predicate",
         "assertion_type",
@@ -763,10 +768,10 @@ def _candidate_from_proposal(
         "relations",
     }
     if set(proposal) - allowed_fields:
-        return None, ["proposal_has_unknown_fields"]
+        return None, ["proposal_has_unknown_fields"], False
 
     predicate = str(proposal.get("predicate") or "").strip()
-    value = str(proposal.get("value") or "").strip()
+    value = _stringify_scalar(proposal.get("value"))
     source_quote = str(proposal.get("source_quote") or "")
     assertion_type = str(
         proposal.get("assertion_type") or "fact"
@@ -802,6 +807,18 @@ def _candidate_from_proposal(
         reasons.append("unsupported_temporal_status")
 
     quote_spans = _exact_quote_spans(request.source_text, source_quote)
+    locally_rebound = False
+    if len(quote_spans) != 1 and source_quote:
+        rebound_span = _locally_rebind_source_span(
+            source_text=request.source_text,
+            predicate=predicate,
+            value=value,
+            value_type=value_type,
+            unit=unit,
+        )
+        if rebound_span is not None:
+            quote_spans = [rebound_span]
+            locally_rebound = True
     if not quote_spans:
         reasons.append("source_quote_not_found")
     elif len(quote_spans) > 1:
@@ -832,9 +849,9 @@ def _candidate_from_proposal(
             relations.append(
                 ClaimRelation(
                     relation_type=relation_type,
-                    target_value=str(
-                        relation.get("target_value") or ""
-                    ).strip(),
+                    target_value=_stringify_scalar(
+                        relation.get("target_value")
+                    ),
                     target_candidate_id=str(
                         relation.get("target_candidate_id") or ""
                     ).strip(),
@@ -850,7 +867,7 @@ def _candidate_from_proposal(
         confidence = 0.0
         reasons.append("invalid_confidence")
     if reasons:
-        return None, list(dict.fromkeys(reasons))
+        return None, list(dict.fromkeys(reasons)), False
 
     polarity = canonical_claim_polarity(operator)
     start, end = quote_spans[0]
@@ -896,9 +913,14 @@ def _candidate_from_proposal(
             confidence=confidence,
             source_span=source_span,
             relations=tuple(relations),
-            schema_status="llm_proposed_unresolved",
+            schema_status=(
+                "llm_proposed_locally_rebound"
+                if locally_rebound
+                else "llm_proposed_unresolved"
+            ),
         ),
         [],
+        locally_rebound,
     )
 
 
@@ -918,6 +940,103 @@ def _exact_quote_spans(
         start = index + 1
     return spans
 
+
+def _stringify_scalar(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value).strip()
+
+
+def _locally_rebind_source_span(
+    *,
+    source_text: str,
+    predicate: str,
+    value: str,
+    value_type: str,
+    unit: str,
+) -> tuple[int, int] | None:
+    """Recover an exact span only from unique local lexical evidence."""
+
+    if not source_text or not predicate or not value:
+        return None
+    value_spans = _literal_value_spans(
+        source_text,
+        value,
+        value_type=value_type,
+    )
+    if not value_spans:
+        return None
+    predicate_tokens = _lexical_tokens(predicate)
+    if not predicate_tokens:
+        return None
+
+    qualified: list[tuple[int, int]] = []
+    for value_start, value_end in value_spans:
+        start, end = _structural_source_span(
+            source_text,
+            value_start,
+            value_end,
+        )
+        quote = source_text[start:end]
+        quote_tokens = set(_lexical_tokens(quote))
+        if not all(token in quote_tokens for token in predicate_tokens):
+            continue
+        if unit and unit.casefold() not in quote.casefold():
+            continue
+        qualified.append((start, end))
+    if len(qualified) != 1:
+        return None
+    return qualified[0]
+
+
+def _literal_value_spans(
+    source_text: str,
+    value: str,
+    *,
+    value_type: str,
+) -> list[tuple[int, int]]:
+    escaped = re.escape(value)
+    prefix = r"(?<![\w])" if value[0].isalnum() else ""
+    suffix = r"(?![\w])" if value[-1].isalnum() else ""
+    flags = re.IGNORECASE if value_type != "number" else 0
+    return [
+        (match.start(), match.end())
+        for match in re.finditer(
+            f"{prefix}{escaped}{suffix}",
+            source_text,
+            flags,
+        )
+    ]
+
+
+def _lexical_tokens(text: str) -> tuple[str, ...]:
+    normalized = re.sub(r"[_\-.]+", " ", str(text or "").casefold())
+    return tuple(
+        token
+        for token in re.findall(r"[^\W_]+", normalized, flags=re.UNICODE)
+        if token
+    )
+
+
+def _structural_source_span(
+    source_text: str,
+    value_start: int,
+    value_end: int,
+) -> tuple[int, int]:
+    boundaries = "\r\n;.!?。！？"
+    start = value_start
+    while start > 0 and source_text[start - 1] not in boundaries:
+        start -= 1
+    end = value_end
+    while end < len(source_text) and source_text[end] not in boundaries:
+        end += 1
+    while start < end and source_text[start].isspace():
+        start += 1
+    while end > start and source_text[end - 1].isspace():
+        end -= 1
+    return start, end
 
 def _response_field(
     response: Any,

@@ -39,6 +39,37 @@ class _SemanticClient:
         }
 
 
+class _SequenceSemanticClient:
+    def __init__(self, claim_batches: list[list[dict[str, object]]]) -> None:
+        self.claim_batches = list(claim_batches)
+        self.call_count = 0
+
+    def complete(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> dict[str, object]:
+        del system_prompt, user_prompt
+        self.call_count += 1
+        claims = self.claim_batches.pop(0)
+        return {
+            "content": json.dumps(
+                {
+                    "schema_version": (
+                        "agentlite.semantic-disambiguation.response.v1"
+                    ),
+                    "claims": claims,
+                }
+            ),
+            "usage": {
+                "prompt_tokens": 45,
+                "completion_tokens": 15,
+                "total_tokens": 60,
+            },
+            "model": "fixture-control-model",
+        }
+
 class StateToMemoryBridgeLiteTest(unittest.TestCase):
     def test_required_control_replaces_coarse_deterministic_candidate(self) -> None:
         source = (
@@ -91,6 +122,148 @@ class StateToMemoryBridgeLiteTest(unittest.TestCase):
             claim["source_span"]["quote"],
             "The flux remains 17 qx.",
         )
+
+    def test_later_source_revision_binds_unique_active_predecessor(
+        self,
+    ) -> None:
+        first_source = (
+            'A reading certifies: "The phase drift is -2.4 qx; '
+            'the latch flag is false."'
+        )
+        later_source = (
+            'A later reading certifies: "The phase drift is -1.8 qx, '
+            'replacing the former drift; the latch flag remains false."'
+        )
+        client = _SequenceSemanticClient(
+            [
+                [
+                    {
+                        "predicate": "phase_drift",
+                        "assertion_type": "observation",
+                        "operator": "eq",
+                        "value": "-2.4",
+                        "value_type": "number",
+                        "unit": "qx",
+                        "modality": "observed",
+                        "temporal_status": "current",
+                        "source_quote": "The phase drift is -2.4 qx",
+                        "confidence": 0.9,
+                    },
+                    {
+                        "predicate": "latch_flag",
+                        "value": False,
+                        "value_type": "boolean",
+                        "source_quote": "the latch flag is false",
+                        "confidence": 0.9,
+                    },
+                ],
+                [
+                    {
+                        "predicate": "phase_drift",
+                        "assertion_type": "observation",
+                        "operator": "eq",
+                        "value": "-1.8",
+                        "value_type": "number",
+                        "unit": "qx",
+                        "modality": "observed",
+                        "temporal_status": "current",
+                        "source_quote": (
+                            "The phase drift is -1.8 qx, replacing the "
+                            "former drift."
+                        ),
+                        "confidence": 0.9,
+                        "relations": [
+                            {
+                                "relation_type": "supersedes_value",
+                                "target_value": "former drift",
+                            }
+                        ],
+                    },
+                    {
+                        "predicate": "latch_flag",
+                        "value": False,
+                        "value_type": "boolean",
+                        "source_quote": "the latch flag remains false",
+                        "confidence": 0.9,
+                    },
+                    {
+                        "predicate": "phase_drift",
+                        "value": "-2.4",
+                        "value_type": "number",
+                        "unit": "qx",
+                        "source_quote": "fabricated former value",
+                    },
+                ],
+            ]
+        )
+        store = MemoryStoreLite()
+        bridge = StateToMemoryBridgeLite(
+            store,
+            semantic_disambiguator=ControlledSemanticDisambiguator(client),
+        )
+        common = {
+            "scope_id": "unseen-sequence",
+            "source_agent": "framework-user",
+            "task_topic": "unseen instrument record",
+            "tags": ["generic"],
+            "slot_hint": "source_evidence",
+            "reuse_intent": "reuse validated source evidence",
+            "disambiguation_policy": "control_required",
+        }
+
+        first_report, first_validation = bridge.promote(
+            task_id="revision-one",
+            fallback_summary=first_source,
+            source_state_ids=["state-one"],
+            evidence_refs=["state-one"],
+            **common,
+        )
+        second_report, second_validation = bridge.promote(
+            task_id="revision-two",
+            fallback_summary=later_source,
+            source_state_ids=["state-two"],
+            evidence_refs=["state-two"],
+            **common,
+        )
+
+        self.assertTrue(first_validation.allowed, first_validation.reasons)
+        self.assertTrue(second_validation.allowed, second_validation.reasons)
+        self.assertEqual(first_report.memory_write_count, 2)
+        self.assertEqual(second_report.deduplicated_claim_count, 1)
+        self.assertEqual(second_report.conflict_detected_count, 1)
+        self.assertEqual(second_report.resolved_conflict_count, 1)
+        self.assertEqual(
+            second_validation.disambiguation_locally_rebound_candidate_count,
+            1,
+        )
+        self.assertIn(
+            "claim_2:source_quote_not_found",
+            second_validation.disambiguation_diagnostics,
+        )
+
+        snapshot = store.snapshot()
+        drift_claims = [
+            claim
+            for claim in snapshot["claim_cards"]
+            if claim["raw_slot_text"] == "phase_drift"
+        ]
+        active = next(claim for claim in drift_claims if claim["status"] == "active")
+        historical = next(
+            claim for claim in drift_claims if claim["status"] == "superseded"
+        )
+        self.assertEqual(active["value"], "-1.8")
+        self.assertEqual(historical["value"], "-2.4")
+        self.assertEqual(
+            active["relations"][0]["target_candidate_id"],
+            historical["candidate_id"],
+        )
+        view = next(
+            item
+            for item in snapshot["memory_views"]
+            if item["slot_id"] == active["slot_id"]
+        )
+        self.assertEqual(view["active_claim_ids"], [active["claim_id"]])
+        self.assertIn(historical["claim_id"], view["historical_claim_ids"])
 
     def test_required_control_failure_cannot_fall_back_to_coarse_candidate(
         self,

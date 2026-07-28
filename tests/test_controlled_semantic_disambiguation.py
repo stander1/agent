@@ -265,6 +265,140 @@ class ControlledSemanticDisambiguationTest(unittest.TestCase):
             client.calls[0]["system_prompt"],
         )
 
+    def test_locally_rebinds_unique_scalar_and_preserves_false_value(
+        self,
+    ) -> None:
+        text = (
+            'A later reading certifies: "The phase drift is -1.8 qx, '
+            'replacing the former drift; the latch flag remains false."'
+        )
+        client = _FakeClient(
+            [
+                _response(
+                    [
+                        {
+                            "predicate": "phase_drift",
+                            "assertion_type": "observation",
+                            "operator": "eq",
+                            "value": -1.8,
+                            "value_type": "number",
+                            "unit": "qx",
+                            "modality": "observed",
+                            "temporal_status": "current",
+                            "source_quote": (
+                                "The phase drift is -1.8 qx, replacing the "
+                                "former drift."
+                            ),
+                            "confidence": 0.9,
+                            "relations": [
+                                {
+                                    "relation_type": "supersedes_value",
+                                    "target_value": "former drift",
+                                }
+                            ],
+                        },
+                        {
+                            "predicate": "latch_flag",
+                            "assertion_type": "fact",
+                            "operator": "eq",
+                            "value": False,
+                            "value_type": "boolean",
+                            "unit": "",
+                            "modality": "asserted",
+                            "temporal_status": "current",
+                            "source_quote": "the latch flag remains false",
+                            "confidence": 0.9,
+                            "relations": [],
+                        },
+                        {
+                            "predicate": "phase_drift",
+                            "value": "-2.4",
+                            "value_type": "number",
+                            "unit": "qx",
+                            "source_quote": "fabricated former drift",
+                        },
+                    ]
+                )
+            ]
+        )
+
+        result = ControlledSemanticDisambiguator(client).disambiguate(
+            _request(text, task_id="local-rebind")
+        )
+
+        self.assertTrue(result.accepted, result.reasons)
+        self.assertEqual(len(result.candidates), 2)
+        self.assertEqual(result.rejected_candidate_count, 1)
+        self.assertEqual(result.locally_rebound_candidate_count, 1)
+        self.assertIn("claim_2:source_quote_not_found", result.reasons)
+        scalar, flag = result.candidates
+        self.assertEqual(scalar["value"], "-1.8")
+        self.assertEqual(flag["value"], "false")
+        self.assertEqual(
+            scalar["schema_status"],
+            "llm_proposed_locally_rebound",
+        )
+        self.assertIn("replacing the former drift", scalar["source_span"]["quote"])
+        for candidate in result.candidates:
+            validation = CanonicalClaimSemanticValidator().validate(
+                candidate,
+                source_text=text,
+            )
+            self.assertTrue(validation.allowed, validation.reasons)
+
+    def test_preserves_numeric_zero_value(self) -> None:
+        text = "The cycle offset is 0 qx."
+        client = _FakeClient(
+            [
+                _response(
+                    [
+                        {
+                            "predicate": "cycle_offset",
+                            "value": 0,
+                            "value_type": "number",
+                            "unit": "qx",
+                            "source_quote": "The cycle offset is 0 qx",
+                        }
+                    ]
+                )
+            ]
+        )
+
+        result = ControlledSemanticDisambiguator(client).disambiguate(
+            _request(text, task_id="zero-value")
+        )
+
+        self.assertTrue(result.accepted, result.reasons)
+        self.assertEqual(result.candidates[0]["value"], "0")
+    def test_local_rebinding_rejects_ambiguous_value_anchors(self) -> None:
+        text = (
+            "The phase drift is -1.8 qx; "
+            "the backup phase drift is -1.8 qx."
+        )
+        client = _FakeClient(
+            [
+                _response(
+                    [
+                        {
+                            "predicate": "phase_drift",
+                            "value": "-1.8",
+                            "value_type": "number",
+                            "unit": "qx",
+                            "source_quote": "phase drift equals -1.8 qx",
+                        }
+                    ]
+                )
+            ]
+        )
+
+        result = ControlledSemanticDisambiguator(client).disambiguate(
+            _request(text, task_id="ambiguous-rebind")
+        )
+
+        self.assertFalse(result.accepted)
+        self.assertIn("claim_0:source_quote_not_found", result.reasons)
+        self.assertEqual(result.locally_rebound_candidate_count, 0)
+
     def test_rejects_repeated_quote_without_guessing_span(self) -> None:
         client = _FakeClient(
             [
