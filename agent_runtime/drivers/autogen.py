@@ -48,7 +48,10 @@ from agent_runtime.memory.claim_extractor import (
 )
 from agent_runtime.memory.memory_store import MemoryRef, MemoryStoreLite
 from agent_runtime.memory.semantic_disambiguator import (
+    ControlledSemanticDependencyAnalyzer,
     ControlledSemanticDisambiguator,
+    SemanticDependencyBudget,
+    SemanticDependencyRequest,
     SemanticDisambiguationBudget,
 )
 from agent_runtime.memory.context_views import (
@@ -134,9 +137,12 @@ SEMANTIC_DISAMBIGUATION_MAX_CANDIDATES_ENV = (
 SEMANTIC_DISAMBIGUATION_MAX_TOKENS_ENV = (
     "AGENTLITE_SEMANTIC_DISAMBIGUATION_MAX_CONTROL_TOKENS_PER_TASK"
 )
+SEMANTIC_DEPENDENCY_MAX_TOKENS_ENV = (
+    "AGENTLITE_SEMANTIC_DEPENDENCY_MAX_CONTROL_TOKENS_PER_TASK"
+)
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
 CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
-DRIVER_PHASE = "v5.14k"
+DRIVER_PHASE = "v5.15h"
 _AUTOGEN_REPEATED_INSTANCE_ID_RE = re.compile(
     r"^(?P<logical>.+)_(?P<run>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
     r"[0-9a-f]{4}-[0-9a-f]{12})_(?P=run)$",
@@ -500,6 +506,19 @@ class AutoGenHookManager:
             if self.semantic_disambiguation_enabled
             else None
         )
+        self.semantic_dependency_analyzer = (
+            ControlledSemanticDependencyAnalyzer(
+                semantic_disambiguator.client,
+                budget=SemanticDependencyBudget(
+                    max_control_tokens_per_task=_positive_int_env(
+                        SEMANTIC_DEPENDENCY_MAX_TOKENS_ENV,
+                        1_536,
+                    ),
+                ),
+            )
+            if semantic_disambiguator is not None
+            else None
+        )
         self.memory_scope_id = _resolve_memory_scope_id(context)
         self.studio_appdir = configured_studio_appdir()
         memory_store = (
@@ -551,6 +570,10 @@ class AutoGenHookManager:
         self._current_team_task_by_group: dict[str, str] = {}
         self._user_task_history_by_group: dict[str, list[str]] = {}
         self._team_task_sequence_by_group: dict[str, int] = {}
+        self._continuity_reasons_by_group_sequence: dict[
+            tuple[str, int],
+            tuple[str, ...],
+        ] = {}
         self._memory_injections_by_call: dict[str, list[_InjectedMemoryRecord]] = {}
         self._reliability_ledger = ReliabilityEventLedger()
         self._reliability_evidence_sources: dict[
@@ -778,6 +801,79 @@ class AutoGenHookManager:
             },
         )
         return memory_context
+
+    def _semantic_dependency_requirement_reasons(
+        self,
+        *,
+        task: TaskSpec,
+        current_text: str,
+        memory_context: MemoryContext,
+    ) -> tuple[str, ...]:
+        analyzer = self.semantic_dependency_analyzer
+        if analyzer is None or not current_text.strip() or not memory_context.refs:
+            return ()
+        memory_items = tuple(
+            {
+                "memory_id": str(getattr(ref, "memory_id", "") or ""),
+                "summary": str(prompt_view or "")[:1_500],
+            }
+            for ref, prompt_view in zip(
+                memory_context.refs,
+                memory_context.prompt_views,
+            )
+            if str(getattr(ref, "memory_id", "") or "")
+        )
+        if not memory_items:
+            return ()
+        result = analyzer.analyze(
+            SemanticDependencyRequest(
+                scope_id=task.group_id,
+                task_id=task.task_id,
+                current_text=current_text.strip(),
+                memory_items=memory_items,
+            )
+        )
+        if result.call_count:
+            self.metrics.record_control_llm(
+                task_id=task.task_id,
+                round_id=1,
+                mode="runtime_lite",
+                call_count=result.call_count,
+                prompt_tokens=result.prompt_tokens,
+                completion_tokens=result.completion_tokens,
+                total_tokens=result.total_tokens,
+                retry_count=result.retry_count,
+                latency_ms=result.latency_ms,
+            )
+        self.trace.write(
+            "autogen_semantic_dependency",
+            {
+                "task_id": task.task_id,
+                "group_id": task.group_id,
+                "status": result.status,
+                "required": result.required,
+                "selected_memory_ids": list(result.memory_ids),
+                "source_quote_fingerprint": (
+                    _text_fingerprint(result.source_quote)
+                    if result.source_quote
+                    else ""
+                ),
+                "confidence": result.confidence,
+                "reasons": list(result.reasons),
+                "call_count": result.call_count,
+                "prompt_tokens": result.prompt_tokens,
+                "completion_tokens": result.completion_tokens,
+                "total_tokens": result.total_tokens,
+                "usage_estimated": result.usage_estimated,
+                "model": result.model,
+                "latency_ms": result.latency_ms,
+                "retry_count": result.retry_count,
+                "memory_candidate_count": len(memory_items),
+            },
+        )
+        if result.accepted and result.required:
+            return ("semantic_dependency_required",)
+        return ()
 
     def _register_memory_injection(
         self,
@@ -2109,6 +2205,32 @@ class AutoGenHookManager:
             method_name=method_name,
             prompt=prompt,
         )
+        continuity_cache_key = (task.group_id, task_sequence_index)
+        if target_kind == "agentchat_team" and task_sequence_index:
+            if (
+                not continuity_context_reasons
+                and memory_context.refs
+                and task_sequence_index > 1
+            ):
+                continuity_context_reasons = (
+                    self._semantic_dependency_requirement_reasons(
+                        task=task,
+                        current_text=task_text or semantic_source_text,
+                        memory_context=memory_context,
+                    )
+                )
+            with self._memory_lock:
+                self._continuity_reasons_by_group_sequence[
+                    continuity_cache_key
+                ] = continuity_context_reasons
+        elif target_kind == "agentchat_agent" and not continuity_context_reasons:
+            with self._memory_lock:
+                continuity_context_reasons = (
+                    self._continuity_reasons_by_group_sequence.get(
+                        continuity_cache_key,
+                        (),
+                    )
+                )
         hook_context = HookCallContext(
             call_id=call_id,
             task=task,
@@ -8261,8 +8383,14 @@ def _structured_memory_adoption_evidence(
     matched_historical: list[tuple[dict[str, Any], dict[str, Any]]] = []
     excluded_current: list[dict[str, Any]] = []
     for fact in active_facts:
-        current_match = _matching_structured_claim(fact, task_claims)
-        output_match = _matching_structured_claim(fact, output_claims)
+        current_match = _matching_structured_claim(
+            fact,
+            task_claims,
+        ) or _matching_structured_fact_literal(fact, current_task_text)
+        output_match = _matching_structured_claim(
+            fact,
+            output_claims,
+        ) or _matching_structured_fact_literal(fact, output_text)
         if current_match is not None:
             excluded_current.append(fact)
             continue
@@ -8270,7 +8398,10 @@ def _structured_memory_adoption_evidence(
             matched_active.append((fact, output_match))
 
     for fact in historical_facts:
-        output_match = _matching_structured_claim(fact, output_claims)
+        output_match = _matching_structured_claim(
+            fact,
+            output_claims,
+        ) or _matching_structured_fact_literal(fact, output_text)
         if output_match is None or str(output_match.get("polarity")) == "negative":
             continue
         matched_historical.append((fact, output_match))
@@ -8440,6 +8571,50 @@ def _matching_structured_claim(
             continue
         return claim
     return None
+
+
+def _matching_structured_fact_literal(
+    fact: Mapping[str, Any],
+    text: str,
+) -> dict[str, Any] | None:
+    """Match a canonical value literally when no domain extractor recognizes it."""
+    raw_value = str(fact.get("value") or "").strip()
+    if not raw_value or not text.strip():
+        return None
+    value_type = str(fact.get("value_type") or "string").casefold()
+    unit = str(fact.get("unit") or "").strip()
+    normalized_text = _normalize_fact_text(text)
+    normalized_literal = _normalize_fact_text(raw_value)
+    if value_type in {"integer", "number", "float"}:
+        number_match = re.search(r"-?\d+(?:\.\d+)?", raw_value.replace(",", ""))
+        if number_match is None:
+            return None
+        number = number_match.group(0)
+        if re.search(
+            rf"(?<![\d.]){re.escape(number)}(?![\d.])",
+            text.replace(",", ""),
+        ) is None:
+            return None
+        if unit and _normalize_fact_text(unit) not in normalized_text:
+            return None
+    elif value_type == "boolean":
+        if normalized_literal not in {"true", "false"}:
+            return None
+        if re.search(
+            rf"(?<![0-9A-Za-z]){re.escape(normalized_literal)}"
+            rf"(?![0-9A-Za-z])",
+            text.casefold(),
+        ) is None:
+            return None
+    else:
+        if len(normalized_literal) < 4 or normalized_literal not in normalized_text:
+            return None
+    return {
+        "raw_text": raw_value,
+        "summary": raw_value,
+        "polarity": str(fact.get("polarity") or "positive"),
+        "match_mode": "canonical_value_literal",
+    }
 
 
 def _structured_fact_fingerprint(fact: Mapping[str, Any]) -> str:

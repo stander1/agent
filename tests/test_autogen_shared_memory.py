@@ -55,8 +55,30 @@ class FakeSourceSemanticClient:
         self.call_count = 0
 
     def complete(self, *, system_prompt: str, user_prompt: str):
-        del system_prompt, user_prompt
         self.call_count += 1
+        if "discourse-dependency classifier" in system_prompt:
+            request = json.loads(user_prompt)
+            return {
+                "content": json.dumps(
+                    {
+                        "schema_version": (
+                            "agentlite.semantic-dependency.response.v1"
+                        ),
+                        "required": True,
+                        "memory_ids": [
+                            request["memory_items"][0]["memory_id"]
+                        ],
+                        "source_quote": "preceding",
+                        "confidence": 0.93,
+                    }
+                ),
+                "usage": {
+                    "prompt_tokens": 30,
+                    "completion_tokens": 10,
+                    "total_tokens": 40,
+                },
+                "model": "fixture-control-model",
+            }
         return {
             "content": json.dumps(
                 {
@@ -180,7 +202,19 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                 )
 
                 self.assertEqual(len(follow_up.memory_context.refs), 1)
+                self.assertTrue(follow_up.continuity_context_required)
+                self.assertEqual(
+                    follow_up.continuity_context_reasons,
+                    ("semantic_dependency_required",),
+                )
                 events = self._events(manager.output_dir / "trace.jsonl")
+                dependency_event = next(
+                    item
+                    for item in events
+                    if item.get("event_type")
+                    == "autogen_semantic_dependency"
+                )
+                self.assertTrue(dependency_event["payload"]["required"])
                 source_event = next(
                     item
                     for item in events
@@ -376,6 +410,53 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
         self.assertEqual(mixed["status"], "mixed")
         self.assertEqual(wrong["matched_historical_fact_count"], 1)
         self.assertEqual(mixed["matched_historical_fact_count"], 1)
+
+    def test_structured_adoption_matches_open_canonical_value_without_domain_parser(
+        self,
+    ) -> None:
+        revision_guard = {
+            "schema_version": "ccf.v2.revision-guard.v1",
+            "semantic_key": "scope|slot.open.holdout|general|cross_task",
+            "subject": "subject:holdout",
+            "active_facts": [
+                {
+                    "slot_id": "slot.open.holdout",
+                    "scope": "general",
+                    "value": "quiescent phase zeta-17",
+                    "value_type": "string",
+                    "unit": "",
+                    "polarity": "positive",
+                }
+            ],
+            "historical_facts": [],
+        }
+        common = {
+            "memory_prompt_view": "quiescent phase zeta-17",
+            "injected_prompt_view": "quiescent phase zeta-17",
+            "memory_id": "mem-holdout",
+            "memory_view_id": "view-holdout",
+            "revision_guard": revision_guard,
+        }
+
+        useful = _memory_adoption_evidence(
+            current_task_text="Use the previously confirmed phase.",
+            output_text="The active record remains quiescent phase zeta-17.",
+            **common,
+        )
+        duplicate = _memory_adoption_evidence(
+            current_task_text="Use quiescent phase zeta-17.",
+            output_text="The active record remains quiescent phase zeta-17.",
+            **common,
+        )
+
+        self.assertEqual(useful["status"], "useful")
+        self.assertEqual(useful["matched_fact_count"], 1)
+        self.assertEqual(
+            useful["matched_active_output_spans"],
+            ["quiescent phase zeta-17"],
+        )
+        self.assertEqual(duplicate["status"], "unassessed")
+        self.assertEqual(duplicate["current_task_duplicate_fact_count"], 1)
 
     def test_negated_historical_value_is_not_counted_as_contamination(self) -> None:
         evidence = _memory_adoption_evidence(
