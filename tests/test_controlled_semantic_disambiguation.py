@@ -159,6 +159,15 @@ class ControlledSemanticDisambiguationTest(unittest.TestCase):
             '"unspecified"]',
             system_prompt,
         )
+        self.assertIn(
+            "Each claim may contain only predicate, assertion_type",
+            system_prompt,
+        )
+        self.assertIn("Do not output subject", system_prompt)
+        self.assertIn(
+            "do not rewrite them as booleans",
+            system_prompt,
+        )
 
     def test_rejects_quote_not_present_in_source(self) -> None:
         client = _FakeClient(
@@ -239,6 +248,31 @@ class ControlledSemanticDisambiguationTest(unittest.TestCase):
         self.assertIn(
             "control_response_has_unknown_top_level_fields",
             second.reasons,
+        )
+
+    def test_rejects_claim_fields_outside_protocol_contract(self) -> None:
+        client = _FakeClient(
+            [
+                _response(
+                    [
+                        {
+                            "subject": "provider-supplied subject",
+                            "predicate": "surface_state",
+                            "value": "stable",
+                            "source_quote": "surface remains stable",
+                        }
+                    ]
+                )
+            ]
+        )
+        result = ControlledSemanticDisambiguator(client).disambiguate(
+            _request("The surface remains stable.")
+        )
+
+        self.assertFalse(result.accepted)
+        self.assertIn(
+            "claim_0:proposal_has_unknown_fields",
+            result.reasons,
         )
 
     def test_call_budget_is_isolated_by_scope_and_task(self) -> None:

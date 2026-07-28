@@ -5530,3 +5530,15 @@ Schema 值并被严格验证器拒绝。
 引文。验证器仍严格失败关闭，不新增同义词猜测、领域词典或直接准入路径。
 
 详细说明见 `docs/planning/v5.15d-control-protocol-contract.md`。
+
+## 94. v5.15e：Claim 字段闭集契约
+
+v5.15e 继续依据真实 Provider 失败证据补全通用协议。模型已遵循 v5.15d 枚举，
+但统一增加本地解析器不允许的 `subject` 字段，并曾把引文中的描述性值改写为
+布尔值。
+
+控制提示现在发布完整 Claim 字段白名单，明确禁止 scope、task/source 标识和
+记忆指令，并要求值与单位保留精确引文中的字面语义。生产解析器没有放宽，
+未知字段和无证据改写仍失败关闭。
+
+详细说明见 `docs/planning/v5.15e-closed-claim-field-contract.md`。
