@@ -46,7 +46,11 @@ from agent_runtime.memory.claim_extractor import (
     extract_claim_cards,
     normalized_value,
 )
-from agent_runtime.memory.memory_store import MemoryRef, MemoryStoreLite
+from agent_runtime.memory.memory_store import (
+    MemoryRef,
+    MemoryStoreLite,
+    classify_memory_quality_envelope,
+)
 from agent_runtime.memory.semantic_disambiguator import (
     ControlledSemanticDependencyAnalyzer,
     ControlledSemanticDisambiguator,
@@ -142,7 +146,7 @@ SEMANTIC_DEPENDENCY_MAX_TOKENS_ENV = (
 )
 BROADCAST_MODES = ("shadow-only", "dry-run-rewrite", "real-rewrite")
 CORE_RECEIVER_HYDRATE_MODES = ("off", "prompt-view")
-DRIVER_PHASE = "v5.15i"
+DRIVER_PHASE = "v5.15j"
 _AUTOGEN_REPEATED_INSTANCE_ID_RE = re.compile(
     r"^(?P<logical>.+)_(?P<run>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
     r"[0-9a-f]{4}-[0-9a-f]{12})_(?P=run)$",
@@ -1870,6 +1874,16 @@ class AutoGenHookManager:
         else:
             return None
 
+        quality_status, _ = classify_memory_quality_envelope(
+            confidence=confidence,
+            importance_hint=importance,
+            coverage_score=coverage,
+        )
+        disambiguation_policy = (
+            "fallback"
+            if quality_status == "admitted"
+            else "rules_only"
+        )
         summary = (
             _decision_preserving_summary(memory_source_text, limit=900)
             if candidate_kind == "autogen_team_final"
@@ -1903,6 +1917,7 @@ class AutoGenHookManager:
                     confidence=confidence,
                     importance_hint=importance,
                     coverage_score=coverage,
+                    disambiguation_policy=disambiguation_policy,
                 ),
             )
             self._write_pool_snapshot(context.task)
@@ -1914,6 +1929,8 @@ class AutoGenHookManager:
                     "task_id": context.task.task_id,
                     "agent_id": context.agent.agent_id,
                     "candidate_kind": candidate_kind,
+                    "quality_envelope_status": quality_status,
+                    "disambiguation_policy": disambiguation_policy,
                     "candidate_id": getattr(report, "candidate_id", ""),
                     "admission_status": getattr(report, "admission_status", ""),
                     "admission_reasons": getattr(report, "admission_reasons", []),

@@ -16,7 +16,11 @@ from agent_runtime.memory.semantic_disambiguator import (
     SemanticDisambiguator,
 )
 
-DISAMBIGUATION_POLICIES = {"fallback", "control_required"}
+DISAMBIGUATION_POLICIES = {
+    "rules_only",
+    "fallback",
+    "control_required",
+}
 
 
 @dataclass(slots=True)
@@ -350,10 +354,13 @@ class StateToMemoryBridgeLite:
             candidate.claim_cards = []
             candidate.canonical_claim_candidates = []
         disambiguation_required = (
-            disambiguation_policy == "control_required"
-            or (
-                not candidate.claim_cards
-                and not candidate.canonical_claim_candidates
+            disambiguation_policy != "rules_only"
+            and (
+                disambiguation_policy == "control_required"
+                or (
+                    not candidate.claim_cards
+                    and not candidate.canonical_claim_candidates
+                )
             )
         )
         if disambiguation_required and self.semantic_disambiguator is None:

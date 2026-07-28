@@ -226,6 +226,84 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                     "admitted",
                 )
 
+    def test_low_authority_intermediate_uses_rules_only_control_policy(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            client = FakeSourceSemanticClient()
+            disambiguator = ControlledSemanticDisambiguator(client)
+            env = {
+                "AGENTLITE_AUTOGEN_BROADCAST_MODE": "real-rewrite",
+                "AGENTLITE_AUTOGEN_SHARED_MEMORY": "1",
+                "AGENTLITE_AUTOGEN_SEMANTIC_DISAMBIGUATION": "1",
+                "AGENTLITE_MEMORY_SCOPE": "quality-gated-control-test",
+            }
+            with (
+                patch.dict("os.environ", env, clear=False),
+                patch(
+                    "agent_runtime.drivers.autogen."
+                    "_build_semantic_disambiguator_from_env",
+                    return_value=disambiguator,
+                ),
+            ):
+                manager = AutoGenHookManager(
+                    self._context(root, "launch_quality_gate")
+                )
+                context = manager.record_call_start(
+                    instance=SimpleNamespace(
+                        name="arbitrary_synthesizer",
+                    ),
+                    method_name="on_messages",
+                    target_kind="agentchat_agent",
+                    args=(
+                        [
+                            FakeTextMessage(
+                                "Summarize the intermediate observation.",
+                                "user",
+                            )
+                        ],
+                    ),
+                    kwargs={},
+                )
+
+                manager.record_call_end(
+                    context,
+                    FakeTextMessage(
+                        "The unseen state remains quiescent.",
+                        "arbitrary_synthesizer",
+                    ),
+                )
+
+                self.assertEqual(client.call_count, 0)
+                events = self._events(manager.output_dir / "trace.jsonl")
+                candidate = next(
+                    item
+                    for item in reversed(events)
+                    if item.get("event_type") == "autogen_memory_candidate"
+                )
+                self.assertEqual(
+                    candidate["payload"]["quality_envelope_status"],
+                    "pending",
+                )
+                self.assertEqual(
+                    candidate["payload"]["disambiguation_policy"],
+                    "rules_only",
+                )
+                bridge = next(
+                    item
+                    for item in reversed(events)
+                    if item.get("event_type") == "state_memory_bridge"
+                )
+                self.assertEqual(
+                    bridge["payload"]["semantic_disambiguation"]["policy"],
+                    "rules_only",
+                )
+                self.assertEqual(
+                    bridge["payload"]["semantic_disambiguation"]["call_count"],
+                    0,
+                )
+
     def test_autogen_routing_metadata_is_not_business_state(self) -> None:
         routing = (
             "082e0b93-0bc3-4863-a8b1-3e4c7cf51d50: "

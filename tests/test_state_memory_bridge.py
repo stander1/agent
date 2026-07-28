@@ -209,6 +209,51 @@ class StateToMemoryBridgeLiteTest(unittest.TestCase):
         self.assertEqual(validation.disambiguation_status, "not_requested")
         self.assertEqual(report.admission_status, "admitted")
 
+    def test_rules_only_retains_low_authority_candidate_without_control_cost(
+        self,
+    ) -> None:
+        client = _SemanticClient(
+            [
+                {
+                    "predicate": "unseen_state",
+                    "value": "quiescent",
+                    "source_quote": "The unseen state remains quiescent.",
+                }
+            ]
+        )
+        bridge = StateToMemoryBridgeLite(
+            MemoryStoreLite(),
+            semantic_disambiguator=ControlledSemanticDisambiguator(client),
+        )
+
+        report, validation = bridge.promote(
+            task_id="rules-only-one",
+            scope_id="scope-isolated",
+            source_agent="arbitrary-intermediate",
+            task_topic="unseen process",
+            fallback_summary="The unseen state remains quiescent.",
+            tags=["generic"],
+            slot_hint="reuse_strategy",
+            source_state_ids=["state-rules-only"],
+            evidence_refs=["state-rules-only"],
+            reuse_intent="retain as a candidate pending authority",
+            control={
+                "memory_card": {
+                    "confidence": 0.5,
+                    "importance_hint": 0.4,
+                    "coverage_score": 0.6,
+                }
+            },
+            disambiguation_policy="rules_only",
+        )
+
+        self.assertEqual(client.call_count, 0)
+        self.assertTrue(validation.allowed, validation.reasons)
+        self.assertEqual(validation.disambiguation_policy, "rules_only")
+        self.assertEqual(validation.disambiguation_status, "not_requested")
+        self.assertEqual(report.admission_status, "pending")
+        self.assertEqual(report.memory_write_count, 0)
+
     def test_failed_disambiguation_remains_audit_only(self) -> None:
         client = _SemanticClient(
             [

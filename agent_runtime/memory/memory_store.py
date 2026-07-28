@@ -122,6 +122,32 @@ BLOCKED_MEMORY_STATUSES = {
 MEMORY_LIFECYCLE_STATUSES = PROMPT_VIEW_MEMORY_STATUSES | DORMANT_MEMORY_STATUSES | BLOCKED_MEMORY_STATUSES
 
 
+def classify_memory_quality_envelope(
+    *,
+    confidence: float,
+    importance_hint: float,
+    coverage_score: float,
+    compression_loss_risk: str = "medium",
+    raw_required_hint: bool = False,
+) -> tuple[str, tuple[str, ...]]:
+    """Classify quality independently of slot resolution and source structure."""
+
+    if float(confidence) < 0.35:
+        return "rejected", ("confidence_below_rejection_threshold",)
+    if raw_required_hint and str(compression_loss_risk) == "high":
+        return "audit_only", ("high_loss_raw_required",)
+    reasons: list[str] = []
+    if float(confidence) < 0.55:
+        reasons.append("confidence_below_admission_threshold")
+    if float(importance_hint) < 0.45:
+        reasons.append("importance_below_admission_threshold")
+    if float(coverage_score) < 0.35:
+        reasons.append("coverage_below_admission_threshold")
+    if reasons:
+        return "pending", tuple(reasons)
+    return "admitted", ("rules_admitted",)
+
+
 @dataclass(slots=True)
 class MemoryRef:
     memory_id: str
@@ -2739,24 +2765,18 @@ class MemoryStoreLite:
     def _admit_candidate(
         self, candidate: MemoryCandidate, resolved: SlotResolution
     ) -> tuple[str, list[str]]:
-        reasons: list[str] = []
         if resolved.unresolved:
             return "unresolved_slot", ["slot_unresolved"]
         if not candidate.summary:
             return "rejected", ["empty_summary"]
-        if candidate.confidence < 0.35:
-            return "rejected", ["confidence_below_rejection_threshold"]
-        if candidate.raw_required_hint and candidate.compression_loss_risk == "high":
-            return "audit_only", ["high_loss_raw_required"]
-        if candidate.confidence < 0.55:
-            reasons.append("confidence_below_admission_threshold")
-        if candidate.importance_hint < 0.45:
-            reasons.append("importance_below_admission_threshold")
-        if candidate.coverage_score < 0.35:
-            reasons.append("coverage_below_admission_threshold")
-        if reasons:
-            return "pending", reasons
-        return "admitted", ["rules_admitted"]
+        status, reasons = classify_memory_quality_envelope(
+            confidence=candidate.confidence,
+            importance_hint=candidate.importance_hint,
+            coverage_score=candidate.coverage_score,
+            compression_loss_risk=candidate.compression_loss_risk,
+            raw_required_hint=candidate.raw_required_hint,
+        )
+        return status, list(reasons)
 
     def _resolve_slot(self, slot_hint: str) -> SlotResolution:
         resolved = self.schema_registry.resolve(slot_hint)
