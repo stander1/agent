@@ -122,7 +122,11 @@ def evaluate(
             }
             guard_events.append(record)
             if (
-                record["status"] != "blocked_and_deferred"
+                record["status"]
+                not in {
+                    "blocked_and_deferred",
+                    "blocked_with_explicit_fallback",
+                }
                 or not record["unavailable_artifacts"]
                 or not record["fallback_value"]
                 or not (

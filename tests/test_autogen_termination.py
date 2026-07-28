@@ -430,6 +430,37 @@ class ReviewerFinalTextTerminationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resolved.origin_source, "specialist")
         self.assertEqual(resolved.resolution_kind, "prior_artifact_approved")
 
+    async def test_terminal_approval_promotes_latest_artifact_after_old_rejections(
+        self,
+    ) -> None:
+        artifact = (
+            "## Complete implementation report\n\n"
+            "The report contains scope, evidence, risks, owners, mitigations, "
+            "and executable acceptance criteria."
+        )
+        resolved = resolve_final_artifact(
+            [
+                TextMessage(content=artifact, source="DomainAgent17"),
+                TextMessage(
+                    content=(
+                        "## Review history\n"
+                        "The first submitted draft failed and required revision. "
+                        "The second submitted draft also needed repair.\n"
+                        "## Final acceptance\n"
+                        "The latest DomainAgent17 submitted artifact is "
+                        f"validated and approved as the final delivery.\n{MARKER}"
+                    ),
+                    source="reviewer",
+                ),
+            ],
+            marker=MARKER,
+            reviewer_source="reviewer",
+        )
+
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved.origin_source, "DomainAgent17")
+        self.assertEqual(resolved.resolution_kind, "prior_artifact_approved")
+
     async def test_long_reviewer_acceptance_promotes_arbitrary_prior_agent(self) -> None:
         artifact = (
             "## Complete evidence artifact\n\n"

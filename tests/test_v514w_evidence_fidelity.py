@@ -121,6 +121,8 @@ class EvidenceFidelityAcceptanceTest(unittest.TestCase):
             self.assertIn("policy_rules.md", rule)
             self.assertIn("needs_more_evidence", rule)
             self.assertNotIn("approved_release", rule)
+            self.assertIn("complete evidence-insufficient deliverable", rule)
+            self.assertIn("resulting uncertainty", rule)
 
 
 if __name__ == "__main__":

@@ -5374,3 +5374,36 @@ Native、Observed、Managed 三组正式对照。任务、能力型 Agent 配置
 生产运行时加入 Question A/B、业务实体、固定结论或固定 Agent 名称特判。
 详细说明见
 `docs/experiments/v5.14x-evidence-fidelity-formal-regression.md`。
+
+## 88. v5.14y：活跃事实准入与终态交付治理
+
+v5.14y 根据 v5.14x 的真实失败证据，修复四类通用根因：预算分项、余量和
+说明序号被误晋升为全局预算上限；历史决策日志污染当前事实与数值校验；
+长审查中早期拒绝掩盖末尾对最新成果的明确批准；必需证据缺失时守卫仅输出
+“继续处理”指令而不是可交付的保守结果。
+
+实现映射：
+
+- `agent_runtime/memory/claim_extractor.py`：采用证据充分才准入的预算分面
+  分类，清理实体值尾随标题，并从活跃 Claim View 中隔离历史日志；
+- `agent_runtime/reliability/final_delivery_guard.py`：继承历史区段上下文，
+  同时保留对后续明确当前结果的硬约束校验；按最后批准与最后修订的顺序
+  判断终态审批；
+- `agent_runtime/drivers/autogen.py`：必需证据守卫生成包含回退值、缺失
+  证据、不确定性和允许下一步的 `degraded_fallback`，不再向下游发送
+  纯纠正指令；
+- `web_monitor/parser.py`：兼容统计旧的延后状态和新的显式回退状态；
+- `experiments/v5.14y-active-fact-terminal-delivery/`：在 openEuler 上运行
+  AutoGen 接管回归、机制验收、编译检查和不可变证据归档。
+
+通用边界：
+
+```text
+不识别 Question A/B、业务实体、固定结论和固定 Agent 名称；
+歧义数值宁可不进入活跃事实，也不默认成为全局上限；
+历史内容仍保存在原始 artifact_state 中，只是不作为当前活跃 Claim；
+显式回退不会伪装成 schema_valid=true，仍只允许补证或重试。
+```
+
+详细说明见
+`docs/experiments/v5.14y-active-fact-terminal-delivery.md`。

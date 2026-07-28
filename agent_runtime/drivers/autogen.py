@@ -867,22 +867,9 @@ class AutoGenHookManager:
         if not assessment["blocked"]:
             return result
 
-        fallback_value = str(assessment["fallback_value"])
-        unavailable = ", ".join(assessment["unavailable_artifacts"])
-        correction = "\n".join(
-            (
-                "Required-evidence correction.",
-                (
-                    "The current task depends on evidence that is not "
-                    f"available in the supplied context or workspace: {unavailable}."
-                ),
-                "Do not claim that unavailable evidence was read or verified.",
-                (
-                    "Use the user's explicit evidence-insufficient fallback: "
-                    f"{fallback_value}."
-                ),
-                "Continue from the current task using admitted evidence only.",
-            )
+        correction = _required_evidence_fallback_artifact(
+            fallback_value=str(assessment["fallback_value"]),
+            unavailable_artifacts=assessment["unavailable_artifacts"],
         )
         guarded_result = _clone_memory_guard_result(result, correction)
         if guarded_result is None:
@@ -901,7 +888,7 @@ class AutoGenHookManager:
                 "role": context.agent.role,
                 "target_kind": context.target_kind,
                 "method": context.method_name,
-                "status": "blocked_and_deferred",
+                "status": "blocked_with_explicit_fallback",
                 **assessment,
                 "original_output_fingerprint": output_fingerprint,
                 "guarded_output_fingerprint": _text_fingerprint(correction),
@@ -8300,6 +8287,16 @@ def _required_evidence_prompt_rule(
                 "Follow the user's explicit evidence-insufficient fallback: "
                 f"{contract['fallback_value']}."
             ),
+            (
+                "Produce a complete evidence-insufficient deliverable now. "
+                "Do not merely request the artifact, delegate the correction, "
+                "or describe what a later agent should do."
+            ),
+            (
+                "The deliverable must state the fallback decision, list the "
+                "missing artifact, distinguish unavailable from verified "
+                "evidence, and state the resulting uncertainty."
+            ),
         )
     )
 
@@ -8370,6 +8367,47 @@ def _required_evidence_assessment(
             dict.fromkeys(conflicting_values)
         ),
     }
+
+
+def _required_evidence_fallback_artifact(
+    *,
+    fallback_value: str,
+    unavailable_artifacts: Iterable[str],
+) -> str:
+    artifacts = [
+        str(item).strip()
+        for item in unavailable_artifacts
+        if str(item).strip()
+    ]
+    evidence_rows = "\n".join(
+        f"- `{artifact}`: unavailable; no dependent claim was verified."
+        for artifact in artifacts
+    )
+    return "\n".join(
+        (
+            "## Evidence-insufficient result",
+            "",
+            f"- Decision: `{fallback_value}`",
+            "- Contract status: `degraded_fallback`",
+            "- Schema valid: `false`",
+            "",
+            "### Evidence assessment",
+            evidence_rows or "- Required evidence: unavailable.",
+            "",
+            "### Uncertainty",
+            (
+                "The task-required evidence was not supplied in the current "
+                "context or workspace. Evidence-dependent classifications, "
+                "attributions, and factual conclusions remain unverified."
+            ),
+            "",
+            "### Allowed next step",
+            (
+                "Provide the missing artifact or an equivalent traceable "
+                "source, then retry the evidence-dependent analysis."
+            ),
+        )
+    )
 
 
 def _current_task_identity_assessment(

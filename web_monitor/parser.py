@@ -1033,7 +1033,10 @@ def _autogen_token_summary(trace_events: list[dict[str, Any]]) -> dict[str, Any]
             continue
         if event_type == "autogen_required_evidence_guard":
             breakdown["required_evidence_guard_event_count"] += 1
-            if str(payload.get("status") or "") == "blocked_and_deferred":
+            if str(payload.get("status") or "") in {
+                "blocked_and_deferred",
+                "blocked_with_explicit_fallback",
+            }:
                 breakdown["required_evidence_guard_blocked_count"] += 1
             continue
         if event_type in shadow_event_types:

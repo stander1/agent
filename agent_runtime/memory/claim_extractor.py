@@ -62,6 +62,27 @@ _EXPLICIT_DECISION_RE = re.compile(
     r"[\u3400-\u4dbf\u4e00-\u9fff][^，。；;!?\n]{0,79})",
     re.IGNORECASE,
 )
+_CLAIM_SECTION_HEADING_RE = re.compile(
+    r"^\s*(?:#{1,6}\s+|[一二三四五六七八九十百]+[、.．]\s*)"
+)
+_CLAIM_HISTORY_HEADING_RE = re.compile(
+    r"(?i)(?:决策日志|变更日志|修订记录|版本记录|历史记录|"
+    r"decision\s+log|change\s+log|revision\s+(?:log|history)|history)"
+)
+_CLAIM_PLAIN_HISTORY_HEADING_RE = re.compile(
+    r"(?i)^\s*[*_`]*\s*(?:决策日志|变更日志|修订记录|版本记录|历史记录|"
+    r"decision\s+log|change\s+log|revision\s+(?:log|history)|history)"
+    r"\s*[*_`]*\s*[:：]?\s*$"
+)
+_CLAIM_STAGE_TRANSITION_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])"
+    r"[A-Za-z][A-Za-z0-9_.-]*\d+\s*(?:->|=>|→)\s*"
+    r"[A-Za-z][A-Za-z0-9_.-]*\d+(?![A-Za-z0-9_])"
+)
+_CLAIM_CURRENT_RESULT_RE = re.compile(
+    r"(?i)^\s*(?:(?:当前|最终|现行|最新)|"
+    r"(?:current|final|active|latest)\b)"
+)
 
 
 def normalize_claim_cards(
@@ -131,8 +152,9 @@ def extract_claim_cards(
     source_pointer: str = "",
     default_confidence: float = 0.78,
 ) -> list[dict[str, Any]]:
+    active_text = _active_claim_text(text)
     claims: list[ExtractedClaim] = _extract_budget_table_claims(
-        text,
+        active_text,
         subject=subject,
         source_pointer=source_pointer,
         confidence=min(0.98, default_confidence + 0.06),
@@ -140,7 +162,7 @@ def extract_claim_cards(
     sentence_source = re.sub(
         r"(?<=\d),(?=\d{3}(?:\D|$))",
         "",
-        str(text or ""),
+        active_text,
     )
     for raw_sentence in _sentences(sentence_source):
         sentence = _clean_markup(raw_sentence)
@@ -187,6 +209,34 @@ def extract_claim_cards(
         )
 
     return _dedupe_claims(item.to_dict() for item in claims)
+
+
+def _active_claim_text(text: str) -> str:
+    active_lines: list[str] = []
+    historical_section = False
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if _CLAIM_SECTION_HEADING_RE.search(stripped):
+            historical_section = bool(
+                _CLAIM_HISTORY_HEADING_RE.search(stripped)
+            )
+            if historical_section:
+                continue
+        elif _CLAIM_PLAIN_HISTORY_HEADING_RE.search(stripped):
+            historical_section = True
+            continue
+        if (
+            historical_section
+            and _CLAIM_CURRENT_RESULT_RE.search(stripped)
+            and not _CLAIM_STAGE_TRANSITION_RE.search(stripped)
+        ):
+            historical_section = False
+        if historical_section:
+            continue
+        if _CLAIM_STAGE_TRANSITION_RE.search(stripped):
+            continue
+        active_lines.append(line)
+    return "\n".join(active_lines)
 
 
 def _extract_explicit_decision_claims(
@@ -460,12 +510,14 @@ def _extract_known_claims(
 
     destination_match = re.search(
         r"(?:最终目的地|选定目的地|目的地(?:选择)?|destination)"
-        r"\s*(?:为|是|=|:|：)\s*([A-Za-z\u3400-\u9fff·\-\s]{2,30})",
+        r"\s*(?:为|是|=|:|：)\s*([A-Za-z\u3400-\u9fff·\-\s]{2,80})",
         sentence,
         re.IGNORECASE,
     )
     if destination_match:
-        value = destination_match.group(1).strip(" ，,。.;；")
+        value = _clean_destination_value(destination_match.group(1))
+        if not value:
+            return rows
         rows.append(
             _claim(
                 subject,
@@ -503,7 +555,17 @@ def _extract_assignments(
         sentence,
     ):
         key = match.group(1).lower().replace("-", "_")
-        if key in {"http", "https", "evidence_id", "sha256"}:
+        if key in {
+            "http",
+            "https",
+            "evidence_id",
+            "sha256",
+            "budget",
+            "total_budget",
+            "budget_cap",
+            "destination",
+            "selected_destination",
+        }:
             continue
         value = match.group(2).rstrip(".,;:!?")
         if not value:
@@ -634,6 +696,18 @@ def _clean_decision_value(value: str) -> str:
     return cleaned[:80].rstrip("，,。.;；:：")
 
 
+def _clean_destination_value(value: str) -> str:
+    cleaned = str(value or "").strip(" \t\r\n`*_\"'，,。.;；:：")
+    cleaned = re.split(
+        r"\s*(?:选择理由|推荐理由|入选理由|理由|原因|"
+        r"selection\s+(?:reason|rationale)|reasons?)\s*[:：]?",
+        cleaned,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0].strip()
+    return cleaned[:80].rstrip("，,。.;；:：")
+
+
 def _polarity(text: str) -> str:
     return "negative" if _NEGATION_RE.search(text) else "positive"
 
@@ -678,7 +752,9 @@ def _currency_unit(text: str) -> str:
     return ""
 
 
-def _budget_claim_shape(sentence: str) -> tuple[str, str, str]:
+def _budget_claim_shape(
+    sentence: str,
+) -> tuple[str, str, str] | None:
     lowered = sentence.casefold()
     if re.search(
         r"(?:上限|红线|不(?:得|可|能)?超过|至多|最多|"
@@ -689,11 +765,25 @@ def _budget_claim_shape(sentence: str) -> tuple[str, str, str]:
         return "constraint.budget_upper_bound", "budget_upper_bound", "requirement"
 
     if re.search(
-        r"(?:总预算|整体预算|项目预算|\btotal\s+budget\b)",
+        r"(?:基础预算|初步预算|预估预算|总预算|整体预算|项目预算|"
+        r"\b(?:base|initial|estimated|total|overall|project)\s+budget\b)",
         sentence,
         re.IGNORECASE,
     ):
         return "estimate.budget_total", "budget_total", "estimate"
+
+    if re.search(
+        r"(?:预算余量|预算余额|预算余款|预算缓冲|预算弹性空间|"
+        r"应急(?:金|预算)|预留(?:金额|预算)?|"
+        r"\b(?:budget\s+)?(?:reserve|buffer|headroom|contingency)\b)",
+        sentence,
+        re.IGNORECASE,
+    ):
+        return (
+            "allocation.budget.reserve",
+            "budget_reserve",
+            "allocation",
+        )
 
     component_match = re.search(
         r"(?P<label>[A-Za-z\u3400-\u4dbf\u4e00-\u9fff]"
@@ -730,7 +820,15 @@ def _budget_claim_shape(sentence: str) -> tuple[str, str, str]:
         re.IGNORECASE,
     ):
         return "estimate.budget_total", "budget_total", "estimate"
-    return "constraint.budget_upper_bound", "budget_upper_bound", "requirement"
+
+    if re.search(
+        r"(?:^|[，,。；;:：])(?:当前|本次|已确认)?\s*预算"
+        r"\s*(?:为|是|=|:|：)",
+        sentence,
+        re.IGNORECASE,
+    ):
+        return "constraint.budget_upper_bound", "budget_upper_bound", "requirement"
+    return None
 
 
 def _extract_budget_claim_specs(
@@ -760,9 +858,16 @@ def _extract_budget_claim_specs(
         re.IGNORECASE,
     )
     estimate_cue = re.compile(
-        r"(?:预计|估算|测算|原方案|当前方案|预算总和|总预算|"
+        r"(?:预计|估算|测算|原方案|当前方案|基础预算|初步预算|"
+        r"预估预算|预算总和|总预算|"
         r"总费用|总金额|合计|\b(?:estimate|estimated|total\s+budget|"
         r"total\s+cost)\b)",
+        re.IGNORECASE,
+    )
+    reserve_cue = re.compile(
+        r"(?:预算余量|预算余额|预算余款|预算缓冲|预算弹性空间|"
+        r"应急(?:金|预算)|预留(?:金额|预算)?|"
+        r"\b(?:budget\s+)?(?:reserve|buffer|headroom|contingency)\b)",
         re.IGNORECASE,
     )
     revision_transition = re.search(
@@ -809,7 +914,10 @@ def _extract_budget_claim_specs(
         if fallback is None:
             return []
         value, unit = fallback
-        scope, label, modality = _budget_claim_shape(sentence)
+        shape = _budget_claim_shape(sentence)
+        if shape is None:
+            return []
+        scope, label, modality = shape
         return [(value, unit, scope, label, modality)]
 
     revision_target_start = -1
@@ -836,7 +944,7 @@ def _extract_budget_claim_specs(
         clause_end = min(clause_end_candidates) if clause_end_candidates else len(sentence)
         local_clause = sentence[clause_start:clause_end]
         local_before = sentence[max(clause_start, match.start() - 48) : match.start()]
-        local_after = sentence[match.end() : min(clause_end, match.end() + 6)]
+        local_after = sentence[match.end() : min(clause_end, match.end() + 16)]
         local_window = f"{local_before}{match.group(0)}{local_after}"
         if not budget_cue.search(local_clause) and not upper_cue.search(local_clause):
             continue
@@ -849,13 +957,49 @@ def _extract_budget_claim_specs(
         ):
             continue
 
-        if upper_cue.search(local_window):
+        amount_start = len(local_before)
+        amount_end = amount_start + len(match.group(0))
+        cue_candidates = [
+            (
+                _cue_distance(
+                    pattern,
+                    local_window,
+                    amount_start=amount_start,
+                    amount_end=amount_end,
+                ),
+                priority,
+                kind,
+            )
+            for priority, (kind, pattern) in enumerate(
+                (
+                    ("upper", upper_cue),
+                    ("reserve", reserve_cue),
+                    ("estimate", estimate_cue),
+                )
+            )
+        ]
+        nearest_kind = min(
+            (
+                item
+                for item in cue_candidates
+                if item[0] is not None
+            ),
+            default=(None, 99, ""),
+        )[2]
+
+        if nearest_kind == "upper":
             scope, label, modality = (
                 "constraint.budget_upper_bound",
                 "budget_upper_bound",
                 "requirement",
             )
-        elif estimate_cue.search(local_window):
+        elif nearest_kind == "reserve":
+            scope, label, modality = (
+                "allocation.budget.reserve",
+                "budget_reserve",
+                "allocation",
+            )
+        elif nearest_kind == "estimate":
             scope, label, modality = (
                 "estimate.budget_total",
                 "budget_total",
@@ -870,6 +1014,18 @@ def _extract_budget_claim_specs(
                 re.IGNORECASE,
             )
             component_label = component.group("label").strip() if component else ""
+            if not component_label:
+                parenthetical_component = re.search(
+                    r"(?:^|[，,、；;:：])"
+                    r"(?P<label>[^，,、；;:：()（）]{1,24})"
+                    r"\s*[（(]?\s*$",
+                    local_before,
+                    re.IGNORECASE,
+                )
+                if parenthetical_component:
+                    component_label = _clean_budget_component_label(
+                        parenthetical_component.group("label")
+                    )
             if component_label and component_label.casefold() not in {
                 "总",
                 "总计",
@@ -887,6 +1043,14 @@ def _extract_budget_claim_specs(
                     "allocation",
                 )
             else:
+                bare_budget = re.search(
+                    r"(?:^|[，,。；;:：])(?:当前|本次|已确认)?\s*"
+                    r"预算\s*(?:为|是|=|:|：)\s*$",
+                    local_before,
+                    re.IGNORECASE,
+                )
+                if not bare_budget:
+                    continue
                 scope, label, modality = (
                     "constraint.budget_upper_bound",
                     "budget_upper_bound",
@@ -901,6 +1065,35 @@ def _extract_budget_claim_specs(
     for row in extracted:
         unique[(row[2], normalized_value(row[0], "number", row[1]))] = row
     return list(unique.values())
+
+
+def _cue_distance(
+    pattern: re.Pattern[str],
+    text: str,
+    *,
+    amount_start: int,
+    amount_end: int,
+) -> int | None:
+    distances: list[int] = []
+    for cue in pattern.finditer(text):
+        if cue.end() <= amount_start:
+            distances.append(amount_start - cue.end())
+        elif cue.start() >= amount_end:
+            distances.append(cue.start() - amount_end)
+        else:
+            distances.append(0)
+    return min(distances) if distances else None
+
+
+def _clean_budget_component_label(value: str) -> str:
+    cleaned = str(value or "").strip(" \t\r\n`*_\"'，,。.;；:：")
+    cleaned = re.sub(
+        r"^(?:保留项|保留|其中|包括|核心(?:的)?|主要(?:的)?)\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return cleaned[:24].strip()
 
 
 def _extract_budget_table_claims(

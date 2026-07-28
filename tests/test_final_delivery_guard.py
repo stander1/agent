@@ -516,6 +516,94 @@ FINAL_ANSWER_READY"""
 
         self.assertTrue(assessment.valid)
 
+    def test_historical_stage_budget_under_markdown_log_is_not_current_total(
+        self,
+    ) -> None:
+        content = """## 最终可交付方案
+
+当前方案总预算为 2400 元，满足最新上限。
+
+## 六、决策日志（历史修订）
+
+A3 -> A4：预算审计确保了当时总预算不超过 3000 元。
+FINAL_ANSWER_READY"""
+
+        assessment = assess_final_delivery(
+            request="请生成完整方案，总预算不得超过 2600 元。",
+            content=content,
+            source="reviewer",
+            expected_source="reviewer",
+            marker="FINAL_ANSWER_READY",
+            require_marker=True,
+        )
+
+        self.assertTrue(assessment.valid)
+
+    def test_long_review_uses_terminal_approval_after_earlier_rejections(
+        self,
+    ) -> None:
+        content = """## 验收记录
+
+第一份 Writer 提交的草稿缺少风险说明，必须修订。
+第二份 Writer 提交的草稿仍未通过，需要补充验收标准。
+第三份 Writer 提交的修订版已经覆盖范围、证据、风险、责任人和验收标准。
+
+## 最终验收结论
+
+第三份 Writer 提交的修订版验收通过，批准作为最终交付物。
+FINAL_ANSWER_READY"""
+
+        assessment = assess_final_delivery(
+            request="请交付完整实施报告。",
+            content=content,
+            source="reviewer",
+            expected_source="reviewer",
+            marker="FINAL_ANSWER_READY",
+            require_marker=True,
+        )
+
+        self.assertFalse(assessment.valid)
+        self.assertTrue(assessment.review_only)
+        self.assertTrue(assessment.approved_prior_artifact)
+
+    def test_plain_current_result_after_history_is_still_enforced(self) -> None:
+        content = """## 最终可交付方案
+
+决策日志：
+- 交互 #1：最初总预算为 3000 元。
+当前总预算为 2800 元。
+FINAL_ANSWER_READY"""
+
+        assessment = assess_final_delivery(
+            request="请生成完整方案，总预算不得超过 2600 元。",
+            content=content,
+            source="reviewer",
+            expected_source="reviewer",
+            marker="FINAL_ANSWER_READY",
+            require_marker=True,
+        )
+
+        self.assertFalse(assessment.valid)
+        self.assertIn("numeric_upper_bound_violation", assessment.reasons)
+
+    def test_approval_followed_by_revision_requirement_is_not_terminal(
+        self,
+    ) -> None:
+        content = """对 Writer 提交的草稿进行验收，原则上批准。
+但当前仍缺少证据引用，必须补充后重新提交。
+FINAL_ANSWER_READY"""
+
+        assessment = assess_final_delivery(
+            request="请交付完整实施报告。",
+            content=content,
+            source="reviewer",
+            expected_source="reviewer",
+            marker="FINAL_ANSWER_READY",
+            require_marker=True,
+        )
+
+        self.assertFalse(assessment.approved_prior_artifact)
+
     def test_superseded_budget_uses_current_value_after_transition(self) -> None:
         content = """## 最终可交付方案
 

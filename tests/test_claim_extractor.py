@@ -139,6 +139,133 @@ class ClaimExtractorTests(unittest.TestCase):
 
         self.assertEqual([claim["value"] for claim in upper_bounds], ["2600"])
 
+    def test_component_and_reserve_amounts_do_not_become_global_caps(
+        self,
+    ) -> None:
+        claims = extract_claim_cards(
+            (
+                "方案为用户预留了700元的预算弹性空间。"
+                "留给餐饮和应急的预算余量约400元。"
+                "保留项：交通（380元）、住宿（700元）、"
+                "本地接驳（180元）及核心活动（180元）预算均予以保证。"
+            ),
+            subject="project:generic",
+        )
+
+        self.assertFalse(
+            any(
+                claim["scope"] == "constraint.budget_upper_bound"
+                for claim in claims
+            )
+        )
+        self.assertTrue(
+            any(
+                str(claim["scope"]).startswith("allocation.budget.")
+                for claim in claims
+            )
+        )
+
+    def test_base_budget_is_estimate_and_budget_note_number_is_ignored(
+        self,
+    ) -> None:
+        claims = extract_claim_cards(
+            "在2200元的基础预算上优化方案。预算说明：1.",
+            subject="project:generic",
+        )
+        budget_rows = [
+            claim
+            for claim in claims
+            if "budget" in str(claim["scope"])
+        ]
+
+        self.assertIn(
+            ("estimate.budget_total", "2200"),
+            {
+                (str(claim["scope"]), str(claim["value"]))
+                for claim in budget_rows
+            },
+        )
+        self.assertFalse(
+            any(
+                claim["scope"] == "constraint.budget_upper_bound"
+                for claim in budget_rows
+            )
+        )
+        self.assertFalse(any(str(claim["value"]) == "1" for claim in budget_rows))
+
+    def test_selected_destination_drops_trailing_reason_heading(self) -> None:
+        claims = extract_claim_cards(
+            "最终目的地：宜兴 选择理由：交通与节奏更匹配。",
+            subject="project:generic",
+        )
+        destinations = [
+            claim
+            for claim in claims
+            if claim["scope"] == "plan.selected_destination"
+        ]
+
+        self.assertEqual([claim["value"] for claim in destinations], ["宜兴"])
+        self.assertFalse(
+            any(
+                claim["scope"] == "config.destination"
+                for claim in claims
+            )
+        )
+
+    def test_historical_decision_log_does_not_emit_active_budget_cap(
+        self,
+    ) -> None:
+        claims = extract_claim_cards(
+            """## Current plan
+The budget cap is 2600 USD and the estimated total is 2400 USD.
+
+## Decision log
+R3 -> R4: the old total budget was capped at 3000 USD.
+""",
+            subject="project:generic",
+        )
+        upper_bounds = [
+            str(claim["value"])
+            for claim in claims
+            if claim["scope"] == "constraint.budget_upper_bound"
+        ]
+
+        self.assertEqual(upper_bounds, ["2600"])
+
+    def test_current_result_after_plain_history_heading_is_extracted(
+        self,
+    ) -> None:
+        claims = extract_claim_cards(
+            """Decision log:
+- Interaction #1: the initial cap was 3000 USD.
+Current budget cap is 2600 USD.
+""",
+            subject="project:generic",
+        )
+        upper_bounds = [
+            str(claim["value"])
+            for claim in claims
+            if claim["scope"] == "constraint.budget_upper_bound"
+        ]
+
+        self.assertEqual(upper_bounds, ["2600"])
+
+    def test_bold_history_heading_is_excluded_from_active_claims(self) -> None:
+        claims = extract_claim_cards(
+            """Current budget cap: 2600 USD.
+**Decision log**
+R1 -> R2: historical budget cap: 3000 USD.
+""",
+            subject="project:generic",
+        )
+        upper_bounds = [
+            str(claim["value"])
+            for claim in claims
+            if claim["scope"] == "constraint.budget_upper_bound"
+        ]
+
+        self.assertEqual(upper_bounds, ["2600"])
+
     def test_explicit_overall_decision_is_preserved_as_a_typed_claim(self) -> None:
         claims = extract_claim_cards(
             (

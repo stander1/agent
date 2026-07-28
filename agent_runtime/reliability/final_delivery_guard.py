@@ -59,7 +59,16 @@ _SUBMITTED_ARTIFACT_REFERENCE_RE = re.compile(
     r"|(?:团队消息|当前消息|本轮).{0,80}"
     r"(?:writer|author|撰写者).{0,40}(?:提交|产出|成果|草稿|报告)"
     r"|(?:已)?对[^。\n]{1,120}(?:提交的?|产出的?|成果|草稿|报告)"
+    r"|(?:最新|最近|当前)(?:提交的?)?(?:成果|草稿|报告|产出)"
+    r"|(?:latest|most\s+recent|current)\s+"
+    r"(?:submitted\s+)?(?:artifact|draft|report|output)"
     r")"
+)
+_LATEST_ARTIFACT_REFERENCE_RE = re.compile(
+    r"(?is)(?:(?:最新|最近|当前)(?:提交的?)?"
+    r"(?:成果|草稿|报告|产出)|"
+    r"(?:latest|most\s+recent|current)\s+"
+    r"(?:submitted\s+)?(?:artifact|draft|report|output))"
 )
 _REVIEW_PROCESS_SIGNAL_RE = re.compile(
     r"(?is)(?:"
@@ -68,6 +77,8 @@ _REVIEW_PROCESS_SIGNAL_RE = re.compile(
     r"(?:进行|完成).{0,8}(?:审查|验收|审核|评审|检查)"
     r"|(?:验收|审查|审核|评审)(?:评估|报告|结论|意见|摘要)"
     r"|(?:审计)?验收专家结论"
+    r"|最终验收(?:结论|报告)?"
+    r"|\bfinal\s+(?:acceptance|validation)(?:\s+(?:report|conclusion))?\b"
     r"|检查重点|验收检查|产物验收|所有产出.{0,24}通过验收"
     r")"
 )
@@ -160,6 +171,27 @@ _BUDGET_SUPERSESSION_RE = re.compile(
     r"\b(?:changed?|adjusted?|reduced?|lowered?)\s+to\b|"
     r"\b(?:now|currently|finally)\s+(?:is|at)\b"
     r")"
+)
+_SECTION_HEADING_RE = re.compile(
+    r"^\s*(?:#{1,6}\s+|[一二三四五六七八九十百]+[、.．]\s*)"
+)
+_HISTORICAL_SECTION_HEADING_RE = re.compile(
+    r"(?i)(?:决策日志|变更日志|修订记录|版本记录|历史记录|"
+    r"decision\s+log|change\s+log|revision\s+(?:log|history)|history)"
+)
+_PLAIN_HISTORICAL_SECTION_RE = re.compile(
+    r"(?i)^\s*[*_`]*\s*(?:决策日志|变更日志|修订记录|版本记录|历史记录|"
+    r"decision\s+log|change\s+log|revision\s+(?:log|history)|history)"
+    r"\s*[*_`]*\s*[:：]?\s*$"
+)
+_STAGE_TRANSITION_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])"
+    r"[A-Za-z][A-Za-z0-9_.-]*\d+\s*(?:->|=>|→)\s*"
+    r"[A-Za-z][A-Za-z0-9_.-]*\d+(?![A-Za-z0-9_])"
+)
+_CURRENT_RESULT_RE = re.compile(
+    r"(?i)^\s*(?:(?:当前|最终|现行|最新)|"
+    r"(?:current|final|active|latest)\b)"
 )
 _NUMBER_RE = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)(?![\w.])")
 _INTERNAL_PROTOCOL_MARKER_RE = re.compile(
@@ -346,8 +378,6 @@ def is_prior_artifact_approval(content: str) -> bool:
     body = str(content or "").strip()
     if not body:
         return False
-    if _REVISION_REQUIRED_RE.search(body):
-        return False
     if _INTEGRATED_FINAL_ARTIFACT_RE.search(body):
         return False
     if (
@@ -355,15 +385,26 @@ def is_prior_artifact_approval(content: str) -> bool:
         and _COMPACT_REVIEW_APPROVAL_RE.fullmatch(body)
     ):
         return True
+    approval_matches = list(_PRIOR_ARTIFACT_APPROVAL_RE.finditer(body))
+    if not approval_matches:
+        return False
+    final_approval_start = approval_matches[-1].start()
+    if any(
+        match.start() > final_approval_start
+        for match in _REVISION_REQUIRED_RE.finditer(body)
+    ):
+        return False
     prior_reference = bool(_PRIOR_ARTIFACT_REFERENCE_RE.search(body))
     submitted_artifact_reference = bool(
-        _SUBMITTED_ARTIFACT_REFERENCE_RE.search(body)
-        and _REVIEW_PROCESS_SIGNAL_RE.search(body)
+        _LATEST_ARTIFACT_REFERENCE_RE.search(body)
+        or (
+            _SUBMITTED_ARTIFACT_REFERENCE_RE.search(body)
+            and _REVIEW_PROCESS_SIGNAL_RE.search(body)
+        )
     )
-    approval = bool(_PRIOR_ARTIFACT_APPROVAL_RE.search(body))
-    if submitted_artifact_reference and approval:
+    if submitted_artifact_reference:
         return True
-    return bool(len(body) <= 2600 and prior_reference and approval)
+    return bool(len(body) <= 2600 and prior_reference)
 
 
 def _numeric_upper_bound_violations(
@@ -385,7 +426,25 @@ def _numeric_upper_bound_violations(
 
     active_bound = budget_bounds[-1]
     violations: list[str] = []
+    historical_section = False
     for clause in semantic_clauses(body):
+        if _SECTION_HEADING_RE.search(clause):
+            historical_section = bool(
+                _HISTORICAL_SECTION_HEADING_RE.search(clause)
+            )
+            if historical_section:
+                continue
+        elif _PLAIN_HISTORICAL_SECTION_RE.search(clause):
+            historical_section = True
+            continue
+        if (
+            historical_section
+            and _CURRENT_RESULT_RE.search(clause)
+            and not _STAGE_TRANSITION_RE.search(clause)
+        ):
+            historical_section = False
+        if historical_section or _STAGE_TRANSITION_RE.search(clause):
+            continue
         if not _BUDGET_RESULT_RE.search(clause):
             continue
         values = _current_budget_result_values(clause)

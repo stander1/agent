@@ -1248,6 +1248,13 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                 self.assertIsInstance(guarded, FakeTextMessage)
                 self.assertIn("needs_more_evidence", guarded.content)
                 self.assertNotIn("synthetic_fraud_ring", guarded.content)
+                self.assertIn("degraded_fallback", guarded.content)
+                self.assertIn("policy_rules.md", guarded.content)
+                self.assertIn("Uncertainty", guarded.content)
+                self.assertNotIn(
+                    "Continue from the current task",
+                    guarded.content,
+                )
                 events = self._events(manager.output_dir / "trace.jsonl")
                 guard = next(
                     item
@@ -1257,7 +1264,7 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                 )
                 self.assertEqual(
                     guard["payload"]["status"],
-                    "blocked_and_deferred",
+                    "blocked_with_explicit_fallback",
                 )
                 self.assertEqual(
                     guard["payload"]["unavailable_artifacts"],
