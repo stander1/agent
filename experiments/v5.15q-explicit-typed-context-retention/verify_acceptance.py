@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
-import re
 import subprocess
 import sys
 from decimal import Decimal, InvalidOperation
@@ -16,11 +15,6 @@ BASE_EXPERIMENT_DIR = (
     Path(__file__).resolve().parents[1]
     / "v5.15p-closed-revision-measurement-acceptance"
 )
-_TYPED_FACT_RE = re.compile(
-    r"(?P<kind>active_fact|historical_fact)="
-    r"(?P<payload>\{[^\r\n]*?\})(?=$|[;\r\n])"
-)
-
 
 def _load_base_verifier() -> ModuleType:
     path = BASE_EXPERIMENT_DIR / "verify_acceptance.py"
@@ -123,18 +117,6 @@ def _expected_typed_facts(scenario: dict[str, Any]) -> list[dict[str, Any]]:
     return expected
 
 
-def _parse_typed_facts(content: str) -> list[dict[str, Any]]:
-    facts: list[dict[str, Any]] = []
-    for match in _TYPED_FACT_RE.finditer(str(content or "")):
-        try:
-            payload = json.loads(match.group("payload"))
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            facts.append({"kind": match.group("kind"), **payload})
-    return facts
-
-
 def _model_visible_evidence(
     *,
     scenario: dict[str, Any],
@@ -159,22 +141,29 @@ def _model_visible_evidence(
     expected = _expected_typed_facts(scenario)
     facts_by_agent: dict[str, list[dict[str, Any]]] = {}
     for event in trace_events:
-        if event.get("event_type") != "autogen_agent_receive":
+        if event.get("event_type") != "autogen_agent_input_real_rewrite":
             continue
         payload = event.get("payload")
         payload = payload if isinstance(payload, dict) else {}
-        if int(payload.get("task_sequence_index") or 0) != final_task_index:
+        rewrite_safety = payload.get("rewrite_safety")
+        rewrite_safety = (
+            rewrite_safety if isinstance(rewrite_safety, dict) else {}
+        )
+        if (
+            int(rewrite_safety.get("task_sequence_index") or 0)
+            != final_task_index
+        ):
             continue
         agent_id = str(payload.get("agent_id") or "")
         if agent_id not in agent_names:
             continue
         facts = facts_by_agent.setdefault(agent_id, [])
-        for message in payload.get("decoded_messages", []):
-            if not isinstance(message, dict):
+        if not bool(payload.get("rewrite_applied")):
+            continue
+        for fact in payload.get("model_visible_memory_facts", []):
+            if not isinstance(fact, dict):
                 continue
-            facts.extend(
-                _parse_typed_facts(str(message.get("content_text") or ""))
-            )
+            facts.append(dict(fact))
 
     receiver_evidence: dict[str, dict[str, int]] = {}
     complete_receivers: list[str] = []

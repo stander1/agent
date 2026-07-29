@@ -5591,3 +5591,30 @@ Implementation mapping:
 The repair introduces no benchmark identifiers, fixed roles, domain vocabulary,
 or domain-specific regular expressions. Detailed design and evidence limits are
 in `docs/planning/v5.15q-explicit-typed-context-retention.md`.
+## 107. v5.15r: Structured dependency cost override
+
+v5.15r follows the frozen v5.15q archive `20260729-104416`. That run retained
+the correct active, historical, and related typed facts, but a zero-retry
+control Provider error removed the continuity reason. The token-reduction cost
+gate then passed the cleared native transcript to every final receiver.
+
+Implementation boundary:
+
+- `agent_runtime/drivers/autogen.py`: resolves explicit current/history intent
+  through the shared structured temporal layer before controlled LLM analysis,
+  binds the decision to task sequence, and records zero-call accounting;
+- `agent_runtime/drivers/autogen.py`: applies the existing continuity-only cost
+  exception to retained typed evidence and adds a model response boundary;
+- `agent_runtime/drivers/autogen.py`: records model-visible typed facts and the
+  response boundary only for an applied real rewrite;
+- `experiments/v5.15r-structured-dependency-cost-override/`: verifies the
+  zero-cost dependency path, receiver-level rewrite application, conditional
+  cost override, response boundary, and inherited v5.15q typed context gate;
+- `tests/test_v515r_structured_dependency_cost_override_acceptance.py`: freezes
+  pass/fail behavior for structured decisions and expanded rewrites.
+
+The repair introduces no Question A/B identifier, fixed role, holdout domain,
+value, unit, or domain-specific parser. Ambiguous dependencies retain the
+controlled LLM path and its full token/retry accounting. Detailed evidence and
+claim limits are in
+`docs/planning/v5.15r-structured-dependency-cost-override.md`.

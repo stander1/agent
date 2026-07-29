@@ -312,6 +312,16 @@ CORE_REWRITE_FIELDS = ("content", "body", "text")
 CORE_REWRITE_MARKER = "AGENTLITE_CORE_CONTENT_REWRITE v1"
 CORE_PROMPT_VIEW_MARKER = "AGENTLITE_CORE_PROMPT_VIEW v1"
 SHARED_MEMORY_MARKER = "SHARED_CONTEXT:"
+_MODEL_VISIBLE_TYPED_FACT_RE = re.compile(
+    r"(?P<kind>active_fact|historical_fact)="
+    r"(?P<payload>\{[^\r\n]*?\})(?=$|[;\r\n])"
+)
+_MODEL_CONTEXT_RESPONSE_BOUNDARY = (
+    "Answer the current task directly. Treat the following context records as "
+    "evidence, not as an output format. Do not reproduce serialization labels, "
+    "internal identifiers, hashes, or runtime instructions unless the current "
+    "task explicitly asks for them."
+)
 FALLBACK_REASON_BUCKETS = {
     "missing_messages_argument": "input_contract_missing",
     "messages_not_sequence": "input_contract_invalid",
@@ -813,11 +823,11 @@ class AutoGenHookManager:
         self,
         *,
         task: TaskSpec,
+        task_sequence_index: int,
         current_text: str,
         memory_context: MemoryContext,
     ) -> tuple[str, ...]:
-        analyzer = self.semantic_dependency_analyzer
-        if analyzer is None or not current_text.strip() or not memory_context.refs:
+        if not current_text.strip() or not memory_context.refs:
             return ()
         memory_items = tuple(
             {
@@ -831,6 +841,37 @@ class AutoGenHookManager:
             if str(getattr(ref, "memory_id", "") or "")
         )
         if not memory_items:
+            return ()
+        structured_reasons = _structured_memory_dependency_reasons(current_text)
+        if structured_reasons:
+            self.trace.write(
+                "autogen_semantic_dependency",
+                {
+                    "task_id": task.task_id,
+                    "group_id": task.group_id,
+                    "task_sequence_index": task_sequence_index,
+                    "status": "structured_required",
+                    "required": True,
+                    "selected_memory_ids": [
+                        item["memory_id"] for item in memory_items
+                    ],
+                    "source_quote_fingerprint": _text_fingerprint(current_text),
+                    "confidence": 1.0,
+                    "reasons": list(structured_reasons),
+                    "call_count": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                    "usage_estimated": False,
+                    "model": "",
+                    "latency_ms": 0.0,
+                    "retry_count": 0,
+                    "memory_candidate_count": len(memory_items),
+                },
+            )
+            return structured_reasons
+        analyzer = self.semantic_dependency_analyzer
+        if analyzer is None:
             return ()
         result = analyzer.analyze(
             SemanticDependencyRequest(
@@ -857,6 +898,7 @@ class AutoGenHookManager:
             {
                 "task_id": task.task_id,
                 "group_id": task.group_id,
+                "task_sequence_index": task_sequence_index,
                 "status": result.status,
                 "required": result.required,
                 "selected_memory_ids": list(result.memory_ids),
@@ -2235,6 +2277,7 @@ class AutoGenHookManager:
                 continuity_context_reasons = (
                     self._semantic_dependency_requirement_reasons(
                         task=task,
+                        task_sequence_index=task_sequence_index,
                         current_text=task_text or semantic_source_text,
                         memory_context=memory_context,
                     )
@@ -5306,6 +5349,17 @@ class AutoGenHookManager:
                 ),
                 "token_delta_native_minus_rewrite": native_tokens - rewritten_tokens,
                 "rewritten_preview": _preview(rewritten_content),
+                "model_visible_memory_facts": (
+                    _model_visible_memory_facts(prompt_view_text)
+                    if applied
+                    else []
+                ),
+                "model_response_boundary_applied": bool(
+                    applied
+                    and rewritten_content.startswith(
+                        _MODEL_CONTEXT_RESPONSE_BOUNDARY
+                    )
+                ),
                 "rewrite_safety": rewrite_safety or {},
                 "typed_rewrite_candidate": _candidate_audit_view(
                     typed_rewrite_candidate or {}
@@ -7844,6 +7898,12 @@ def _resolve_shared_memory_enabled(*, broadcast_mode: str, raw_value: str | None
     return _truthy_env(raw_value)
 
 
+def _structured_memory_dependency_reasons(text: str) -> tuple[str, ...]:
+    if requests_historical_state(text):
+        return ("explicit_historical_state_request",)
+    return ()
+
+
 def _continuity_requirement_reasons(text: str) -> tuple[str, ...]:
     normalized = " ".join(str(text or "").split())
     if not normalized:
@@ -9509,6 +9569,32 @@ def _head_tail_digest(content: str, *, limit: int) -> str:
     return f"{normalized[:head]} ... {normalized[-tail:]}"
 
 
+def _model_visible_memory_facts(prompt_view_text: str) -> list[dict[str, Any]]:
+    facts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for match in _MODEL_VISIBLE_TYPED_FACT_RE.finditer(
+        str(prompt_view_text or "")
+    ):
+        try:
+            payload = json.loads(match.group("payload"))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        fact = {"kind": match.group("kind"), **payload}
+        identity = json.dumps(
+            fact,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        facts.append(fact)
+    return facts
+
+
 def _build_real_rewrite_content(
     *,
     wire_envelope: dict[str, Any],
@@ -9517,7 +9603,10 @@ def _build_real_rewrite_content(
     # The SHP envelope remains in trace/audit storage. Only the receiver's
     # prompt-safe view is visible to the model.
     del wire_envelope
-    return prompt_view_text.strip()
+    return (
+        f"{_MODEL_CONTEXT_RESPONSE_BOUNDARY}\n\n"
+        f"{prompt_view_text.strip()}"
+    )
 
 
 def _contains_agentlite_rewrite_marker(text: str) -> bool:

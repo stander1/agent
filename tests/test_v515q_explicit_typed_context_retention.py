@@ -63,40 +63,63 @@ def _trace_events(
     team_config: dict,
     *,
     include_flag_for: set[str] | None = None,
+    rewrite_applied_for: set[str] | None = None,
 ) -> list[dict]:
     include_flag_for = include_flag_for or {
         agent["name"] for agent in team_config["agents"]
     }
-    core = (
-        'active_fact={"slot_id":"slot.open.signal",'
-        '"scope":"general","value":"-3.1",'
-        '"value_type":"number","unit":"kHz",'
-        '"operator":"eq","polarity":"positive","status":"active"}\n'
-        'historical_fact={"slot_id":"slot.open.signal",'
-        '"scope":"general","value":"-4.6",'
-        '"value_type":"number","unit":"kHz",'
-        '"operator":"eq","polarity":"positive",'
-        '"status":"superseded"}'
-    )
-    flag = (
-        '\nactive_fact={"slot_id":"slot.open.generic_flag",'
-        '"scope":"general","value":"false",'
-        '"value_type":"boolean","unit":"",'
-        '"operator":"eq","polarity":"positive","status":"active"}'
-    )
+    rewrite_applied_for = rewrite_applied_for or {
+        agent["name"] for agent in team_config["agents"]
+    }
+    core = [
+        {
+            "kind": "active_fact",
+            "slot_id": "slot.open.signal",
+            "scope": "general",
+            "value": "-3.1",
+            "value_type": "number",
+            "unit": "kHz",
+            "operator": "eq",
+            "polarity": "positive",
+            "status": "active",
+        },
+        {
+            "kind": "historical_fact",
+            "slot_id": "slot.open.signal",
+            "scope": "general",
+            "value": "-4.6",
+            "value_type": "number",
+            "unit": "kHz",
+            "operator": "eq",
+            "polarity": "positive",
+            "status": "superseded",
+        },
+    ]
+    flag = {
+        "kind": "active_fact",
+        "slot_id": "slot.open.generic_flag",
+        "scope": "general",
+        "value": "false",
+        "value_type": "boolean",
+        "unit": "",
+        "operator": "eq",
+        "polarity": "positive",
+        "status": "active",
+    }
     return [
         {
-            "event_type": "autogen_agent_receive",
+            "event_type": "autogen_agent_input_real_rewrite",
             "payload": {
-                "task_sequence_index": 2,
                 "agent_id": agent["name"],
-                "decoded_messages": [
-                    {
-                        "content_text": (
-                            core
-                            + (flag if agent["name"] in include_flag_for else "")
-                        )
-                    }
+                "rewrite_applied": agent["name"] in rewrite_applied_for,
+                "rewrite_safety": {"task_sequence_index": 2},
+                "model_visible_memory_facts": [
+                    *core,
+                    *(
+                        [flag]
+                        if agent["name"] in include_flag_for
+                        else []
+                    ),
                 ],
             },
         }
@@ -154,6 +177,28 @@ class ExplicitTypedContextRetentionAcceptanceTest(unittest.TestCase):
         self.assertIn(
             "final_receiver_inputs_preserve_explicit_typed_context",
             failed,
+        )
+
+    def test_unapplied_rewrite_is_not_model_visible(self) -> None:
+        commit = "abc123"
+        scenario, team, workflow, session, snapshot = _bound_inputs(commit)
+        report = self.verifier.build_report(
+            implementation_commit=commit,
+            scenario=scenario,
+            team_config=team,
+            workflow=workflow,
+            session_report=session,
+            memory_snapshot=snapshot,
+            trace_events=_trace_events(
+                team,
+                rewrite_applied_for={team["agents"][0]["name"]},
+            ),
+        )
+
+        self.assertFalse(report["summary"]["passed"])
+        self.assertEqual(
+            report["summary"]["model_visible_context_receiver_count"],
+            1,
         )
 
     def test_runner_binds_external_inputs_trace_and_zero_retries(self) -> None:

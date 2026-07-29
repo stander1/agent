@@ -13,6 +13,7 @@ from agent_runtime.core.kernel import MemoryContext
 from agent_runtime.drivers.autogen import (
     AutoGenHookManager,
     SHARED_MEMORY_MARKER,
+    _build_real_rewrite_content,
     _continuity_cost_override_allowed,
     _continuity_requirement_reasons,
     _continuity_source_text,
@@ -20,12 +21,14 @@ from agent_runtime.drivers.autogen import (
     _has_semantic_payload,
     _memory_adoption_evidence,
     _memory_view_facts_covered,
+    _model_visible_memory_facts,
     _required_evidence_assessment,
     _required_evidence_contract,
     _required_evidence_prompt_rule,
     _semantic_autogen_state_text,
     _sanitize_model_visible_content,
     _select_token_nonexpanding_view,
+    _structured_memory_dependency_reasons,
 )
 from agent_runtime.eval.token_counter import TokenCounter
 from agent_runtime.memory.memory_store import MemoryRef
@@ -863,6 +866,101 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
             self.assertEqual(scout_profile.available_tools, set())
             self.assertNotIn("tool_use", scout_profile.tool_capabilities)
 
+    def test_explicit_history_dependency_uses_structured_zero_cost_path(
+        self,
+    ) -> None:
+        self.assertEqual(
+            _structured_memory_dependency_reasons(
+                "Report the current and archived values as a two-state history."
+            ),
+            ("explicit_historical_state_request",),
+        )
+        self.assertEqual(
+            _structured_memory_dependency_reasons(
+                "Summarize the self-contained measurements below."
+            ),
+            (),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = AutoGenHookManager(
+                self._context(Path(tmp), "structured_history_dependency")
+            )
+            context = manager.record_call_start(
+                instance=OtherFakeTeam(),
+                method_name="run_stream",
+                target_kind="agentchat_team",
+                args=(),
+                kwargs={"task": "Prepare the current report."},
+            )
+            memory_context = MemoryContext(
+                refs=[
+                    MemoryRef(
+                        memory_id="mem_structured_history",
+                        version_id=1,
+                        status="active",
+                        task_topic="generic.history",
+                        memory_view_id="view_structured_history",
+                        slot_id="slot.open.measurement",
+                    )
+                ],
+                prompt_views=[
+                    'active_fact={"value":"4.2","value_type":"number",'
+                    '"unit":"u","status":"active"}'
+                ],
+            )
+            manager.semantic_dependency_analyzer = SimpleNamespace(
+                analyze=lambda _request: (_ for _ in ()).throw(
+                    AssertionError("control analyzer must not be called")
+                )
+            )
+
+            reasons = manager._semantic_dependency_requirement_reasons(
+                task=context.task,
+                task_sequence_index=2,
+                current_text=(
+                    "Return both the current reading and its archived predecessor."
+                ),
+                memory_context=memory_context,
+            )
+
+            self.assertEqual(reasons, ("explicit_historical_state_request",))
+            event = next(
+                item
+                for item in self._events(manager.output_dir / "trace.jsonl")
+                if item.get("event_type") == "autogen_semantic_dependency"
+            )
+            self.assertEqual(event["payload"]["status"], "structured_required")
+            self.assertEqual(event["payload"]["task_sequence_index"], 2)
+            self.assertEqual(event["payload"]["call_count"], 0)
+            self.assertEqual(event["payload"]["total_tokens"], 0)
+
+    def test_real_rewrite_boundary_and_typed_fact_audit_are_protocol_generic(
+        self,
+    ) -> None:
+        prompt_view = (
+            'active_fact={"slot_id":"slot.open.measurement",'
+            '"value":"4.2","value_type":"number","unit":"u",'
+            '"status":"active"};\n'
+            'historical_fact={"slot_id":"slot.open.measurement",'
+            '"value":"3.8","value_type":"number","unit":"u",'
+            '"status":"superseded"}'
+        )
+
+        rewritten = _build_real_rewrite_content(
+            wire_envelope={"internal": "audit-only"},
+            prompt_view_text=prompt_view,
+        )
+        facts = _model_visible_memory_facts(rewritten)
+
+        self.assertTrue(rewritten.startswith("Answer the current task directly."))
+        self.assertIn("evidence, not as an output format", rewritten)
+        self.assertNotIn("audit-only", rewritten)
+        self.assertEqual(
+            [fact["kind"] for fact in facts],
+            ["active_fact", "historical_fact"],
+        )
+        self.assertEqual([fact["value"] for fact in facts], ["4.2", "3.8"])
     def test_continuity_override_never_bypasses_structural_guard(self) -> None:
         context = SimpleNamespace(
             continuity_context_required=True,
