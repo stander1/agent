@@ -84,7 +84,7 @@ def build_report(
         ),
         _check(
             "release_candidate_version_identity",
-            bool(re.fullmatch(r"\d+\.\d+\.\d+rc\d+", version))
+            bool(re.fullmatch(r"\d+\.\d+\.\d+(?:rc\d+)?", version))
             and version == runtime_version
             and bool(artifact_report.get("source_versions_match")),
             (
@@ -139,6 +139,7 @@ def build_report(
             **base_report.get("summary", {}),
             "passed": passed,
             "technical_release_candidate_ready": passed,
+            "technical_release_ready": passed,
             "open_source_publication_ready": passed
             and not publication_blockers,
             "check_count": len(checks),
@@ -146,6 +147,7 @@ def build_report(
                 int(bool(item.get("passed"))) for item in checks
             ),
             "release_candidate_version": version,
+            "release_version": version,
             "publication_blocker_count": len(publication_blockers),
         },
         "implementation_commit": base_report.get(

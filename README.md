@@ -2,12 +2,12 @@
 
 本仓库用于迭代实现一个面向多 Agent 协作的跨框架运行时工具层，目标是在多 Agent 任务中通过结构化通信、非文本状态传递和共享记忆复用降低协作开销。
 
-当前开发版本：`v0.5.15rc2 release candidate`
+当前发布版本：`v0.5.15`
 
-v0.5.15rc2 openEuler 发行候选验收步骤：
+v0.5.15 openEuler 最终发行验收步骤：
 [experiments/v5.15y-installed-sdist-delivery-readiness/README.md](experiments/v5.15y-installed-sdist-delivery-readiness/README.md)
 
-当前发行包门禁版本：`v5.15y installed sdist delivery readiness`
+当前发行包门禁：`v5.15y final installed sdist delivery readiness`
 
 许可证： [Apache-2.0](LICENSE)
 
@@ -77,12 +77,23 @@ v0.5.15rc2 openEuler 发行候选验收步骤：
 - [docs/experiments/v5.14i-semantic-fidelity-conflict-identity.md](docs/experiments/v5.14i-semantic-fidelity-conflict-identity.md)
 - [docs/experiments/v5.14i-semantic-fidelity-results-20260726.md](docs/experiments/v5.14i-semantic-fidelity-results-20260726.md)
 - [docs/experiments/v5.14j-semantic-fidelity-formal-regression.md](docs/experiments/v5.14j-semantic-fidelity-formal-regression.md)
+- [docs/competition/v0.5.15-delivery-guide.md](docs/competition/v0.5.15-delivery-guide.md)
+- [docs/release/v0.5.15-final-release-notes.md](docs/release/v0.5.15-final-release-notes.md)
 - [docs/competition/v0.5.15rc2-delivery-guide.md](docs/competition/v0.5.15rc2-delivery-guide.md)
 - [docs/release/v5.15y-release-candidate-notes.md](docs/release/v5.15y-release-candidate-notes.md)
 - [docs/release/v5.15x-release-candidate-notes.md](docs/release/v5.15x-release-candidate-notes.md)
 - [docs/release/v5.12z-final-release-notes.md](docs/release/v5.12z-final-release-notes.md)
 
-## v0.5.15rc2 Current Note
+## v0.5.15 Current Note
+
+`v0.5.15` promotes the Apache-2.0 licensed RC2 implementation without changing
+runtime semantics. The final release gate requires an exact non-prerelease
+version, independently installs both wheel and sdist artifacts, runs the full
+unit suite on openEuler, verifies package contents and license identity, and
+recomputes all artifact and evidence hashes. The immutable `v0.5.15rc2` tag
+remains a historical pre-license snapshot and is not moved.
+
+## v0.5.15rc2 Historical Note
 
 `v0.5.15rc2` adds an installed-source-distribution gate to the frozen RC1
 artifact contract. The builder installs the generated sdist into an isolated

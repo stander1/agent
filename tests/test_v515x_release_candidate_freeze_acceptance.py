@@ -137,6 +137,23 @@ class ReleaseCandidateFreezeAcceptanceTest(unittest.TestCase):
         )
         self.assertEqual(report["publication"]["blockers"], [])
 
+    def test_final_release_version_is_accepted_by_inherited_gate(self) -> None:
+        artifacts = self._artifact_report()
+        artifacts["version"] = "0.5.15"
+        artifacts["runtime_version"] = "0.5.15"
+        report = self.verifier.build_report(
+            base_report=self._base_report(),
+            artifact_report=artifacts,
+            actual_artifact_sha256={
+                "wheel": "b" * 64,
+                "sdist": "c" * 64,
+            },
+            license_present=True,
+        )
+
+        self.assertTrue(report["summary"]["passed"])
+        self.assertEqual(report["summary"]["release_version"], "0.5.15")
+
     def test_runner_uses_all_three_release_gates(self) -> None:
         runner = (EXPERIMENT_DIR / "run_openeuler.sh").read_text(
             encoding="utf-8"

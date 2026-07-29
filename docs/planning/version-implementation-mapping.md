@@ -5697,3 +5697,30 @@ Implementation mapping:
 No runtime semantic, role, benchmark, or domain parsing behavior changes.
 Detailed boundaries are in
 `docs/planning/v5.15y-installed-sdist-delivery-readiness.md`.
+
+## 115. v0.5.15: Final competition release
+
+v0.5.15 promotes the Apache-2.0 licensed RC2 implementation to a final,
+non-prerelease package version. It does not change runtime semantics, task
+routing, memory admission, semantic extraction, or delivery behavior.
+
+Implementation mapping:
+
+- `agent_runtime/__init__.py` and `pyproject.toml`: identify the final release
+  as `0.5.15`;
+- `experiments/v5.15x-release-candidate-freeze/verify_acceptance.py`: permits
+  the inherited artifact gate to validate either an immutable RC or its final
+  promotion while preserving the historical report contract;
+- `experiments/v5.15y-installed-sdist-delivery-readiness/`: requires exact
+  final-version identity and repeats the complete no-Provider openEuler release
+  gate;
+- `docs/competition/v0.5.15-delivery-guide.md` and
+  `docs/release/v0.5.15-final-release-notes.md`: define the final installation,
+  verification, evidence, and claim boundaries;
+- `examples/release_package_contract.py`: requires the final release documents
+  in the source distribution.
+
+The existing `v0.5.15rc2` tag remains immutable and continues to identify its
+historical pre-license commit. Only the exact commit passing the final
+openEuler gate may receive the `v0.5.15` tag. Detailed boundaries are in
+`docs/planning/v0.5.15-final-release.md`.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -98,6 +99,11 @@ def build_report(
     blockers = list(publication.get("blockers", []) or [])
     new_checks = [
         _check(
+            "final_release_version_identity",
+            bool(re.fullmatch(r"\d+\.\d+\.\d+", version)),
+            f"version={version}",
+        ),
+        _check(
             "release_sdist_installed_outside_checkout",
             bool(installed_sdist.get("passed"))
             and installed_sdist.get("install_returncode") == 0
@@ -184,12 +190,14 @@ def build_report(
             **base_report.get("summary", {}),
             "passed": passed,
             "technical_release_candidate_ready": passed,
+            "technical_release_ready": passed,
             "open_source_publication_ready": passed and not blockers,
             "check_count": len(checks),
             "passed_check_count": sum(
                 int(bool(item.get("passed"))) for item in checks
             ),
             "release_candidate_version": version,
+            "release_version": version,
             "installed_sdist_verified": bool(
                 installed_sdist.get("passed")
             ),
@@ -222,7 +230,7 @@ def _render_markdown(report: dict[str, Any]) -> str:
             "- checks: "
             f"`{summary['passed_check_count']}/{summary['check_count']}`"
         ),
-        f"- version: `{summary['release_candidate_version']}`",
+        f"- version: `{summary['release_version']}`",
         (
             "- installed sdist verified: "
             f"`{summary['installed_sdist_verified']}`"

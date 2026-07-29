@@ -79,8 +79,8 @@ class InstalledSdistDeliveryReadinessTest(unittest.TestCase):
                     "cli_returncode": 0,
                     "loaded_from_target": True,
                     "cli_version_ok": True,
-                    "runtime_version": "0.5.15rc2",
-                    "distribution_version": "0.5.15rc2",
+                    "runtime_version": "0.5.15",
+                    "distribution_version": "0.5.15",
                     "missing_members": [],
                 }
             ]
@@ -88,7 +88,7 @@ class InstalledSdistDeliveryReadinessTest(unittest.TestCase):
 
     def _project_metadata(self) -> dict:
         return {
-            "version": "0.5.15rc2",
+            "version": "0.5.15",
             "license": "Apache-2.0",
             "license-files": ["LICENSE"],
             "urls": {
@@ -104,7 +104,7 @@ class InstalledSdistDeliveryReadinessTest(unittest.TestCase):
 
     def _delivery_guide(self) -> str:
         return (
-            "v0.5.15rc2 openEuler sdist 隔离安装 "
+            "v0.5.15 openEuler sdist 隔离安装 "
             "SHA256 Apache-2.0 公开发布就绪"
         )
 
@@ -121,7 +121,25 @@ class InstalledSdistDeliveryReadinessTest(unittest.TestCase):
         self.assertTrue(
             report["summary"]["open_source_publication_ready"]
         )
+        self.assertTrue(report["summary"]["technical_release_ready"])
+        self.assertEqual(report["summary"]["release_version"], "0.5.15")
         self.assertEqual(report["publication"]["blockers"], [])
+
+    def test_prerelease_version_is_rejected_by_final_gate(self) -> None:
+        metadata = self._project_metadata()
+        metadata["version"] = "0.5.15rc3"
+        report = self.verifier.build_report(
+            base_report=self._base_report(),
+            artifact_report=self._artifact_report(),
+            project_metadata=metadata,
+            delivery_guide=self._delivery_guide(),
+        )
+        failed = {
+            item["name"] for item in report["checks"] if not item["passed"]
+        }
+
+        self.assertFalse(report["summary"]["passed"])
+        self.assertIn("final_release_version_identity", failed)
 
     def test_wrong_license_expression_blocks_final_gate(self) -> None:
         metadata = self._project_metadata()

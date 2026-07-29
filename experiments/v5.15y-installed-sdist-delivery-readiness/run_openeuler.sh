@@ -56,7 +56,7 @@ python examples/run_release_gate.py \
 RELEASE_STATUS=$?
 set -e
 
-echo "[4/6] Build, inspect, and install release candidate artifacts"
+echo "[4/6] Build, inspect, and install final release artifacts"
 set +e
 python examples/build_release_artifacts.py \
   --dist-dir "$RUN_ROOT/dist" \
@@ -64,7 +64,7 @@ python examples/build_release_artifacts.py \
 ARTIFACT_STATUS=$?
 set -e
 
-echo "[5/6] Verify RC identity, installed sdist, delivery surface, and hashes"
+echo "[5/6] Verify final identity, installed sdist, delivery surface, and hashes"
 set +e
 python experiments/v5.15x-release-candidate-freeze/verify_acceptance.py \
   --repo-root "$REPO_ROOT" \
@@ -79,7 +79,7 @@ python "$SCRIPT_DIR/verify_acceptance.py" \
   --base-report "$RUN_ROOT/base_acceptance_report.json" \
   --artifact-report "$RUN_ROOT/artifacts/release_artifacts_report.json" \
   --pyproject "$REPO_ROOT/pyproject.toml" \
-  --delivery-guide "$REPO_ROOT/docs/competition/v0.5.15rc2-delivery-guide.md" \
+  --delivery-guide "$REPO_ROOT/docs/competition/v0.5.15-delivery-guide.md" \
   --output-json "$RUN_ROOT/acceptance_report.json" \
   --output-markdown "$RUN_ROOT/acceptance_report.md"
 ACCEPTANCE_STATUS=$?
@@ -102,7 +102,7 @@ git diff HEAD^ HEAD -- \
   MANIFEST.in \
   pyproject.toml > "$RUN_ROOT/system/release-change.patch"
 
-echo "[6/6] Package immutable release candidate evidence"
+echo "[6/6] Package immutable final release evidence"
 tar -czf "$EXPORT_BASE.tar.gz" "$RUN_ROOT"
 sha256sum "$EXPORT_BASE.tar.gz" > "$EXPORT_BASE.tar.gz.sha256"
 sha256sum -c "$EXPORT_BASE.tar.gz.sha256"
