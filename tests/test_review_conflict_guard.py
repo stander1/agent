@@ -7,6 +7,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_runtime.bootstrap.startup import BootstrapContext
+from agent_runtime.bridge.state_memory_bridge import (
+    MemoryPromotionCompiler,
+    PromotionViewDraft,
+)
 from agent_runtime.core.kernel import AgentDescriptor
 from agent_runtime.core.models import AgentOutput, TaskSpec
 from agent_runtime.drivers.autogen import (
@@ -15,7 +19,6 @@ from agent_runtime.drivers.autogen import (
     _InjectedMemoryRecord,
     _memory_adoption_evidence,
 )
-from agent_runtime.memory.claim_extractor import extract_claim_cards
 from agent_runtime.memory.memory_store import MemoryStoreLite
 from agent_runtime.reliability.review_conflict_guard import (
     build_review_blocker_claim,
@@ -32,62 +35,58 @@ from agent_runtime.reliability.typed_events import (
 
 
 class ReviewConflictGuardTest(unittest.TestCase):
-    def test_budget_extraction_prefers_currency_amount_over_party_count(self) -> None:
+    def test_default_promotion_compiler_never_calls_legacy_domain_parser(
+        self,
+    ) -> None:
+        compiler = MemoryPromotionCompiler()
         cases = (
-            (
-                "预算：两人所有费用总计不超过3000元。",
-                "3000",
-                "CNY",
-                "constraint.budget_upper_bound",
-            ),
-            (
-                "总预算：两人合计2600元。",
-                "2600",
-                "CNY",
-                "estimate.budget_total",
-            ),
-            (
-                "budget for 2 people is USD 500.",
-                "500",
-                "USD",
-                "constraint.budget_upper_bound",
-            ),
-            (
-                "预算为3000。",
-                "3000",
-                "",
-                "constraint.budget_upper_bound",
-            ),
+            "budget for 2 people is USD 500.",
+            "\u9884\u7b97\u4e3a3000\u3002",
+            "latency: 250 ms",
+            "capacity: 80 qps",
         )
-        for text, expected_value, expected_unit, expected_scope in cases:
-            with self.subTest(text=text):
-                claims = self._budget_claims(text)
-                self.assertEqual(len(claims), 1)
-                self.assertEqual(claims[0]["value"], expected_value)
-                self.assertEqual(claims[0]["unit"], expected_unit)
-                self.assertEqual(claims[0]["scope"], expected_scope)
+        for index, text in enumerate(cases, start=1):
+            with self.subTest(text=text), patch(
+                "agent_runtime.bridge.state_memory_bridge.extract_claim_cards",
+                side_effect=AssertionError("legacy parser must remain disabled"),
+            ):
+                candidate = compiler.compile(
+                    promotion_view=PromotionViewDraft(
+                        source_state_ids=[f"state_{index}"],
+                        evidence_refs=[f"state_{index}"],
+                        core_claim=text,
+                        reuse_intent="reuse generic evidence",
+                        source_agent="ArbitraryAgent",
+                        task_topic="project:generic",
+                    ),
+                    control=None,
+                    tags=["generic"],
+                    slot_hint="slot.open.unresolved",
+                    degraded=False,
+                )
+            self.assertEqual(candidate.claim_cards, [])
 
-        self.assertFalse(self._budget_claims("预算需要两人共同确认。"))
-
-    def test_budget_attribution_does_not_treat_party_count_as_old_budget(self) -> None:
+    def test_open_attribution_does_not_treat_peer_field_as_historical(
+        self,
+    ) -> None:
         store = MemoryStoreLite()
         self._write_fact(
             store,
             task_id="T1",
-            slot_id="slot.project.requirement",
-            scope="constraint.budget_upper_bound",
+            slot_id="slot.runtime.config",
+            scope="telemetry.primary_reading",
             value="2",
             value_type="number",
-            unit="CNY",
+            unit="qx",
         )
         current = self._write_fact(
             store,
             task_id="T2",
-            slot_id="slot.project.requirement",
-            scope="constraint.budget_upper_bound",
+            slot_id="slot.runtime.config",
+            scope="telemetry.primary_reading",
             value="3000",
             value_type="number",
-            unit="CNY",
+            unit="qx",
             revision_kind="replaces",
         )
         ref = current.memory_ref
@@ -95,8 +94,11 @@ class ReviewConflictGuardTest(unittest.TestCase):
         evidence = _memory_adoption_evidence(
             memory_prompt_view=prompt_view,
             injected_prompt_view=prompt_view,
-            current_task_text="请完成当前方案。",
-            output_text="预算：两人所有费用总计不超过3000元。",
+            current_task_text="Return the admitted telemetry.",
+            output_text=(
+                "primary_reading: 3000 qx\n"
+                "observer_count: 2 qx"
+            ),
             memory_id=ref.memory_id,
             memory_view_id=ref.memory_view_id,
             revision_guard=store.revision_guard(ref),
@@ -104,6 +106,10 @@ class ReviewConflictGuardTest(unittest.TestCase):
 
         self.assertEqual(evidence["status"], "useful")
         self.assertEqual(evidence["matched_historical_fact_count"], 0)
+        self.assertEqual(
+            evidence["attribution_mode"],
+            "ccf_v3_open_candidate_evidence",
+        )
 
     def test_dynamic_review_authority_targets_only_referenced_active_fact(self) -> None:
         rows = [
@@ -1128,14 +1134,6 @@ class ReviewConflictGuardTest(unittest.TestCase):
             )
             self.assertIn("alpha payload", promoted_summary)
             self.assertNotIn("beta payload", promoted_summary)
-
-    @staticmethod
-    def _budget_claims(text: str) -> list[dict[str, object]]:
-        return [
-            claim
-            for claim in extract_claim_cards(text, subject="project:demo")
-            if "budget" in str(claim["scope"])
-        ]
 
     @staticmethod
     def _memory_row(

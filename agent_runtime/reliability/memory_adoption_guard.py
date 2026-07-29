@@ -7,7 +7,12 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
 
-_STRUCTURED_ATTRIBUTION_MODE = "ccf_v2_semantic_key_value_rules"
+_STRUCTURED_ATTRIBUTION_MODES = frozenset(
+    {
+        "ccf_v2_semantic_key_value_rules",
+        "ccf_v3_open_candidate_evidence",
+    }
+)
 _UNSAFE_STATUSES = frozenset({"wrong", "mixed"})
 _SCALAR_TYPES = (str, int, float)
 
@@ -83,7 +88,10 @@ def guard_memory_adoption_output(
                 }
             )
 
-        if str(row.get("attribution_mode") or "") != _STRUCTURED_ATTRIBUTION_MODE:
+        if (
+            str(row.get("attribution_mode") or "")
+            not in _STRUCTURED_ATTRIBUTION_MODES
+        ):
             reasons.append("unstructured_conflict_requires_review")
             continue
         if not semantic_key:
@@ -236,7 +244,10 @@ def _normalized_scalar(value: Any) -> str:
 
 
 def _is_duplicate_only_structured_conflict(row: Mapping[str, Any]) -> bool:
-    if str(row.get("attribution_mode") or "") != _STRUCTURED_ATTRIBUTION_MODE:
+    if (
+        str(row.get("attribution_mode") or "")
+        not in _STRUCTURED_ATTRIBUTION_MODES
+    ):
         return False
     active_value = row.get("active_value")
     historical_values = [

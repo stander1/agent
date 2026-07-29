@@ -477,19 +477,19 @@ class FactLevelMemoryTest(unittest.TestCase):
         }
 
         useful = _memory_adoption_evidence(
-            output_text="Use busy_timeout=2000.",
+            output_text="busy_timeout: 2000 ms",
             **common,
         )
         wrong = _memory_adoption_evidence(
-            output_text="Use busy_timeout=5000.",
+            output_text="busy_timeout: 5000 ms",
             **common,
         )
         mixed = _memory_adoption_evidence(
-            output_text="Use busy_timeout=2000 and busy_timeout=5000.",
+            output_text="busy_timeout: 2000 ms\nbusy_timeout: 5000 ms",
             **common,
         )
         negated_old = _memory_adoption_evidence(
-            output_text="Use busy_timeout=2000. Do not use busy_timeout=5000.",
+            output_text="busy_timeout: 2000 ms\nbusy_timeout: not 5000 ms",
             **common,
         )
 
@@ -499,7 +499,7 @@ class FactLevelMemoryTest(unittest.TestCase):
         self.assertEqual(negated_old["status"], "useful")
         self.assertEqual(
             useful["attribution_mode"],
-            "ccf_v2_semantic_key_value_rules",
+            "ccf_v3_open_candidate_evidence",
         )
 
     def test_legacy_document_claim_can_be_audited_without_false_penalty(self) -> None:

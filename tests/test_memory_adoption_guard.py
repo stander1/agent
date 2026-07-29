@@ -29,6 +29,93 @@ class ArbitraryTextMessage:
 
 
 class MemoryAdoptionGuardTest(unittest.TestCase):
+    def test_open_candidate_attribution_does_not_call_legacy_parser(self) -> None:
+        with patch(
+            "agent_runtime.drivers.autogen.extract_claim_cards",
+            side_effect=AssertionError("legacy parser must not be called"),
+        ):
+            evidence = _structured_memory_adoption_evidence(
+                revision_guard={
+                    "subject": "project:generic",
+                    "semantic_key": (
+                        "project:generic|"
+                        "slot.open.orbital_phase_drift_123456789abc|general"
+                    ),
+                    "active_facts": [
+                        {
+                            "slot_id": (
+                                "slot.open.orbital_phase_drift_123456789abc"
+                            ),
+                            "raw_slot_text": "orbital_phase_drift",
+                            "scope": "general",
+                            "value": "7.4",
+                            "value_type": "number",
+                            "unit": "qx",
+                            "operator": "eq",
+                        }
+                    ],
+                    "historical_facts": [],
+                },
+                current_task_text="Use the admitted telemetry.",
+                output_text="orbital_phase_drift: 7.4 qx",
+                explicit_reference=False,
+            )
+
+        self.assertEqual(evidence["status"], "useful")
+        self.assertEqual(
+            evidence["attribution_mode"],
+            "ccf_v3_open_candidate_evidence",
+        )
+        self.assertEqual(evidence["legacy_domain_candidate_count"], 0)
+        self.assertEqual(
+            evidence["matched_active_output_spans"],
+            ["orbital_phase_drift: 7.4 qx"],
+        )
+
+    def test_same_value_on_another_open_predicate_is_not_attributed(self) -> None:
+        evidence = _structured_memory_adoption_evidence(
+            revision_guard={
+                "subject": "project:generic",
+                "semantic_key": (
+                    "project:generic|"
+                    "slot.open.sensor_a_temperature_123456789abc|general"
+                ),
+                "active_facts": [
+                    {
+                        "slot_id": (
+                            "slot.open.sensor_a_temperature_123456789abc"
+                        ),
+                        "raw_slot_text": "sensor_a_temperature",
+                        "scope": "general",
+                        "value": "30",
+                        "value_type": "number",
+                        "unit": "qx",
+                        "operator": "eq",
+                    }
+                ],
+                "historical_facts": [
+                    {
+                        "slot_id": (
+                            "slot.open.sensor_a_temperature_123456789abc"
+                        ),
+                        "raw_slot_text": "sensor_a_temperature",
+                        "scope": "general",
+                        "value": "21",
+                        "value_type": "number",
+                        "unit": "qx",
+                        "operator": "eq",
+                    }
+                ],
+            },
+            current_task_text="Use the admitted sensor state.",
+            output_text="sensor_b_temperature: 21 qx",
+            explicit_reference=False,
+        )
+
+        self.assertEqual(evidence["status"], "unassessed")
+        self.assertEqual(evidence["matched_historical_fact_count"], 0)
+        self.assertEqual(evidence["legacy_domain_candidate_count"], 0)
+
     def test_signed_scalar_is_not_treated_as_logical_negation(self) -> None:
         signed = _structured_memory_adoption_evidence(
             revision_guard={
@@ -368,6 +455,22 @@ class MemoryAdoptionGuardTest(unittest.TestCase):
         self.assertNotIn("capacity=20", decision.output_text)
         self.assertEqual(decision.output_text.count("capacity=50"), 2)
 
+    def test_archived_v2_structured_evidence_remains_repairable(self) -> None:
+        row = self._structured_row(
+            status="wrong",
+            active_value="50",
+            historical_values=["20"],
+            historical_spans=["service.capacity=20"],
+        )
+        row["attribution_mode"] = "ccf_v2_semantic_key_value_rules"
+
+        decision = guard_memory_adoption_output(
+            output_text="service.capacity=20",
+            evidence_rows=[row],
+        )
+
+        self.assertEqual(decision.status, "rule_repaired")
+        self.assertEqual(decision.output_text, "service.capacity=50")
     def test_uncertain_conflict_is_blocked_without_replaying_original_body(
         self,
     ) -> None:
@@ -590,7 +693,7 @@ class MemoryAdoptionGuardTest(unittest.TestCase):
     ) -> dict[str, object]:
         return {
             "status": status,
-            "attribution_mode": "ccf_v2_semantic_key_value_rules",
+            "attribution_mode": "ccf_v3_open_candidate_evidence",
             "semantic_key": "arbitrary.domain.service_capacity",
             "active_value": active_value,
             "historical_values": historical_values,

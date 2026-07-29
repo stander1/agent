@@ -43,6 +43,7 @@ from agent_runtime.eval.trace_logger import TraceLogger
 from agent_runtime.llm.client import OpenAICompatibleChatClient
 from agent_runtime.llm.config import LlmConfig
 from agent_runtime.memory.claim_extractor import (
+    extract_canonical_claim_candidates,
     extract_claim_cards,
     normalized_value,
     requests_historical_state,
@@ -53,7 +54,10 @@ from agent_runtime.memory.memory_store import (
     MemoryStoreLite,
     classify_memory_quality_envelope,
 )
-from agent_runtime.memory.schema_registry import canonical_claim_polarity
+from agent_runtime.memory.schema_registry import (
+    SchemaRegistryLite,
+    canonical_claim_polarity,
+)
 from agent_runtime.memory.semantic_disambiguator import (
     ControlledSemanticDependencyAnalyzer,
     ControlledSemanticDisambiguator,
@@ -1370,7 +1374,13 @@ class AutoGenHookManager:
                     bool(unique_useful or unique_mixed)
                 ),
                 "attribution_mode": (
-                    "ccf_v2_semantic_key_value_rules"
+                    "ccf_v3_open_candidate_evidence"
+                    if any(
+                        row.get("attribution_mode")
+                        == "ccf_v3_open_candidate_evidence"
+                        for row in evidence_rows
+                    )
+                    else "ccf_v2_semantic_key_value_rules"
                     if any(
                         row.get("attribution_mode")
                         == "ccf_v2_semantic_key_value_rules"
@@ -8462,16 +8472,16 @@ def _structured_memory_adoption_evidence(
     explicit_reference: bool,
 ) -> dict[str, Any]:
     subject = str(revision_guard.get("subject") or "project:current")
-    output_claims = extract_claim_cards(
+    output_candidates = extract_canonical_claim_candidates(
         output_text,
         subject=subject,
-        source_pointer="agent_output",
+        source_id="agent_output",
         default_confidence=0.8,
     )
-    task_claims = extract_claim_cards(
+    task_candidates = extract_canonical_claim_candidates(
         current_task_text,
         subject=subject,
-        source_pointer="current_task",
+        source_id="current_task",
         default_confidence=0.95,
     )
     active_facts = _unique_structured_facts(
@@ -8495,14 +8505,16 @@ def _structured_memory_adoption_evidence(
     excluded_historical_current: list[dict[str, Any]] = []
     authorized_historical: list[dict[str, Any]] = []
     for fact in active_facts:
-        current_match = _matching_structured_claim(
+        current_match = _matching_open_fact_evidence(
             fact,
-            task_claims,
-        ) or _matching_structured_fact_literal(fact, current_task_text)
-        output_match = _matching_structured_claim(
+            candidates=task_candidates,
+            text=current_task_text,
+        )
+        output_match = _matching_open_fact_evidence(
             fact,
-            output_claims,
-        ) or _matching_structured_fact_literal(fact, output_text)
+            candidates=output_candidates,
+            text=output_text,
+        )
         if output_match is not None and str(output_match.get("polarity")) != "negative":
             observed_active.append((fact, output_match))
         if current_match is not None:
@@ -8512,20 +8524,20 @@ def _structured_memory_adoption_evidence(
             matched_active.append((fact, output_match))
 
     for fact in historical_facts:
-        current_match = _matching_structured_claim(
+        current_match = _matching_open_fact_evidence(
             fact,
-            task_claims,
-        ) or _matching_structured_fact_literal(fact, current_task_text)
+            candidates=task_candidates,
+            text=current_task_text,
+        )
         if current_match is not None:
-            # This value is grounded directly in the current user request.
-            # It is therefore not evidence of adopting stale memory, even
-            # though the same value is historical in the MemoryView.
+            # Values supplied by the current request are not stale-memory evidence.
             excluded_historical_current.append(fact)
             continue
-        output_match = _matching_structured_claim(
+        output_match = _matching_open_fact_evidence(
             fact,
-            output_claims,
-        ) or _matching_structured_fact_literal(fact, output_text)
+            candidates=output_candidates,
+            text=output_text,
+        )
         if output_match is None or str(output_match.get("polarity")) == "negative":
             continue
         if (
@@ -8562,7 +8574,10 @@ def _structured_memory_adoption_evidence(
         "attribution_threshold": 1.0,
         "current_task_overlap_threshold": 1.0,
         "current_task_fingerprint": _text_fingerprint(current_task_text),
-        "current_task_fact_count": len(task_claims),
+        "current_task_fact_count": len(task_candidates),
+        "open_output_candidate_count": len(output_candidates),
+        "open_current_task_candidate_count": len(task_candidates),
+        "legacy_domain_candidate_count": 0,
         "source_fact_count": len(active_facts),
         "candidate_fact_count": len(active_facts),
         "not_injected_fact_count": 0,
@@ -8643,8 +8658,16 @@ def _structured_memory_adoption_evidence(
             str(match.get("raw_text") or match.get("summary") or "")
             for _, match in matched_active[:5]
         ],
+        "matched_active_match_modes": [
+            str(match.get("match_mode") or "")
+            for _, match in matched_active[:5]
+        ],
         "matched_historical_output_spans": [
             str(match.get("raw_text") or match.get("summary") or "")
+            for _, match in matched_historical[:5]
+        ],
+        "matched_historical_match_modes": [
+            str(match.get("match_mode") or "")
             for _, match in matched_historical[:5]
         ],
         "classification_reason": (
@@ -8656,9 +8679,8 @@ def _structured_memory_adoption_evidence(
             if status == "useful"
             else "structured_value_not_observed"
         ),
-        "attribution_mode": "ccf_v2_semantic_key_value_rules",
+        "attribution_mode": "ccf_v3_open_candidate_evidence",
     }
-
 
 def _unique_structured_facts(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
@@ -8759,6 +8781,125 @@ def _matching_structured_claim(
             continue
         return claim
     return None
+
+
+def _matching_open_fact_evidence(
+    fact: Mapping[str, Any],
+    *,
+    candidates: list[dict[str, Any]],
+    text: str,
+) -> dict[str, Any] | None:
+    expected_predicates = _structured_fact_open_predicates(fact)
+    same_value_candidates = [
+        candidate
+        for candidate in candidates
+        if _open_candidate_matches_fact_value(fact, candidate)
+    ]
+    for candidate in same_value_candidates:
+        predicate = _normalize_open_predicate(candidate.get("predicate"))
+        if expected_predicates and not _open_predicate_matches_expected(
+            predicate,
+            expected_predicates,
+        ):
+            continue
+        source_span = candidate.get("source_span")
+        quote = (
+            str(source_span.get("quote") or "")
+            if isinstance(source_span, Mapping)
+            else ""
+        )
+        raw_text = quote or str(candidate.get("value") or "")
+        return {
+            **candidate,
+            "raw_text": raw_text,
+            "summary": raw_text,
+            "polarity": canonical_claim_polarity(
+                str(candidate.get("operator") or "eq")
+            ),
+            "match_mode": "open_candidate_exact",
+        }
+
+    # A structured value attached to another predicate is not evidence for this
+    # fact. Suppress the value-only fallback to avoid cross-slot attribution.
+    if expected_predicates and same_value_candidates:
+        return None
+    return _matching_structured_fact_literal(fact, text)
+
+
+def _open_candidate_matches_fact_value(
+    fact: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> bool:
+    expected_type = str(fact.get("value_type") or "string")
+    expected_unit = _normalize_evidence_unit(fact.get("unit"))
+    expected_value = normalized_value(
+        fact.get("value"),
+        expected_type,
+        expected_unit,
+    )
+    candidate_type = str(candidate.get("value_type") or expected_type)
+    candidate_unit = _normalize_evidence_unit(candidate.get("unit"))
+    candidate_value = normalized_value(
+        candidate.get("value"),
+        candidate_type,
+        candidate_unit,
+    )
+    if candidate_value != expected_value:
+        return False
+    return candidate_unit == expected_unit
+
+
+def _structured_fact_open_predicates(
+    fact: Mapping[str, Any],
+) -> set[str]:
+    values: list[str] = []
+    raw_slot = str(fact.get("raw_slot_text") or "").strip()
+    if raw_slot:
+        values.append(raw_slot)
+
+    scope = str(fact.get("scope") or "").strip()
+    if scope and scope.casefold() != "general":
+        values.extend((scope, scope.rsplit(".", 1)[-1]))
+
+    semantic_key = str(fact.get("semantic_key") or "").strip()
+    if semantic_key:
+        key_scope = semantic_key.rsplit("|", 1)[-1]
+        if key_scope and key_scope.casefold() != "general":
+            values.extend((key_scope, key_scope.rsplit(".", 1)[-1]))
+
+    slot_id = str(fact.get("slot_id") or "").strip()
+    if slot_id.startswith("slot.open."):
+        open_slot = slot_id[len("slot.open.") :]
+        values.append(re.sub(r"_[0-9a-f]{12}$", "", open_slot))
+    elif not values and slot_id:
+        values.append(slot_id.rsplit(".", 1)[-1])
+
+    return {
+        normalized
+        for value in values
+        if (normalized := _normalize_open_predicate(value))
+    }
+
+
+def _normalize_open_predicate(value: Any) -> str:
+    return SchemaRegistryLite.normalize_open_predicate(str(value or ""))
+
+
+def _open_predicate_matches_expected(
+    predicate: str,
+    expected_predicates: set[str],
+) -> bool:
+    if predicate in expected_predicates:
+        return True
+    return any(
+        predicate.endswith(f"_{expected}")
+        for expected in expected_predicates
+        if expected
+    )
+
+
+def _normalize_evidence_unit(value: Any) -> str:
+    return _normalize_fact_text(str(value or "").strip().strip(".,;:!?"))
 
 
 def _matching_structured_fact_literal(
