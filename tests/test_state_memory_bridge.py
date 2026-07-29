@@ -269,6 +269,113 @@ class StateToMemoryBridgeLiteTest(unittest.TestCase):
         self.assertEqual(view["active_claim_ids"], [active["claim_id"]])
         self.assertIn(historical["claim_id"], view["historical_claim_ids"])
 
+    def test_relation_carrier_coalescing_closes_revision_identity(
+        self,
+    ) -> None:
+        first_source = "The refractive offset is 4.2 uv."
+        later_source = (
+            "The refractive offset is 5.1 uv and "
+            "replaces the prior reading."
+        )
+        client = _SequenceSemanticClient(
+            [
+                [
+                    {
+                        "predicate": "refractive_offset",
+                        "value": "4.2",
+                        "value_type": "number",
+                        "unit": "uv",
+                        "source_quote": first_source,
+                    }
+                ],
+                [
+                    {
+                        "predicate": "refractive_offset",
+                        "value": "5.1",
+                        "value_type": "number",
+                        "unit": "uv",
+                        "source_quote": (
+                            "The refractive offset is 5.1 uv"
+                        ),
+                    },
+                    {
+                        "predicate": "refractive_offset",
+                        "value": "replaces the prior reading",
+                        "value_type": "string",
+                        "source_quote": "replaces the prior reading",
+                        "relations": [
+                            {
+                                "relation_type": "supersedes_candidate",
+                                "target_value": "the prior reading",
+                            }
+                        ],
+                    },
+                ],
+            ]
+        )
+        store = MemoryStoreLite()
+        bridge = StateToMemoryBridgeLite(
+            store,
+            semantic_disambiguator=ControlledSemanticDisambiguator(client),
+        )
+        common = {
+            "scope_id": "relation-carrier-sequence",
+            "source_agent": "framework-user",
+            "task_topic": "unseen optical record",
+            "tags": ["generic"],
+            "slot_hint": "source_evidence",
+            "reuse_intent": "reuse validated source evidence",
+            "disambiguation_policy": "control_required",
+        }
+
+        first_report, first_validation = bridge.promote(
+            task_id="carrier-one",
+            fallback_summary=first_source,
+            source_state_ids=["state-carrier-one"],
+            evidence_refs=["state-carrier-one"],
+            **common,
+        )
+        second_report, second_validation = bridge.promote(
+            task_id="carrier-two",
+            fallback_summary=later_source,
+            source_state_ids=["state-carrier-two"],
+            evidence_refs=["state-carrier-two"],
+            **common,
+        )
+
+        self.assertTrue(first_validation.allowed, first_validation.reasons)
+        self.assertTrue(second_validation.allowed, second_validation.reasons)
+        self.assertEqual(first_report.memory_write_count, 1)
+        self.assertEqual(second_report.memory_write_count, 1)
+        self.assertEqual(
+            second_validation.disambiguation_locally_coalesced_relation_candidate_count,
+            1,
+        )
+        snapshot = store.snapshot()
+        claims = [
+            claim
+            for claim in snapshot["claim_cards"]
+            if claim["raw_slot_text"] == "refractive_offset"
+        ]
+        self.assertEqual(len(claims), 2)
+        active = next(
+            claim for claim in claims if claim["status"] == "active"
+        )
+        historical = next(
+            claim for claim in claims if claim["status"] == "superseded"
+        )
+        self.assertEqual(active["value"], "5.1")
+        self.assertEqual(historical["value"], "4.2")
+        self.assertEqual(active["revision_kind"], "replaces")
+        self.assertEqual(
+            active["relations"][0]["target_candidate_id"],
+            historical["candidate_id"],
+        )
+        self.assertIn(
+            "replaces the prior reading",
+            active["source_span"]["quote"],
+        )
+
     def test_cross_source_revision_target_is_bound_only_by_local_identity(
         self,
     ) -> None:

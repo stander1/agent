@@ -583,6 +583,136 @@ class ControlledSemanticDisambiguationTest(unittest.TestCase):
 
         self.assertTrue(result.accepted, result.reasons)
         self.assertEqual(result.candidates[0]["value"], "0")
+
+    def test_coalesces_adjacent_relation_carrier_into_typed_assertion(
+        self,
+    ) -> None:
+        text = (
+            "A scan records the modulation depth at 6.4 zx and "
+            "supersedes its predecessor; the release interlock remains "
+            "false."
+        )
+        client = _FakeClient(
+            [
+                _response(
+                    [
+                        {
+                            "predicate": "modulation_depth",
+                            "value": "6.4",
+                            "value_type": "number",
+                            "unit": "zx",
+                            "source_quote": (
+                                "the modulation depth at 6.4 zx"
+                            ),
+                        },
+                        {
+                            "predicate": "modulation_depth",
+                            "value": "supersedes its predecessor",
+                            "value_type": "string",
+                            "source_quote": (
+                                "supersedes its predecessor"
+                            ),
+                            "relations": [
+                                {
+                                    "relation_type": (
+                                        "supersedes_candidate"
+                                    ),
+                                    "target_value": "its predecessor",
+                                }
+                            ],
+                        },
+                        {
+                            "predicate": "release_interlock",
+                            "value": False,
+                            "value_type": "boolean",
+                            "source_quote": (
+                                "the release interlock remains false"
+                            ),
+                        },
+                    ]
+                )
+            ]
+        )
+
+        result = ControlledSemanticDisambiguator(client).disambiguate(
+            _request(text, task_id="relation-carrier")
+        )
+
+        self.assertTrue(result.accepted, result.reasons)
+        self.assertEqual(len(result.candidates), 2)
+        self.assertEqual(result.rejected_candidate_count, 0)
+        self.assertEqual(
+            result.locally_coalesced_relation_candidate_count,
+            1,
+        )
+        self.assertIn(
+            "claim_1:relation_carrier_coalesced",
+            result.reasons,
+        )
+        scalar = result.candidates[0]
+        self.assertEqual(scalar["value"], "6.4")
+        self.assertEqual(
+            scalar["source_span"]["quote"],
+            (
+                "the modulation depth at 6.4 zx and "
+                "supersedes its predecessor"
+            ),
+        )
+        self.assertEqual(
+            scalar["relations"][0]["target_value"],
+            "its predecessor",
+        )
+        validation = CanonicalClaimSemanticValidator().validate(
+            scalar,
+            source_text=text,
+        )
+        self.assertTrue(validation.allowed, validation.reasons)
+
+    def test_does_not_coalesce_string_value_revision_as_relation_text(
+        self,
+    ) -> None:
+        text = "The coating changes from cobalt to dark cobalt."
+        client = _FakeClient(
+            [
+                _response(
+                    [
+                        {
+                            "predicate": "coating_state",
+                            "value": "cobalt",
+                            "value_type": "string",
+                            "temporal_status": "historical",
+                            "source_quote": "from cobalt",
+                        },
+                        {
+                            "predicate": "coating_state",
+                            "value": "dark cobalt",
+                            "value_type": "string",
+                            "temporal_status": "current",
+                            "source_quote": "dark cobalt",
+                            "relations": [
+                                {
+                                    "relation_type": "supersedes_value",
+                                    "target_value": "cobalt",
+                                }
+                            ],
+                        },
+                    ]
+                )
+            ]
+        )
+
+        result = ControlledSemanticDisambiguator(client).disambiguate(
+            _request(text, task_id="string-revision")
+        )
+
+        self.assertTrue(result.accepted, result.reasons)
+        self.assertEqual(len(result.candidates), 2)
+        self.assertEqual(
+            result.locally_coalesced_relation_candidate_count,
+            0,
+        )
+        self.assertEqual(result.candidates[1]["value"], "dark cobalt")
+
     def test_local_rebinding_rejects_ambiguous_value_anchors(self) -> None:
         text = (
             "The phase drift is -1.8 qx; "

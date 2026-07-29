@@ -272,6 +272,45 @@ latency: <= 180 ms
                 ).allowed
             )
 
+    def test_inline_assignments_preserve_typed_values_and_exact_spans(
+        self,
+    ) -> None:
+        text = (
+            'phase_bias=-1.8 qx, interlock=false; '
+            'material_state="alpha, beta"\n'
+            "sample_count=1,234 records, verified=true"
+        )
+
+        candidates = extract_canonical_claim_candidates(
+            text,
+            subject="artifact:unseen",
+            source_id="state:inline",
+        )
+        by_predicate = {item["predicate"]: item for item in candidates}
+
+        self.assertEqual(by_predicate["phase_bias"]["value"], "-1.8")
+        self.assertEqual(by_predicate["phase_bias"]["unit"], "qx")
+        self.assertEqual(
+            by_predicate["interlock"]["value_type"],
+            "boolean",
+        )
+        self.assertEqual(
+            by_predicate["material_state"]["value"],
+            "alpha, beta",
+        )
+        self.assertEqual(by_predicate["sample_count"]["value"], "1234")
+        self.assertEqual(by_predicate["sample_count"]["unit"], "records")
+        self.assertEqual(by_predicate["verified"]["value"], "true")
+        for candidate in candidates:
+            span = SourceSpan(**candidate["source_span"])
+            self.assertTrue(span.matches(text))
+            self.assertTrue(
+                self.validator.validate(
+                    candidate,
+                    source_text=text,
+                ).allowed
+            )
+
     def test_generic_extractor_does_not_call_legacy_domain_rules(self) -> None:
         with patch(
             "agent_runtime.memory.claim_extractor._extract_known_claims",

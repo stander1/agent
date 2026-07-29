@@ -202,6 +202,47 @@ class MemoryAdoptionGuardTest(unittest.TestCase):
             ["orbital_phase_drift: 7.4 qx"],
         )
 
+    def test_inline_assignments_produce_exact_open_attribution(self) -> None:
+        evidence = _structured_memory_adoption_evidence(
+            revision_guard={
+                "subject": "project:generic",
+                "active_facts": [
+                    {
+                        "slot_id": "slot.open.wavefront_shift_a1",
+                        "raw_slot_text": "wavefront_shift",
+                        "scope": "general",
+                        "value": "-2.6",
+                        "value_type": "number",
+                        "unit": "zx",
+                        "operator": "eq",
+                    },
+                    {
+                        "slot_id": "slot.open.safety_latch_b2",
+                        "raw_slot_text": "safety_latch",
+                        "scope": "general",
+                        "value": "false",
+                        "value_type": "boolean",
+                        "unit": "",
+                        "operator": "eq",
+                    },
+                ],
+                "historical_facts": [],
+            },
+            current_task_text="Reuse the admitted instrument state.",
+            output_text=(
+                "wavefront_shift=-2.6zx, safety_latch=false"
+            ),
+            explicit_reference=False,
+        )
+
+        self.assertEqual(evidence["status"], "useful")
+        self.assertEqual(evidence["open_output_candidate_count"], 2)
+        self.assertEqual(evidence["matched_fact_count"], 2)
+        self.assertEqual(
+            evidence["matched_active_match_modes"],
+            ["open_candidate_exact", "open_candidate_exact"],
+        )
+
     def test_same_value_on_another_open_predicate_is_not_attributed(self) -> None:
         evidence = _structured_memory_adoption_evidence(
             revision_guard={

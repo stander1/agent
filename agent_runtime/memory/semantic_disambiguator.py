@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Mapping, Protocol
 
 from agent_runtime.memory.claim_extractor import parse_complete_measurement
@@ -104,6 +104,7 @@ class SemanticDisambiguationResult:
     rejected_candidate_count: int = 0
     locally_rebound_candidate_count: int = 0
     locally_normalized_candidate_count: int = 0
+    locally_coalesced_relation_candidate_count: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
@@ -311,7 +312,7 @@ class ControlledSemanticDisambiguator:
                 **common,
             )
 
-        accepted: list[dict[str, Any]] = []
+        accepted_candidates: list[CanonicalClaimCandidate] = []
         rejection_reasons: list[str] = []
         locally_rebound_count = 0
         locally_normalized_count = 0
@@ -330,11 +331,11 @@ class ControlledSemanticDisambiguator:
                     f"claim_{index}:{reason}" for reason in reasons
                 )
                 continue
-            accepted.append(candidate.to_dict())
+            accepted_candidates.append(candidate)
             locally_rebound_count += int(locally_rebound)
             locally_normalized_count += int(locally_normalized)
 
-        if not accepted:
+        if not accepted_candidates:
             return SemanticDisambiguationResult(
                 status="rejected",
                 reasons=tuple(
@@ -345,13 +346,37 @@ class ControlledSemanticDisambiguator:
                 rejected_candidate_count=len(claims),
                 **common,
             )
+        rejected_candidate_count = len(claims) - len(
+            accepted_candidates
+        )
+        (
+            accepted_candidates,
+            coalesced_relation_count,
+            coalescing_diagnostics,
+        ) = _coalesce_relation_carriers(
+            accepted_candidates,
+            source_text=request.source_text,
+        )
+        accepted = [
+            candidate.to_dict() for candidate in accepted_candidates
+        ]
         return SemanticDisambiguationResult(
             status="accepted",
             candidates=tuple(accepted),
-            reasons=tuple(dict.fromkeys(rejection_reasons)),
-            rejected_candidate_count=len(claims) - len(accepted),
+            reasons=tuple(
+                dict.fromkeys(
+                    [
+                        *rejection_reasons,
+                        *coalescing_diagnostics,
+                    ]
+                )
+            ),
+            rejected_candidate_count=rejected_candidate_count,
             locally_rebound_candidate_count=locally_rebound_count,
             locally_normalized_candidate_count=locally_normalized_count,
+            locally_coalesced_relation_candidate_count=(
+                coalesced_relation_count
+            ),
             **common,
         )
 
@@ -724,7 +749,7 @@ def _render_prompts(
         "description, reason, or any other nested field. "
         "Do not invent aliases such as 'equals', 'numeric', 'factual', "
         "'present', 'state', 'property', or 'measurement'. "
-        "Use relations only for explicit relations stated in the same quote."
+        "Relations annotate values; never emit relation text as a claim value."
     )
     user_prompt = json.dumps(
         {
@@ -971,6 +996,154 @@ def _candidate_from_proposal(
         locally_rebound,
         locally_normalized,
     )
+
+
+def _coalesce_relation_carriers(
+    candidates: list[CanonicalClaimCandidate],
+    *,
+    source_text: str,
+) -> tuple[
+    list[CanonicalClaimCandidate],
+    int,
+    list[str],
+]:
+    """Attach typed assertions to adjacent relation-only proposal spans."""
+
+    if len(candidates) < 2:
+        return list(candidates), 0, []
+    resolved = list(candidates)
+    removed: set[int] = set()
+    diagnostics: list[str] = []
+    ordered = sorted(
+        range(len(resolved)),
+        key=lambda index: (
+            resolved[index].source_span.start,
+            resolved[index].source_span.end,
+            index,
+        ),
+    )
+    for position, carrier_index in enumerate(ordered):
+        if carrier_index in removed:
+            continue
+        carrier = resolved[carrier_index]
+        if not _is_relation_carrier_candidate(carrier):
+            continue
+        neighboring_indexes: list[int] = []
+        for step in (-1, 1):
+            neighbor_position = position + step
+            while 0 <= neighbor_position < len(ordered):
+                neighbor_index = ordered[neighbor_position]
+                if neighbor_index not in removed:
+                    neighboring_indexes.append(neighbor_index)
+                    break
+                neighbor_position += step
+        compatible = [
+            index
+            for index in neighboring_indexes
+            if _can_receive_relation_carrier(
+                resolved[index],
+                carrier,
+            )
+        ]
+        if not compatible:
+            continue
+        target_index = min(
+            compatible,
+            key=lambda index: _span_distance(
+                resolved[index].source_span,
+                carrier.source_span,
+            ),
+        )
+        target = resolved[target_index]
+        start = min(target.source_span.start, carrier.source_span.start)
+        end = max(target.source_span.end, carrier.source_span.end)
+        relations = {
+            (
+                relation.relation_type,
+                relation.target_value,
+                relation.target_candidate_id,
+            ): relation
+            for relation in (*target.relations, *carrier.relations)
+        }
+        resolved[target_index] = replace(
+            target,
+            source_span=SourceSpan.from_text(
+                source_id=target.source_span.source_id,
+                text=source_text,
+                start=start,
+                end=end,
+            ),
+            relations=tuple(relations.values()),
+            schema_status="llm_proposed_locally_coalesced_relation",
+        )
+        removed.add(carrier_index)
+        diagnostics.append(
+            f"claim_{carrier_index}:relation_carrier_coalesced"
+        )
+    return (
+        [
+            candidate
+            for index, candidate in enumerate(resolved)
+            if index not in removed
+        ],
+        len(removed),
+        diagnostics,
+    )
+
+
+def _is_relation_carrier_candidate(
+    candidate: CanonicalClaimCandidate,
+) -> bool:
+    if candidate.value_type != "string" or not candidate.relations:
+        return False
+    value = _normalized_relation_surface(candidate.value)
+    quote = _normalized_relation_surface(candidate.source_span.quote)
+    if not value or quote != value:
+        return False
+    return any(
+        (
+            target := _normalized_relation_surface(
+                relation.target_value
+            )
+        )
+        and target != value
+        and target in value
+        for relation in candidate.relations
+    )
+
+
+def _can_receive_relation_carrier(
+    candidate: CanonicalClaimCandidate,
+    carrier: CanonicalClaimCandidate,
+) -> bool:
+    return (
+        candidate.value_type != "string"
+        and candidate.subject == carrier.subject
+        and candidate.predicate == carrier.predicate
+        and candidate.source_span.source_id
+        == carrier.source_span.source_id
+        and _span_distance(
+            candidate.source_span,
+            carrier.source_span,
+        )
+        <= 64
+        and (
+            candidate.source_span.end <= carrier.source_span.start
+            or carrier.source_span.end <= candidate.source_span.start
+        )
+    )
+
+
+def _span_distance(left: SourceSpan, right: SourceSpan) -> int:
+    if left.end <= right.start:
+        return right.start - left.end
+    if right.end <= left.start:
+        return left.start - right.end
+    return 0
+
+
+def _normalized_relation_surface(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
 
 
 def _exact_quote_spans(

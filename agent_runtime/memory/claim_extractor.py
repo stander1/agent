@@ -43,6 +43,17 @@ _GENERIC_KEY_VALUE_RE = re.compile(
     r"(?:\*\*)?\s*(?:=|:|：)\s*"
     r"(?P<value>[^\r\n]+?)\s*$"
 )
+_GENERIC_INLINE_ASSIGNMENT_START_RE = re.compile(
+    r"^\s*(?:[-*+]\s+)?(?:\*\*)?"
+    r"[^:=,;\r\n]{1,80}?"
+    r"(?:\*\*)?\s*[:=\uFF1A]\s*"
+)
+_GENERIC_INLINE_ASSIGNMENT_RE = re.compile(
+    r"^\s*(?:[-*+]\s+)?(?:\*\*)?"
+    r"(?P<label>[^:=,;\r\n]{1,80}?)"
+    r"(?:\*\*)?\s*[:=\uFF1A]\s*"
+    r"(?P<value>.+?)\s*$"
+)
 _GENERIC_TABLE_SEPARATOR_RE = re.compile(
     r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$"
 )
@@ -114,6 +125,20 @@ def extract_canonical_claim_candidates(
         )
         for candidate in candidates
     ]
+    inline_candidates = _extract_generic_inline_candidates(
+        source_text,
+        subject=subject,
+        source_id=source_id,
+        confidence=min(0.98, default_confidence + 0.02),
+    )
+    candidates.extend(inline_candidates)
+    structured_spans.extend(
+        (
+            candidate.source_span.start,
+            candidate.source_span.end,
+        )
+        for candidate in inline_candidates
+    )
     for match in _GENERIC_KEY_VALUE_RE.finditer(source_text):
         if any(
             _ranges_overlap(
@@ -161,6 +186,108 @@ def extract_canonical_claim_candidates(
         )
         deduplicated.setdefault(key, candidate)
     return [candidate.to_dict() for candidate in deduplicated.values()]
+
+
+def _extract_generic_inline_candidates(
+    text: str,
+    *,
+    subject: str,
+    source_id: str,
+    confidence: float,
+) -> list[CanonicalClaimCandidate]:
+    candidates: list[CanonicalClaimCandidate] = []
+    offset = 0
+    for raw_line in text.splitlines(keepends=True):
+        line = raw_line.rstrip("\r\n")
+        segments = _top_level_assignment_segments(line)
+        if len(segments) < 2:
+            offset += len(raw_line)
+            continue
+        parsed: list[tuple[int, int, re.Match[str]]] = []
+        for start, end in segments:
+            match = _GENERIC_INLINE_ASSIGNMENT_RE.fullmatch(
+                line[start:end]
+            )
+            if match is None:
+                parsed = []
+                break
+            parsed.append((start, end, match))
+        for start, end, match in parsed:
+            predicate = _clean_open_predicate(match.group("label"))
+            value_text = _clean_structured_value(match.group("value"))
+            if not _valid_open_predicate(predicate) or not value_text:
+                continue
+            absolute_start = offset + start
+            absolute_end = offset + end
+            while (
+                absolute_start < absolute_end
+                and text[absolute_start].isspace()
+            ):
+                absolute_start += 1
+            while (
+                absolute_end > absolute_start
+                and text[absolute_end - 1].isspace()
+            ):
+                absolute_end -= 1
+            candidate = _build_canonical_candidate(
+                source_text=text,
+                source_id=source_id,
+                start=absolute_start,
+                end=absolute_end,
+                subject=subject,
+                predicate=predicate,
+                value_text=value_text,
+                confidence=confidence,
+            )
+            if candidate is not None:
+                candidates.append(candidate)
+        offset += len(raw_line)
+    return candidates
+
+
+def _top_level_assignment_segments(
+    line: str,
+) -> list[tuple[int, int]]:
+    starts = [0]
+    ends: list[int] = []
+    quote = ""
+    escaped = False
+    brackets: list[str] = []
+    closing = {")": "(", "]": "[", "}": "{"}
+    for index, character in enumerate(line):
+        if quote:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = ""
+            continue
+        if character in {'"', "'"}:
+            quote = character
+            continue
+        if character in "([{":
+            brackets.append(character)
+            continue
+        if character in closing:
+            if brackets and brackets[-1] == closing[character]:
+                brackets.pop()
+            continue
+        if character not in {",", ";", "\uFF0C", "\uFF1B"} or brackets:
+            continue
+        if (
+            _GENERIC_INLINE_ASSIGNMENT_START_RE.match(
+                line[index + 1 :]
+            )
+            is None
+        ):
+            continue
+        ends.append(index)
+        starts.append(index + 1)
+    if not ends:
+        return []
+    ends.append(len(line))
+    return list(zip(starts, ends))
 
 
 def _extract_generic_json_candidates(
