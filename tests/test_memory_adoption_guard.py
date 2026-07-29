@@ -12,8 +12,10 @@ from agent_runtime.drivers.autogen import (
     AutoGenHookManager,
     HookCallContext,
     _InjectedMemoryRecord,
+    _semantic_autogen_output_text,
     _structured_memory_adoption_evidence,
 )
+from agent_runtime.drivers.autogen_codec import AutoGenMessageCodec
 from agent_runtime.memory.memory_store import MemoryRef, MemoryStoreLite
 from agent_runtime.reliability.memory_adoption_guard import (
     guard_memory_adoption_output,
@@ -29,6 +31,134 @@ class ArbitraryTextMessage:
 
 
 class MemoryAdoptionGuardTest(unittest.TestCase):
+    def test_semantic_output_projection_excludes_structured_source_envelope(
+        self,
+    ) -> None:
+        manager_message = ArbitraryTextMessage(
+            "orbital_phase_drift: 7.4 qx",
+            "arbitrary_transport_source",
+        )
+        codec = AutoGenMessageCodec()
+        decoded = codec.decode_many(manager_message)
+        rendered = codec.render_text(decoded)
+
+        self.assertEqual(
+            _semantic_autogen_output_text(
+                decoded,
+                rendered,
+                preferred_source="arbitrary_transport_source",
+            ),
+            "orbital_phase_drift: 7.4 qx",
+        )
+        self.assertEqual(
+            rendered,
+            "arbitrary_transport_source: orbital_phase_drift: 7.4 qx",
+        )
+
+    def test_recorded_adoption_uses_model_content_not_transport_rendering(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.dict(
+                "os.environ",
+                {
+                    "AGENTLITE_AUTOGEN_BROADCAST_MODE": "real-rewrite",
+                    "AGENTLITE_AUTOGEN_SHARED_MEMORY": "1",
+                    "AGENTLITE_MEMORY_SCOPE": "semantic-output-boundary",
+                },
+                clear=False,
+            ):
+                manager = AutoGenHookManager(
+                    self._bootstrap_context(root, "launch_output_boundary")
+                )
+                context = HookCallContext(
+                    call_id="call_output_boundary",
+                    task=TaskSpec(
+                        task_id="generic-output-1",
+                        group_id="generic-output-chain",
+                        title="Reuse admitted telemetry",
+                        prompt="Use the admitted telemetry.",
+                    ),
+                    agent=AgentDescriptor(
+                        "arbitrary_receiver",
+                        "ArbitraryReceiver",
+                    ),
+                    method_name="on_messages",
+                    target_kind="agentchat_agent",
+                )
+                ref = MemoryRef(
+                    memory_id="mem_open_telemetry",
+                    version_id=1,
+                    status="active",
+                    task_topic="generic.telemetry",
+                    memory_view_id="view_open_telemetry",
+                    slot_id="slot.open.orbital_phase_drift_123456789abc",
+                )
+                manager._memory_injections_by_call[context.call_id] = [
+                    _InjectedMemoryRecord(
+                        ref=ref,
+                        prompt_view="orbital_phase_drift: 7.4 qx",
+                        current_task_text="Use the admitted telemetry.",
+                        current_task_source="user_task",
+                        injected_prompt_view="orbital_phase_drift: 7.4 qx",
+                        revision_guard={
+                            "required": True,
+                            "schema_version": "ccf.v2",
+                            "subject": "project:generic",
+                            "semantic_key": (
+                                "project:generic|"
+                                "slot.open.orbital_phase_drift_123456789abc|"
+                                "general"
+                            ),
+                            "active_facts": [
+                                {
+                                    "slot_id": (
+                                        "slot.open."
+                                        "orbital_phase_drift_123456789abc"
+                                    ),
+                                    "raw_slot_text": "orbital_phase_drift",
+                                    "scope": "general",
+                                    "value": "7.4",
+                                    "value_type": "number",
+                                    "unit": "qx",
+                                    "operator": "eq",
+                                }
+                            ],
+                            "historical_facts": [],
+                        },
+                    )
+                ]
+
+                manager.record_call_end(
+                    context,
+                    ArbitraryTextMessage(
+                        "orbital_phase_drift: 7.4 qx",
+                        "arbitrary_transport_source",
+                    ),
+                )
+
+                events = self._events(manager.output_dir / "trace.jsonl")
+                adoption = next(
+                    event
+                    for event in events
+                    if event["event_type"] == "autogen_memory_adoption"
+                )
+                evidence = adoption["payload"]["evidence"][0]
+                self.assertEqual(
+                    adoption["payload"]["attribution_surface"],
+                    "decoded_model_content_v1",
+                )
+                self.assertEqual(evidence["status"], "useful")
+                self.assertEqual(
+                    evidence["matched_active_match_modes"],
+                    ["open_candidate_exact"],
+                )
+                self.assertEqual(
+                    evidence["matched_active_output_spans"],
+                    ["orbital_phase_drift: 7.4 qx"],
+                )
+
     def test_open_candidate_attribution_does_not_call_legacy_parser(self) -> None:
         with patch(
             "agent_runtime.drivers.autogen.extract_claim_cards",

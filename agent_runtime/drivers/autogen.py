@@ -1373,6 +1373,7 @@ class AutoGenHookManager:
                 "memory_supported_output_count": int(
                     bool(unique_useful or unique_mixed)
                 ),
+                "attribution_surface": "decoded_model_content_v1",
                 "attribution_mode": (
                     "ccf_v3_open_candidate_evidence"
                     if any(
@@ -2459,6 +2460,11 @@ class AutoGenHookManager:
     def record_call_end(self, context: HookCallContext, result: Any) -> None:
         decoded_messages = self.codec.decode_many(result)
         text = self.codec.render_text(decoded_messages) or _extract_text(result)
+        semantic_output_text = _semantic_autogen_output_text(
+            decoded_messages,
+            text,
+            preferred_source=context.agent.agent_id,
+        )
         with self._memory_lock:
             injected_records = list(
                 self._memory_injections_by_call.get(context.call_id, ())
@@ -2468,7 +2474,7 @@ class AutoGenHookManager:
         )
         self._record_memory_adoption_feedback(
             context=context,
-            output_text=adoption_audit_text or text,
+            output_text=adoption_audit_text or semantic_output_text,
         )
         guard_metadata = dict(context.memory_adoption_guard)
         guard_blocked = guard_metadata.get("status") in {
@@ -10347,6 +10353,53 @@ def _semantic_autogen_state_text(
             if cleaned_tool_payload:
                 semantic_parts.append(cleaned_tool_payload)
     return "\n".join(dict.fromkeys(semantic_parts)).strip()
+
+
+def _semantic_autogen_output_text(
+    decoded_messages: list[Any],
+    text: str,
+    *,
+    preferred_source: str = "",
+) -> str:
+    """Project decoded model content without transport presentation metadata."""
+
+    candidates: list[tuple[str, str]] = []
+    for message in decoded_messages:
+        if str(getattr(message, "message_kind", "") or "") in {
+            "event",
+            "tool_call",
+            "tool_result",
+        }:
+            continue
+        content = str(getattr(message, "content_text", "") or "").strip()
+        cleaned_content = _sanitize_autogen_routing_metadata(content)
+        if cleaned_content:
+            candidates.append(
+                (
+                    str(getattr(message, "source", "") or "").strip(),
+                    cleaned_content,
+                )
+            )
+
+    preferred = preferred_source.strip().casefold()
+    preferred_parts = [
+        content
+        for source, content in candidates
+        if preferred and source.casefold() == preferred
+    ]
+    if preferred_parts:
+        return "\n".join(dict.fromkeys(preferred_parts)).strip()
+
+    model_parts = [
+        content
+        for source, content in candidates
+        if source.casefold() not in {"user", "system"}
+    ]
+    if model_parts:
+        return "\n".join(dict.fromkeys(model_parts)).strip()
+    if candidates:
+        return candidates[-1][1]
+    return _sanitize_autogen_routing_metadata(text)
 
 
 def _has_semantic_payload(decoded_messages: list[Any], text: str) -> bool:
