@@ -4565,6 +4565,7 @@ class AutoGenHookManager:
             and str(getattr(message, "source", "") or "").casefold() != "user"
         ]
         sections = [
+            _MODEL_CONTEXT_RESPONSE_BOUNDARY,
             "CURRENT_USER_TASK (highest priority):",
             receiver_view["current_task"],
             _required_evidence_prompt_rule(
@@ -4637,6 +4638,7 @@ class AutoGenHookManager:
                 rewrite_safety={
                     "team_receiver_context_view_hydration": True,
                     "team_receiver_role_view_hydration": True,
+                    "task_sequence_index": context.task_sequence_index,
                     "current_task_units_preserved": bool(
                         receiver_view.get("current_task_units_preserved")
                     ),
@@ -4671,6 +4673,7 @@ class AutoGenHookManager:
             rewrite_safety={
                 "team_receiver_context_view_hydration": True,
                 "team_receiver_role_view_hydration": True,
+                "task_sequence_index": context.task_sequence_index,
                 "current_task_units_preserved": bool(
                     receiver_view.get("current_task_units_preserved")
                 ),

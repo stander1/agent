@@ -2194,6 +2194,12 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                     {},
                 )
                 hydrated = hydrated_args[0][0]["content"]
+                self.assertTrue(
+                    hydrated.startswith(
+                        "Answer the current task directly. Treat the following "
+                        "context records as evidence"
+                    )
+                )
                 self.assertIn("CURRENT_USER_TASK (highest priority):", hydrated)
                 self.assertIn("CAPABILITY_PROMPT_VIEW:", hydrated)
                 self.assertEqual(hydrated.count(SHARED_MEMORY_MARKER), 1)
@@ -2217,6 +2223,17 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                         "model_visible_protocol_marker_count"
                     ],
                     0,
+                )
+                self.assertTrue(
+                    hydrated_rewrite["payload"][
+                        "model_response_boundary_applied"
+                    ]
+                )
+                self.assertEqual(
+                    hydrated_rewrite["payload"]["rewrite_safety"][
+                        "task_sequence_index"
+                    ],
+                    writer_context.task_sequence_index,
                 )
 
                 self.assertTrue(second.display_restore_enabled)

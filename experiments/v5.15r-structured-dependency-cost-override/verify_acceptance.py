@@ -239,8 +239,7 @@ def build_report(
         ),
         _check(
             "nonreducing_final_rewrites_use_continuity_cost_override",
-            evidence["expanded_receiver_count"] > 0
-            and evidence["expanded_override_receiver_count"]
+            evidence["expanded_override_receiver_count"]
             == evidence["expanded_receiver_count"],
             (
                 f"expanded={evidence['expanded_receiver_count']};"
@@ -281,6 +280,9 @@ def build_report(
         "continuity_cost_override_count": evidence[
             "expanded_override_receiver_count"
         ],
+        "continuity_cost_override_exercised": bool(
+            evidence["expanded_receiver_count"]
+        ),
     }
     report["checks"] = checks
     report["structured_dependency_cost_evidence"] = evidence

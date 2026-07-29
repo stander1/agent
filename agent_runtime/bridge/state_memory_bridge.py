@@ -233,11 +233,25 @@ class CanonicalClaimSemanticValidator:
                 if not isinstance(relation, dict):
                     reasons.append("invalid_claim_relation")
                     continue
+                if str(
+                    relation.get("target_candidate_id") or ""
+                ).strip():
+                    reasons.append(
+                        "relation_target_candidate_id_not_locally_bound"
+                    )
+                    continue
+                relation_type = str(
+                    relation.get("relation_type") or ""
+                ).strip()
                 target_value = str(relation.get("target_value") or "").strip()
-                if target_value and not self._contains_value(
-                    quote,
-                    target_value,
-                    "string",
+                if (
+                    target_value
+                    and not self._contains_value(
+                        quote,
+                        target_value,
+                        "string",
+                    )
+                    and relation_type not in SUPERSESSION_RELATION_TYPES
                 ):
                     reasons.append("relation_target_not_in_source_span")
 
@@ -613,6 +627,10 @@ class StateToMemoryBridgeLite:
             return None, [
                 f"explicit_claim_{reason}" for reason in result.reasons
             ]
+        enriched["relations"] = self._relations_for_local_predecessor_binding(
+            enriched.get("relations") or [],
+            source_quote=str(span_payload.get("quote") or ""),
+        )
         enriched["source_pointer"] = str(
             span_payload.get("source_id") or default_source_id
         )
@@ -650,6 +668,39 @@ class StateToMemoryBridgeLite:
         ]
 
     @staticmethod
+    def _relations_for_local_predecessor_binding(
+        relations: Any,
+        *,
+        source_quote: str,
+    ) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for relation in relations:
+            if not isinstance(relation, dict):
+                continue
+            current = dict(relation)
+            relation_type = str(
+                current.get("relation_type") or ""
+            ).strip()
+            target_value = str(
+                current.get("target_value") or ""
+            ).strip()
+            if (
+                relation_type in SUPERSESSION_RELATION_TYPES
+                and target_value
+                and not CanonicalClaimSemanticValidator._contains_value(
+                    source_quote,
+                    target_value,
+                    "string",
+                )
+            ):
+                # A cross-source predecessor identity is runtime-owned. The
+                # provider may identify a revision relation, but only the
+                # memory store may bind it to a unique active predecessor.
+                current["target_value"] = ""
+            normalized.append(current)
+        return normalized
+
+    @staticmethod
     def _claim_card_from_canonical_candidate(
         candidate: dict[str, Any],
         *,
@@ -666,11 +717,16 @@ class StateToMemoryBridgeLite:
             if temporal_status == "future"
             else "asserted"
         )
-        relations = [
-            relation
-            for relation in candidate.get("relations") or []
-            if isinstance(relation, dict)
-        ]
+        source_span = candidate.get("source_span")
+        source_quote = (
+            str(source_span.get("quote") or "")
+            if isinstance(source_span, dict)
+            else ""
+        )
+        relations = StateToMemoryBridgeLite._relations_for_local_predecessor_binding(
+            candidate.get("relations") or [],
+            source_quote=source_quote,
+        )
         revision_kind = (
             "replaces"
             if any(
@@ -679,7 +735,6 @@ class StateToMemoryBridgeLite:
             )
             else "asserted"
         )
-        source_span = candidate.get("source_span")
         source_pointer = ""
         raw_text = ""
         if isinstance(source_span, dict):

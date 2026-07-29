@@ -120,6 +120,29 @@ class StructuredDependencyCostOverrideAcceptanceTest(unittest.TestCase):
             failed,
         )
 
+    def test_reducing_rewrites_do_not_require_override_exercise(self) -> None:
+        commit = "abc123"
+        scenario, team, workflow, session, snapshot = _bound_inputs(commit)
+        trace = _passing_trace(team)
+        for event in trace[1:]:
+            event["payload"]["native_input_tokens"] = 80
+            event["payload"]["rewritten_input_tokens"] = 20
+            event["payload"]["continuity_cost_override"] = False
+        report = self.verifier.build_report(
+            implementation_commit=commit,
+            scenario=scenario,
+            team_config=team,
+            workflow=workflow,
+            session_report=session,
+            memory_snapshot=snapshot,
+            trace_events=trace,
+        )
+
+        self.assertTrue(report["summary"]["passed"])
+        self.assertFalse(
+            report["summary"]["continuity_cost_override_exercised"]
+        )
+
     def test_provider_decision_is_not_structured_zero_cost_evidence(self) -> None:
         commit = "abc123"
         scenario, team, workflow, session, snapshot = _bound_inputs(commit)

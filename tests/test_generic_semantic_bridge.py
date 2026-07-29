@@ -121,6 +121,48 @@ interval: 1 to 3 qx
             self.validator.validate(candidate, source_text=text).allowed
         )
 
+    def test_non_supersession_relation_target_remains_source_bound(self) -> None:
+        text = "signal_state: ready"
+        candidate = extract_canonical_claim_candidates(
+            text,
+            subject="system:generic",
+            source_id="state:relation-boundary",
+        )[0]
+        candidate["relations"] = [
+            {
+                "relation_type": "supports",
+                "target_value": "absent target",
+                "target_candidate_id": "",
+            }
+        ]
+
+        result = self.validator.validate(candidate, source_text=text)
+
+        self.assertFalse(result.allowed)
+        self.assertIn("relation_target_not_in_source_span", result.reasons)
+
+    def test_external_relation_candidate_identity_is_rejected(self) -> None:
+        text = "signal_state: ready"
+        candidate = extract_canonical_claim_candidates(
+            text,
+            subject="system:generic",
+            source_id="state:relation-identity",
+        )[0]
+        candidate["relations"] = [
+            {
+                "relation_type": "supersedes_claim",
+                "target_value": "",
+                "target_candidate_id": "provider_supplied_id",
+            }
+        ]
+
+        result = self.validator.validate(candidate, source_text=text)
+
+        self.assertFalse(result.allowed)
+        self.assertIn(
+            "relation_target_candidate_id_not_locally_bound",
+            result.reasons,
+        )
     def test_paired_temporal_request_and_local_value_label_are_generic(
         self,
     ) -> None:

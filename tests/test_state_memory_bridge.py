@@ -269,6 +269,126 @@ class StateToMemoryBridgeLiteTest(unittest.TestCase):
         self.assertEqual(view["active_claim_ids"], [active["claim_id"]])
         self.assertIn(historical["claim_id"], view["historical_claim_ids"])
 
+    def test_cross_source_revision_target_is_bound_only_by_local_identity(
+        self,
+    ) -> None:
+        first_source = "The channel reading is 41 qx."
+        later_source = "The channel reading is now 37 qx and supersedes it."
+        client = _SequenceSemanticClient(
+            [
+                [
+                    {
+                        "predicate": "channel_reading",
+                        "value": "41",
+                        "value_type": "number",
+                        "unit": "qx",
+                        "source_quote": first_source,
+                        "confidence": 0.9,
+                    }
+                ],
+                [
+                    {
+                        "predicate": "channel_reading",
+                        "value": "37",
+                        "value_type": "number",
+                        "unit": "qx",
+                        "source_quote": later_source,
+                        "confidence": 0.9,
+                        "relations": [
+                            {
+                                "relation_type": "supersedes_value",
+                                "target_value": "41",
+                            }
+                        ],
+                    }
+                ],
+            ]
+        )
+        store = MemoryStoreLite()
+        bridge = StateToMemoryBridgeLite(
+            store,
+            semantic_disambiguator=ControlledSemanticDisambiguator(client),
+        )
+        common = {
+            "scope_id": "cross-source-revision",
+            "source_agent": "framework-user",
+            "task_topic": "unseen channel record",
+            "tags": ["generic"],
+            "slot_hint": "source_evidence",
+            "reuse_intent": "reuse validated source evidence",
+            "disambiguation_policy": "control_required",
+        }
+
+        first_report, first_validation = bridge.promote(
+            task_id="cross-source-one",
+            fallback_summary=first_source,
+            source_state_ids=["state-cross-source-one"],
+            evidence_refs=["state-cross-source-one"],
+            **common,
+        )
+        second_report, second_validation = bridge.promote(
+            task_id="cross-source-two",
+            fallback_summary=later_source,
+            source_state_ids=["state-cross-source-two"],
+            evidence_refs=["state-cross-source-two"],
+            **common,
+        )
+
+        self.assertTrue(first_validation.allowed, first_validation.reasons)
+        self.assertTrue(second_validation.allowed, second_validation.reasons)
+        self.assertEqual(first_report.admission_status, "admitted")
+        self.assertEqual(second_report.admission_status, "admitted")
+        snapshot = store.snapshot()
+        claims = [
+            claim
+            for claim in snapshot["claim_cards"]
+            if claim["raw_slot_text"] == "channel_reading"
+        ]
+        active = next(claim for claim in claims if claim["status"] == "active")
+        historical = next(
+            claim for claim in claims if claim["status"] == "superseded"
+        )
+        self.assertEqual(active["value"], "37")
+        self.assertEqual(historical["value"], "41")
+        self.assertEqual(active["relations"][0]["target_value"], "")
+        self.assertEqual(
+            active["relations"][0]["target_candidate_id"],
+            historical["candidate_id"],
+        )
+
+    def test_explicit_revision_uses_the_same_local_binding_boundary(self) -> None:
+        source = "The channel reading is now 37 qx and supersedes it."
+        bridge = StateToMemoryBridgeLite(MemoryStoreLite())
+
+        validated, reasons = bridge._validate_explicit_claim_card(
+            {
+                "subject": "generic system",
+                "raw_slot_text": "channel_reading",
+                "slot_id": "slot.project.requirement",
+                "scope": "constraint.channel_reading",
+                "value": "37",
+                "value_type": "number",
+                "unit": "qx",
+                "relations": [
+                    {
+                        "relation_type": "supersedes_value",
+                        "target_value": "41",
+                        "target_candidate_id": "",
+                    }
+                ],
+            },
+            source_text=source,
+            default_source_id="state-explicit-revision",
+        )
+
+        self.assertEqual(reasons, [])
+        self.assertIsNotNone(validated)
+        assert validated is not None
+        self.assertEqual(validated["relations"][0]["target_value"], "")
+        self.assertEqual(
+            validated["relations"][0]["target_candidate_id"],
+            "",
+        )
     def test_required_control_failure_cannot_fall_back_to_coarse_candidate(
         self,
     ) -> None:
