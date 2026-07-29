@@ -27,6 +27,13 @@ def collect_team_takeover_evidence(data_dir: Path) -> dict[str, Any]:
     counts = Counter(str(event.get("event_type", "")) for event in events)
     team_payloads = _payloads(events, "autogen_team_input_real_rewrite")
     display_payloads = _payloads(events, "autogen_team_display_restored")
+    fallback_reasons = sorted(
+        {
+            reason
+            for payload in team_payloads
+            for reason in _team_fallback_reasons(payload)
+        }
+    )
     return {
         "available": bool(status) and bool(events),
         "session_id": session_dir.name,
@@ -45,6 +52,7 @@ def collect_team_takeover_evidence(data_dir: Path) -> dict[str, Any]:
             int(payload.get("rewrite_fallback_count", 0) or 0)
             for payload in team_payloads
         ),
+        "team_fallback_reasons": fallback_reasons,
         "real_message_mutation_count": sum(
             bool(payload.get("real_message_mutation")) for payload in team_payloads
         ),
@@ -92,40 +100,93 @@ def assess_team_takeover(
     first_stream_item: dict[str, Any],
     expected_phase: str,
 ) -> dict[str, bool]:
+    takeover_path = classify_team_takeover_path(evidence)
+    internal_packet_hidden = (
+        not bool(first_stream_item.get("contains_team_rewrite_marker"))
+        and not bool(first_stream_item.get("contains_state_pool_marker"))
+        and not bool(first_stream_item.get("contains_broadcast_manifest"))
+        and not bool(first_stream_item.get("contains_receiver_prompt_views"))
+    )
+    if takeover_path == "applied_rewrite":
+        caller_output_safe = (
+            int(evidence.get("display_restore_event_count", 0) or 0) >= 1
+            and int(first_stream_item.get("native_marker_count", 0) or 0) > 0
+            and internal_packet_hidden
+        )
+    else:
+        caller_output_safe = (
+            takeover_path == "cost_guarded_fallback"
+            and int(first_stream_item.get("native_marker_count", 0) or 0) > 0
+            and internal_packet_hidden
+        )
     return {
         "agentlite_active": bool(app_payload.get("agentlite_active")),
         "bootstrap_ok": bool(evidence.get("bootstrap_ok")),
         "hooks_active": bool(evidence.get("hooks_active")),
         "driver_phase_current": evidence.get("driver_phase") == expected_phase,
-        "team_rewrite_recorded": int(evidence.get("team_event_count", 0) or 0)
+        "team_takeover_recorded": int(evidence.get("team_event_count", 0) or 0)
         >= 1,
-        "team_rewrite_applied": int(evidence.get("team_applied_count", 0) or 0)
-        >= 1,
-        "team_rewrite_no_fallback": int(
-            evidence.get("team_fallback_count", 0) or 0
+        "team_rewrite_applied_or_cost_guarded": takeover_path
+        in {"applied_rewrite", "cost_guarded_fallback"},
+        "real_message_boundary_safe": (
+            takeover_path == "applied_rewrite"
+            and int(evidence.get("real_message_mutation_count", 0) or 0) >= 1
         )
-        == 0,
-        "real_message_mutated": int(
-            evidence.get("real_message_mutation_count", 0) or 0
-        )
-        >= 1,
-        "team_task_tokens_reduced": int(
-            evidence.get("task_token_savings", 0) or 0
-        )
-        > 0,
-        "team_broadcast_tokens_reduced": int(
-            evidence.get("broadcast_token_savings", 0) or 0
-        )
-        > 0,
-        "caller_display_restored": (
-            int(evidence.get("display_restore_event_count", 0) or 0) >= 1
-            and int(first_stream_item.get("native_marker_count", 0) or 0) > 0
-            and not bool(first_stream_item.get("contains_team_rewrite_marker"))
-            and not bool(first_stream_item.get("contains_state_pool_marker"))
-            and not bool(first_stream_item.get("contains_broadcast_manifest"))
-            and not bool(first_stream_item.get("contains_receiver_prompt_views"))
+        or (
+            takeover_path == "cost_guarded_fallback"
+            and int(evidence.get("real_message_mutation_count", 0) or 0) == 0
         ),
+        "team_cost_boundary_safe": (
+            takeover_path == "applied_rewrite"
+            and int(evidence.get("task_token_savings", 0) or 0) > 0
+            and int(evidence.get("broadcast_token_savings", 0) or 0) > 0
+        )
+        or takeover_path == "cost_guarded_fallback",
+        "caller_output_safe": caller_output_safe,
     }
+
+
+def classify_team_takeover_path(evidence: dict[str, Any]) -> str:
+    applied_count = int(evidence.get("team_applied_count", 0) or 0)
+    fallback_count = int(evidence.get("team_fallback_count", 0) or 0)
+    mutation_count = int(evidence.get("real_message_mutation_count", 0) or 0)
+    task_savings = int(evidence.get("task_token_savings", 0) or 0)
+    broadcast_savings = int(evidence.get("broadcast_token_savings", 0) or 0)
+    fallback_reasons = {
+        str(reason)
+        for reason in evidence.get("team_fallback_reasons", []) or []
+        if str(reason)
+    }
+    if (
+        applied_count >= 1
+        and fallback_count == 0
+        and mutation_count >= 1
+        and task_savings > 0
+        and broadcast_savings > 0
+    ):
+        return "applied_rewrite"
+    if (
+        applied_count == 0
+        and fallback_count >= 1
+        and mutation_count == 0
+        and "token_not_reduced" in fallback_reasons
+        and broadcast_savings <= 0
+    ):
+        return "cost_guarded_fallback"
+    return "invalid"
+
+
+def _team_fallback_reasons(payload: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    direct = payload.get("fallback_reasons", [])
+    if isinstance(direct, list):
+        reasons.extend(str(reason) for reason in direct if str(reason))
+    dry_run = payload.get("rewrite_dry_run", {})
+    if isinstance(dry_run, dict):
+        nested = dry_run.get("fallback_reasons", [])
+        if isinstance(nested, list):
+            reasons.extend(str(reason) for reason in nested if str(reason))
+    return reasons
 
 
 def _payloads(events: list[dict[str, Any]], event_type: str) -> list[dict[str, Any]]:

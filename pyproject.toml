@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "multi-agent-collaboration-runtime"
-version = "0.5.13.dev0"
+version = "0.5.15.dev0"
 description = "Cross-framework runtime primitives for low-overhead multi-agent collaboration"
 readme = "README.md"
 requires-python = ">=3.11"

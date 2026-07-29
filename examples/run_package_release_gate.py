@@ -6,15 +6,18 @@ import os
 import shutil
 import subprocess
 import sys
+import tomllib
 import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from agent_runtime import __version__ as RUNTIME_VERSION
 from agent_runtime.drivers.autogen import DRIVER_PHASE
 
 from release_gate_evidence import (
     assess_team_takeover,
+    classify_team_takeover_path,
     collect_team_takeover_evidence,
 )
 
@@ -23,7 +26,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TEAM_BENCHMARK_APP = PROJECT_ROOT / "examples" / "autogen_team_benchmark_app.py"
 MIXED_TEAM_CORE_APP = PROJECT_ROOT / "examples" / "autogen_mixed_team_core_smoke.py"
 PACKAGE_NAME = "multi-agent-collaboration-runtime"
-PACKAGE_VERSION = "0.5.13.dev0"
+PACKAGE_VERSION = RUNTIME_VERSION
 WHEEL_PREFIX = "multi_agent_collaboration_runtime-"
 REQUIRED_WHEEL_MEMBERS = {
     "agent_runtime/__init__.py",
@@ -34,10 +37,17 @@ REQUIRED_WHEEL_MEMBERS = {
     "agent_runtime/core/kernel.py",
     "agent_runtime/core/models.py",
     "agent_runtime/core/runtime.py",
+    "agent_runtime/bridge/state_memory_bridge.py",
     "agent_runtime/drivers/autogen.py",
     "agent_runtime/drivers/autogen_codec.py",
     "agent_runtime/drivers/autogen_shp.py",
+    "agent_runtime/memory/claim_extractor.py",
+    "agent_runtime/memory/conflict_resolver.py",
+    "agent_runtime/memory/schema_registry.py",
+    "agent_runtime/memory/semantic_disambiguator.py",
     "agent_runtime/memory/memory_store.py",
+    "agent_runtime/reliability/final_delivery_guard.py",
+    "agent_runtime/reliability/typed_events.py",
     "agent_runtime/state/state_pool.py",
     "web_monitor/__init__.py",
     "web_monitor/parser.py",
@@ -186,9 +196,14 @@ def inspect_wheel(wheel_path: Path | None) -> dict[str, Any]:
     forbidden_members = sorted(
         name for name in names if name.startswith(forbidden_prefixes)
     )
+    project_metadata = tomllib.loads(
+        (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    project_version = str(project_metadata.get("project", {}).get("version", ""))
     metadata_checks = {
         "name": f"Name: {PACKAGE_NAME}" in metadata,
-        "version_dev0": f"Version: {PACKAGE_VERSION}" in metadata,
+        "version_matches_runtime": f"Version: {PACKAGE_VERSION}" in metadata,
+        "source_versions_match": project_version == PACKAGE_VERSION,
         "requires_tiktoken": "Requires-Dist: tiktoken" in metadata,
         "requires_python": "Requires-Python: >=3.11" in metadata,
     }
@@ -207,6 +222,8 @@ def inspect_wheel(wheel_path: Path | None) -> dict[str, Any]:
         "missing_members": missing_members,
         "forbidden_members": forbidden_members,
         "metadata_checks": metadata_checks,
+        "project_version": project_version,
+        "runtime_version": PACKAGE_VERSION,
         "entry_point_ok": entry_point_ok,
     }
 
@@ -345,6 +362,7 @@ def run_installed_cli_rewrite_smoke(
     payload = _load_json(app_output)
     first = _first_stream_item(payload)
     evidence = collect_team_takeover_evidence(output_dir / "agentlite")
+    takeover_path = classify_team_takeover_path(evidence)
     takeover_checks = assess_team_takeover(
         evidence=evidence,
         app_payload=payload,
@@ -357,6 +375,7 @@ def run_installed_cli_rewrite_smoke(
             "passed": bool(step.get("passed")) and rewrite_ok,
             "app_output_path": str(app_output),
             "agentlite_active": bool(payload.get("agentlite_active")),
+            "team_takeover_path": takeover_path,
             "takeover_checks": takeover_checks,
             "takeover_evidence": evidence,
             "first_stream_item": {
@@ -415,13 +434,27 @@ def run_installed_cli_mixed_team_core_smoke(
     core_received = _first_list_dict(payload.get("core_received", []))
     core_reply = _first_list_dict(payload.get("core_caller_replies", []))
     final_message = _last_task_message(payload.get("task_result", {}))
-    mixed_ok = (
-        bool(payload.get("agentlite_active"))
-        and bool(bridge_seen.get("contains_team_rewrite_marker"))
+    takeover_evidence = collect_team_takeover_evidence(output_dir / "agentlite")
+    takeover_path = classify_team_takeover_path(takeover_evidence)
+    rewritten_team_message = (
+        bool(bridge_seen.get("contains_team_rewrite_marker"))
         and bool(bridge_seen.get("contains_state_pool_marker"))
         and bool(bridge_seen.get("contains_broadcast_manifest"))
         and bool(bridge_seen.get("contains_receiver_prompt_views"))
         and not bool(bridge_seen.get("contains_team_native_marker"))
+    )
+    cost_guarded_native_message = (
+        takeover_path == "cost_guarded_fallback"
+        and not bool(bridge_seen.get("contains_team_rewrite_marker"))
+        and not bool(bridge_seen.get("contains_state_pool_marker"))
+        and not bool(bridge_seen.get("contains_broadcast_manifest"))
+        and not bool(bridge_seen.get("contains_receiver_prompt_views"))
+        and bool(bridge_seen.get("contains_team_native_marker"))
+    )
+    mixed_ok = (
+        bool(payload.get("agentlite_active"))
+        and takeover_path in {"applied_rewrite", "cost_guarded_fallback"}
+        and (rewritten_team_message or cost_guarded_native_message)
         and bool(core_received.get("agentlite_prompt_view"))
         and not bool(core_received.get("contains_core_request_native_marker"))
         and not bool(core_received.get("contains_core_rewrite_marker"))
@@ -438,6 +471,8 @@ def run_installed_cli_mixed_team_core_smoke(
             "passed": bool(step.get("passed")) and mixed_ok,
             "app_output_path": str(app_output),
             "agentlite_active": bool(payload.get("agentlite_active")),
+            "team_takeover_path": takeover_path,
+            "takeover_evidence": takeover_evidence,
             "bridge_seen_first_message": {
                 "contains_team_rewrite_marker": bool(
                     bridge_seen.get("contains_team_rewrite_marker")

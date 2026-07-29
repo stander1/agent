@@ -5618,3 +5618,29 @@ value, unit, or domain-specific parser. Ambiguous dependencies retain the
 controlled LLM path and its full token/retry accounting. Detailed evidence and
 claim limits are in
 `docs/planning/v5.15r-structured-dependency-cost-override.md`.
+
+## 112. v5.15w: Package release hardening
+
+v5.15w follows the first package preflight after the generic semantic bridge
+holdout. The wheel built successfully, but the installed AutoGen smokes still
+treated every non-rewrite as a failure even when the runtime correctly
+preserved the native message because Prompt Views would increase token cost.
+
+Implementation mapping:
+
+- `examples/release_gate_evidence.py`: classifies a Team takeover as either a
+  cost-reducing applied rewrite or an explicit `token_not_reduced` fallback
+  with no real message mutation;
+- `examples/run_package_release_gate.py`: applies that contract to both
+  installed Team and mixed Team/Core smokes, requires the v5.15 semantic
+  bridge modules in the wheel, and verifies source/runtime/wheel version
+  identity;
+- `agent_runtime/__init__.py` and `pyproject.toml`: advance the package
+  development version to `0.5.15.dev0`;
+- `experiments/v5.15w-package-release-hardening/`: runs the isolated wheel
+  install, complete source release gate, full unit suite, package identity
+  verifier, system fingerprint, and immutable evidence archive on openEuler.
+
+The production rewrite, semantic extraction, memory admission, and delivery
+paths are unchanged. Detailed evidence boundaries are in
+`docs/planning/v5.15w-package-release-hardening.md`.

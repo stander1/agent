@@ -79,6 +79,88 @@ class ReleaseGateEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence["team_applied_count"], 1)
         self.assertEqual(evidence["task_token_savings"], 60)
         self.assertEqual(evidence["broadcast_token_savings"], 210)
+        self.assertEqual(
+            EVIDENCE_GLOBALS["classify_team_takeover_path"](evidence),
+            "applied_rewrite",
+        )
+
+    def test_accepts_cost_guarded_fallback_without_message_mutation(self) -> None:
+        collect = EVIDENCE_GLOBALS["collect_team_takeover_evidence"]
+        assess = EVIDENCE_GLOBALS["assess_team_takeover"]
+        classify = EVIDENCE_GLOBALS["classify_team_takeover_path"]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            session = data_dir / "sessions" / "launch_test"
+            trace = session / "autogen_driver" / "trace.jsonl"
+            trace.parent.mkdir(parents=True)
+            trace.write_text(
+                json.dumps(
+                    {
+                        "event_type": "autogen_team_input_real_rewrite",
+                        "payload": {
+                            "rewrite_applied_count": 0,
+                            "rewrite_fallback_count": 1,
+                            "real_message_mutation": False,
+                            "native_task_tokens": 100,
+                            "rewritten_task_tokens": 120,
+                            "token_delta_native_task_minus_rewrite": -20,
+                            "native_full_broadcast_tokens": 300,
+                            "wire_plus_prompt_view_tokens": 340,
+                            "token_delta_native_broadcast_minus_rewrite": -40,
+                            "rewrite_dry_run": {
+                                "fallback_reasons": ["token_not_reduced"]
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (session / "bootstrap_status.json").write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "hooks_active": True,
+                        "driver_details": {
+                            "phase": "v-current",
+                            "trace_path": str(trace),
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            evidence = collect(data_dir)
+            checks = assess(
+                evidence=evidence,
+                app_payload={"agentlite_active": True},
+                first_stream_item={
+                    "native_marker_count": 2,
+                    "contains_team_rewrite_marker": False,
+                    "contains_state_pool_marker": False,
+                    "contains_broadcast_manifest": False,
+                    "contains_receiver_prompt_views": False,
+                },
+                expected_phase="v-current",
+            )
+
+        self.assertEqual(classify(evidence), "cost_guarded_fallback")
+        self.assertEqual(evidence["team_fallback_reasons"], ["token_not_reduced"])
+        self.assertTrue(all(checks.values()))
+
+    def test_rejects_unexplained_fallback(self) -> None:
+        classify = EVIDENCE_GLOBALS["classify_team_takeover_path"]
+        self.assertEqual(
+            classify(
+                {
+                    "team_applied_count": 0,
+                    "team_fallback_count": 1,
+                    "real_message_mutation_count": 0,
+                    "task_token_savings": -1,
+                    "broadcast_token_savings": -1,
+                    "team_fallback_reasons": ["schema_invalid"],
+                }
+            ),
+            "invalid",
+        )
 
     def test_rejects_visible_internal_packet_without_display_restore(self) -> None:
         assess = EVIDENCE_GLOBALS["assess_team_takeover"]
@@ -102,7 +184,7 @@ class ReleaseGateEvidenceTests(unittest.TestCase):
             },
             expected_phase="v-current",
         )
-        self.assertFalse(checks["caller_display_restored"])
+        self.assertFalse(checks["caller_output_safe"])
 
 
 if __name__ == "__main__":
