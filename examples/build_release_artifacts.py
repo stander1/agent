@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tarfile
 import tomllib
@@ -19,6 +20,8 @@ from release_package_contract import (
     DIST_INFO_PREFIX,
     FORBIDDEN_DISTRIBUTION_PREFIXES,
     PACKAGE_NAME,
+    REQUIRED_CLASSIFIERS,
+    REQUIRED_PROJECT_URLS,
     REQUIRED_SDIST_MEMBERS,
     REQUIRED_WHEEL_MEMBERS,
 )
@@ -65,6 +68,11 @@ def main() -> int:
     steps = [
         inspect_wheel(wheel_path=wheel_path, expected_version=project["version"]),
         inspect_sdist(sdist_path=sdist_path, expected_version=project["version"]),
+        verify_installed_sdist(
+            sdist_path=sdist_path,
+            expected_version=project["version"],
+            output_dir=report_dir / "installed_sdist",
+        ),
     ]
     report = {
         "passed": (
@@ -124,6 +132,14 @@ def inspect_wheel(*, wheel_path: Path, expected_version: str) -> dict[str, Any]:
         "version": f"Version: {expected_version}" in metadata,
         "requires_tiktoken": "Requires-Dist: tiktoken" in metadata,
         "requires_python": "Requires-Python: >=3.11" in metadata,
+        "project_urls": all(
+            f"Project-URL: {name}, {url}" in metadata
+            for name, url in REQUIRED_PROJECT_URLS.items()
+        ),
+        "classifiers": all(
+            f"Classifier: {classifier}" in metadata
+            for classifier in REQUIRED_CLASSIFIERS
+        ),
     }
     missing_members = sorted(REQUIRED_WHEEL_MEMBERS - names)
     forbidden_members = _forbidden_members(names)
@@ -162,6 +178,14 @@ def inspect_sdist(*, sdist_path: Path, expected_version: str) -> dict[str, Any]:
         "name": f"Name: {PACKAGE_NAME}" in pkg_info,
         "version": f"Version: {expected_version}" in pkg_info,
         "requires_python": "Requires-Python: >=3.11" in pkg_info,
+        "project_urls": all(
+            f"Project-URL: {name}, {url}" in pkg_info
+            for name, url in REQUIRED_PROJECT_URLS.items()
+        ),
+        "classifiers": all(
+            f"Classifier: {classifier}" in pkg_info
+            for classifier in REQUIRED_CLASSIFIERS
+        ),
     }
     missing_members = sorted(REQUIRED_SDIST_MEMBERS - names)
     forbidden_members = _forbidden_members(names)
@@ -175,6 +199,152 @@ def inspect_sdist(*, sdist_path: Path, expected_version: str) -> dict[str, Any]:
         "missing_members": missing_members,
         "forbidden_members": forbidden_members,
         "metadata_checks": metadata_checks,
+    }
+
+
+def verify_installed_sdist(
+    *,
+    sdist_path: Path,
+    expected_version: str,
+    output_dir: Path,
+) -> dict[str, Any]:
+    if not _exists(sdist_path):
+        return {
+            "name": "verify_installed_sdist",
+            "passed": False,
+            "error": "missing sdist",
+        }
+    _rmtree(output_dir)
+    target_dir = output_dir / "target"
+    work_dir = output_dir / "work"
+    _mkdir(target_dir)
+    _mkdir(work_dir)
+    install_command = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        "--no-deps",
+        "--no-build-isolation",
+        "--target",
+        str(target_dir),
+        str(sdist_path),
+    ]
+    install = subprocess.run(
+        install_command,
+        cwd=PROJECT_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    _write_text(output_dir / "pip-install.stdout.txt", install.stdout or "")
+    _write_text(output_dir / "pip-install.stderr.txt", install.stderr or "")
+
+    probe_payload: dict[str, Any] = {}
+    probe_returncode: int | None = None
+    probe_stdout = ""
+    probe_stderr = ""
+    cli_returncode: int | None = None
+    cli_stdout = ""
+    cli_stderr = ""
+    if install.returncode == 0:
+        probe_source = "\n".join(
+            [
+                "import json, sys",
+                "from importlib.metadata import version",
+                "from pathlib import Path",
+                f"target = Path({json.dumps(str(target_dir))}).resolve()",
+                "sys.path.insert(0, str(target))",
+                "import agent_runtime",
+                "module_file = Path(agent_runtime.__file__).resolve()",
+                "print(json.dumps({",
+                '    "runtime_version": agent_runtime.__version__,',
+                f'    "distribution_version": version({json.dumps(PACKAGE_NAME)}),',
+                '    "module_file": str(module_file),',
+                '    "loaded_from_target": module_file.is_relative_to(target),',
+                "}, sort_keys=True))",
+            ]
+        )
+        probe = subprocess.run(
+            [sys.executable, "-c", probe_source],
+            cwd=work_dir,
+            env=_isolated_probe_env(target_dir),
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        probe_returncode = probe.returncode
+        probe_stdout = probe.stdout or ""
+        probe_stderr = probe.stderr or ""
+        probe_payload = _last_json_object(probe_stdout)
+
+        cli = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "agent_runtime.cli",
+                "version",
+            ],
+            cwd=work_dir,
+            env=_isolated_probe_env(target_dir),
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        cli_returncode = cli.returncode
+        cli_stdout = cli.stdout or ""
+        cli_stderr = cli.stderr or ""
+
+    _write_text(output_dir / "import-probe.stdout.txt", probe_stdout)
+    _write_text(output_dir / "import-probe.stderr.txt", probe_stderr)
+    _write_text(output_dir / "cli-version.stdout.txt", cli_stdout)
+    _write_text(output_dir / "cli-version.stderr.txt", cli_stderr)
+    target_root = _io_path(target_dir)
+    installed_members = {
+        path.relative_to(target_root).as_posix()
+        for path in target_root.rglob("*")
+        if path.is_file()
+    }
+    missing_members = sorted(REQUIRED_WHEEL_MEMBERS - installed_members)
+    version_ok = (
+        probe_payload.get("runtime_version") == expected_version
+        and probe_payload.get("distribution_version") == expected_version
+    )
+    cli_version_ok = (
+        cli_returncode == 0
+        and cli_stdout.strip() == expected_version
+    )
+    return {
+        "name": "verify_installed_sdist",
+        "passed": (
+            install.returncode == 0
+            and probe_returncode == 0
+            and bool(probe_payload.get("loaded_from_target"))
+            and version_ok
+            and cli_version_ok
+            and not missing_members
+        ),
+        "install_returncode": install.returncode,
+        "probe_returncode": probe_returncode,
+        "cli_returncode": cli_returncode,
+        "runtime_version": probe_payload.get("runtime_version", ""),
+        "distribution_version": probe_payload.get(
+            "distribution_version",
+            "",
+        ),
+        "module_file": probe_payload.get("module_file", ""),
+        "loaded_from_target": bool(
+            probe_payload.get("loaded_from_target")
+        ),
+        "cli_version_ok": cli_version_ok,
+        "missing_members": missing_members,
     }
 
 
@@ -255,6 +425,24 @@ def _forbidden_members(names: set[str]) -> list[str]:
         or "/__pycache__/" in name
         or name.endswith((".pyc", ".pyo"))
     )
+
+
+def _isolated_probe_env(target_dir: Path) -> dict[str, str]:
+    env = dict(os.environ)
+    env["PYTHONNOUSERSITE"] = "1"
+    env["PYTHONPATH"] = str(target_dir)
+    return env
+
+
+def _last_json_object(text: str) -> dict[str, Any]:
+    for line in reversed(text.splitlines()):
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return {}
 
 
 def _assert_under_project(path: Path) -> None:

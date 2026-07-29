@@ -4,13 +4,25 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "multi-agent-collaboration-runtime"
-version = "0.5.15rc1"
+version = "0.5.15rc2"
 description = "Cross-framework runtime primitives for low-overhead multi-agent collaboration"
 readme = "README.md"
 requires-python = ">=3.11"
+keywords = ["multi-agent", "autogen", "runtime", "communication", "memory"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Operating System :: OS Independent",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
   "tiktoken>=0.13.0",
 ]
+
+[project.urls]
+Source = "https://github.com/stander1/agent"
+Issues = "https://github.com/stander1/agent/issues"
 
 [project.scripts]
 agentlite = "agent_runtime.cli:main"

@@ -24,6 +24,8 @@ from release_package_contract import (
     DIST_INFO_PREFIX,
     FORBIDDEN_DISTRIBUTION_PREFIXES,
     PACKAGE_NAME,
+    REQUIRED_CLASSIFIERS,
+    REQUIRED_PROJECT_URLS,
     REQUIRED_WHEEL_MEMBERS,
 )
 
@@ -185,6 +187,14 @@ def inspect_wheel(wheel_path: Path | None) -> dict[str, Any]:
         "source_versions_match": project_version == PACKAGE_VERSION,
         "requires_tiktoken": "Requires-Dist: tiktoken" in metadata,
         "requires_python": "Requires-Python: >=3.11" in metadata,
+        "project_urls": all(
+            f"Project-URL: {name}, {url}" in metadata
+            for name, url in REQUIRED_PROJECT_URLS.items()
+        ),
+        "classifiers": all(
+            f"Classifier: {classifier}" in metadata
+            for classifier in REQUIRED_CLASSIFIERS
+        ),
     }
     entry_point_ok = "agentlite = agent_runtime.cli:main" in entry_points
     passed = (

@@ -3,6 +3,15 @@ from __future__ import annotations
 
 PACKAGE_NAME = "multi-agent-collaboration-runtime"
 DIST_INFO_PREFIX = "multi_agent_collaboration_runtime-"
+REQUIRED_PROJECT_URLS = {
+    "Source": "https://github.com/stander1/agent",
+    "Issues": "https://github.com/stander1/agent/issues",
+}
+REQUIRED_CLASSIFIERS = {
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+}
 
 REQUIRED_WHEEL_MEMBERS = {
     "agent_runtime/__init__.py",
@@ -39,7 +48,10 @@ REQUIRED_SDIST_MEMBERS = REQUIRED_WHEEL_MEMBERS | {
     "docs/planning/version-implementation-mapping.md",
     "docs/planning/v5.15w-package-release-hardening.md",
     "docs/planning/v5.15x-release-candidate-freeze.md",
+    "docs/planning/v5.15y-installed-sdist-delivery-readiness.md",
+    "docs/competition/v0.5.15rc2-delivery-guide.md",
     "docs/release/v5.15x-release-candidate-notes.md",
+    "docs/release/v5.15y-release-candidate-notes.md",
     "examples/build_release_artifacts.py",
     "examples/release_package_contract.py",
     "examples/run_package_release_gate.py",
@@ -49,11 +61,15 @@ REQUIRED_SDIST_MEMBERS = REQUIRED_WHEEL_MEMBERS | {
     "experiments/v5.15x-release-candidate-freeze/README.md",
     "experiments/v5.15x-release-candidate-freeze/run_openeuler.sh",
     "experiments/v5.15x-release-candidate-freeze/verify_acceptance.py",
+    "experiments/v5.15y-installed-sdist-delivery-readiness/README.md",
+    "experiments/v5.15y-installed-sdist-delivery-readiness/run_openeuler.sh",
+    "experiments/v5.15y-installed-sdist-delivery-readiness/verify_acceptance.py",
     "tests/test_launcher.py",
     "tests/test_runtime.py",
     "tests/test_release_gate_evidence.py",
     "tests/test_v515w_package_release_hardening_acceptance.py",
     "tests/test_v515x_release_candidate_freeze_acceptance.py",
+    "tests/test_v515y_installed_sdist_delivery_readiness.py",
 }
 
 FORBIDDEN_DISTRIBUTION_PREFIXES = (

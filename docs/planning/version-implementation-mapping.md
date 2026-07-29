@@ -5672,3 +5672,28 @@ publication. A missing explicit repository license is reported as a publication
 blocker and is not silently resolved by the runtime or experiment code.
 Detailed boundaries are in
 `docs/planning/v5.15x-release-candidate-freeze.md`.
+
+## 114. v5.15y: Installed sdist and delivery readiness
+
+v5.15y follows the technically passing and immutable v0.5.15rc1 snapshot.
+The RC1 gate inspected the source distribution but did not install it, and the
+latest competition delivery guide still described an early pre-AutoGen state.
+
+Implementation mapping:
+
+- `examples/build_release_artifacts.py`: installs the generated sdist into an
+  isolated target, imports the runtime from that target outside the checkout,
+  verifies runtime/distribution version identity, exercises the installed CLI,
+  and checks required package members;
+- `pyproject.toml`: adds non-legal package discovery metadata while keeping the
+  license decision explicit and unresolved;
+- `docs/competition/v0.5.15rc2-delivery-guide.md`: provides current installation,
+  verification, evidence, security, and claim-boundary guidance;
+- `experiments/v5.15y-installed-sdist-delivery-readiness/`: extends the RC gate
+  with explicit installed-sdist and delivery-surface checks on openEuler;
+- `agent_runtime/__init__.py` and `pyproject.toml`: identify the candidate as
+  `0.5.15rc2`.
+
+No runtime semantic, role, benchmark, or domain parsing behavior changes.
+Detailed boundaries are in
+`docs/planning/v5.15y-installed-sdist-delivery-readiness.md`.
