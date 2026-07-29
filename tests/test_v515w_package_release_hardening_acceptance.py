@@ -25,10 +25,25 @@ def _load_verifier() -> ModuleType:
     return module
 
 
+def _load_team_benchmark() -> ModuleType:
+    examples_dir = REPO_ROOT / "examples"
+    if str(examples_dir) not in sys.path:
+        sys.path.insert(0, str(examples_dir))
+    path = examples_dir / "run_autogen_team_benchmark.py"
+    spec = importlib.util.spec_from_file_location("v515w_team_benchmark", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Cannot load Team benchmark")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 class PackageReleaseHardeningAcceptanceTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.verifier = _load_verifier()
+        cls.team_benchmark = _load_team_benchmark()
 
     def _reports(self, path: str = "cost_guarded_fallback") -> tuple:
         metadata = {
@@ -144,6 +159,56 @@ class PackageReleaseHardeningAcceptanceTest(unittest.TestCase):
         self.assertIn("sha256sum -c", runner)
         self.assertNotIn("OPENAI_API_KEY", runner)
         self.assertNotIn("mimoapikey", runner.casefold())
+
+    def test_team_benchmark_accepts_cost_guarded_native_fallback(self) -> None:
+        native_first = {
+            "content": "task TEAM_BENCH_NATIVE_MARKER",
+        }
+        managed_first = {
+            "content": "task TEAM_BENCH_NATIVE_MARKER",
+        }
+        quality = {"score": 1, "max_score": 1}
+        team = {
+            "event_count": 1,
+            "applied_count": 0,
+            "fallback_count": 1,
+            "fallback_reasons": ["token_not_reduced"],
+            "real_message_mutation_count": 0,
+            "token_delta_native_task_minus_rewrite": -2,
+            "token_delta_native_broadcast_minus_rewrite": -3,
+        }
+        native = {
+            "returncode": 0,
+            "app_payload": {"agentlite_active": False},
+            "first_stream_item": native_first,
+            "quality": quality,
+        }
+        managed = {
+            "returncode": 0,
+            "bootstrap_ok": True,
+            "hooks_active": True,
+            "driver_phase": self.team_benchmark.EXPECTED_PHASE,
+            "broadcast_mode": "real-rewrite",
+            "team_rewrite_enabled": True,
+            "app_payload": {"agentlite_active": True},
+            "first_stream_item": managed_first,
+            "trace_event_counts": {},
+            "team_input_real_rewrite": team,
+            "quality": quality,
+        }
+        comparison = {
+            "visible_input_token_delta_native_minus_managed": 0,
+            "quality_delta_managed_minus_native": 0,
+        }
+
+        checks = self.team_benchmark.build_checks(
+            native=native,
+            managed=managed,
+            comparison=comparison,
+            source_text="AutoGen-only app",
+        )
+
+        self.assertTrue(all(checks.values()))
 
 
 if __name__ == "__main__":

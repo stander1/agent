@@ -33,6 +33,7 @@ from run_autogen_native_smoke import _missing_modules, _read_trace_events  # noq
 from run_autogen_team_rewrite_smoke import (  # noqa: E402
     summarize_team_rewrite_events,
 )
+from release_gate_evidence import classify_team_takeover_path  # noqa: E402
 
 EXPECTED_PHASE = DRIVER_PHASE
 USER_SCRIPT = PROJECT_ROOT / "examples" / "autogen_team_benchmark_app.py"
@@ -277,6 +278,28 @@ def build_checks(
     team = managed.get("team_input_real_rewrite", {})
     if not isinstance(team, dict):
         team = {}
+    takeover_path = _takeover_path_from_team_summary(team)
+    managed_caller_native = (
+        isinstance(managed_first, dict)
+        and TEAM_REWRITE_MARKER not in str(managed_first.get("content", ""))
+        and NATIVE_MARKER in str(managed_first.get("content", ""))
+    )
+    if takeover_path == "applied_rewrite":
+        managed_caller_output_safe = (
+            managed_caller_native
+            and int(
+                managed.get("trace_event_counts", {}).get(
+                    "autogen_team_display_restored", 0
+                )
+                or 0
+            )
+            >= 1
+        )
+    else:
+        managed_caller_output_safe = (
+            takeover_path == "cost_guarded_fallback"
+            and managed_caller_native
+        )
     return {
         "native_returncode_zero": int(native.get("returncode", 1)) == 0,
         "managed_returncode_zero": int(managed.get("returncode", 1)) == 0,
@@ -301,29 +324,35 @@ def build_checks(
             and NATIVE_MARKER in str(native_first.get("content", ""))
             and TEAM_REWRITE_MARKER not in str(native_first.get("content", ""))
         ),
-        "managed_caller_display_restored": (
-            isinstance(managed_first, dict)
-            and TEAM_REWRITE_MARKER not in str(managed_first.get("content", ""))
-            and NATIVE_MARKER in str(managed_first.get("content", ""))
+        "managed_caller_output_safe": managed_caller_output_safe,
+        "team_takeover_event_recorded": int(team.get("event_count", 0) or 0)
+        >= 1,
+        "team_rewrite_applied_or_cost_guarded": takeover_path
+        in {"applied_rewrite", "cost_guarded_fallback"},
+        "team_real_message_boundary_safe": (
+            takeover_path == "applied_rewrite"
+            and int(team.get("real_message_mutation_count", 0) or 0) >= 1
+        )
+        or (
+            takeover_path == "cost_guarded_fallback"
+            and int(team.get("real_message_mutation_count", 0) or 0) == 0
+        ),
+        "team_cost_boundary_safe": (
+            takeover_path == "applied_rewrite"
             and int(
-                managed.get("trace_event_counts", {}).get(
-                    "autogen_team_display_restored", 0
+                team.get("token_delta_native_task_minus_rewrite", 0) or 0
+            )
+            > 0
+            and int(
+                team.get(
+                    "token_delta_native_broadcast_minus_rewrite",
+                    0,
                 )
                 or 0
             )
-            >= 1
-        ),
-        "team_rewrite_event_recorded": int(team.get("event_count", 0) or 0) >= 1,
-        "team_rewrite_applied": int(team.get("applied_count", 0) or 0) >= 1,
-        "team_rewrite_no_fallback": int(team.get("fallback_count", 0) or 0) == 0,
-        "team_task_tokens_reduced": int(
-            team.get("token_delta_native_task_minus_rewrite", 0) or 0
+            > 0
         )
-        > 0,
-        "team_broadcast_tokens_reduced": int(
-            team.get("token_delta_native_broadcast_minus_rewrite", 0) or 0
-        )
-        > 0,
+        or takeover_path == "cost_guarded_fallback",
         "caller_visible_input_semantics_preserved": int(
             comparison.get("visible_input_token_delta_native_minus_managed", -1)
             or 0
@@ -339,6 +368,31 @@ def build_checks(
             == _max_score(managed.get("quality", {}))
         ),
     }
+
+
+def _takeover_path_from_team_summary(team: dict[str, Any]) -> str:
+    return classify_team_takeover_path(
+        {
+            "team_applied_count": int(team.get("applied_count", 0) or 0),
+            "team_fallback_count": int(team.get("fallback_count", 0) or 0),
+            "real_message_mutation_count": int(
+                team.get("real_message_mutation_count", 0) or 0
+            ),
+            "task_token_savings": int(
+                team.get("token_delta_native_task_minus_rewrite", 0) or 0
+            ),
+            "broadcast_token_savings": int(
+                team.get(
+                    "token_delta_native_broadcast_minus_rewrite",
+                    0,
+                )
+                or 0
+            ),
+            "team_fallback_reasons": list(
+                team.get("fallback_reasons", []) or []
+            ),
+        }
+    )
 
 
 def render_markdown(report: dict[str, Any]) -> str:
@@ -380,6 +434,10 @@ def render_markdown(report: dict[str, Any]) -> str:
     )
     lines.extend(["", "## Managed Rewrite", ""])
     if isinstance(team, dict):
+        lines.append(
+            "- team takeover_path: "
+            f"`{_takeover_path_from_team_summary(team)}`"
+        )
         lines.append(f"- team fallback_count（安全回退次数）: `{team.get('fallback_count', 0)}`")
         lines.append(f"- team fallback_reasons: `{team.get('fallback_reasons', [])}`")
         lines.append(f"- team applied_count: `{team.get('applied_count', 0)}`")
