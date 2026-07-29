@@ -10,7 +10,9 @@ GitHub 默认打开的是 `main` 分支的最新状态，所以 v0、v1 的代�
 
 | 类型 | 用途 | 是否继续开发 |
 | --- | --- | --- |
-| `main` | 当前最新开发主干，持续向 v2/v3 推进 | 是 |
+| `main` | 稳定开发主干 | 是 |
+| `feature/controlled-semantic-disambiguation` | v0.5.15rc1 当前集成分支 | 是 |
+| `version/v0.5.15rc1` | v0.5.15rc1 技术验收通过后的比赛展示快照 | 否 |
 | `version/v0-baseline` | v0 基线评测版本快照，便于在 GitHub 直接浏览 | 否 |
 | `version/v1-runtime-lite` | v1 三线 Lite 闭环版本快照，便于在 GitHub 直接浏览 | 否 |
 | `version/v2-llm-eval` | v2 真实 LLM 实验版本快照，便于在 GitHub 直接浏览 | 否 |
@@ -33,6 +35,7 @@ GitHub 默认打开的是 `main` 分支的最新状态，所以 v0、v1 的代�
 | `v3.2-reliability-guard` | v3.2 不可变标签 | 否 |
 | `v3.3-memory-admission` | v3.3 不可变标签 | 否 |
 | `v4.0-cost-lifecycle` | v4.0 不可变标签 | 否 |
+| `v0.5.15rc1` | v0.5.15rc1 技术验收通过后的不可变发行候选标签 | 否 |
 
 ## 当前版本边界
 
@@ -49,6 +52,7 @@ GitHub 默认打开的是 `main` 分支的最新状态，所以 v0、v1 的代�
 | v3.2 | `v3.2-reliability-guard` / `version/v3-reliability-guard` | Provider Response Guard、Agent Output Contract Guard、规则修复、degraded fallback、输出可靠性指标 |
 | v3.3 | `v3.3-memory-admission` / `version/v3-memory-admission` | MemoryCandidate、ClaimCandidate、Admission Lite、admitted-only MemoryView 更新、准入状态指标 |
 | v4.0 | `v4.0-cost-lifecycle` / `version/v4-cost-lifecycle` | Retry Budget、Read Lease-lite、State GC-lite、tombstone、Memory lifecycle、Preflight Validation-lite |
+| v0.5.15rc1 | `v0.5.15rc1` / `version/v0.5.15rc1` | 通用语义桥、AutoGen 接管、类型化记忆与可靠性、统一 wheel/sdist 契约、openEuler 发行候选门禁 |
 
 ## 如何在本地切换版本
 

@@ -2,12 +2,12 @@
 
 本仓库用于迭代实现一个面向多 Agent 协作的跨框架运行时工具层，目标是在多 Agent 任务中通过结构化通信、非文本状态传递和共享记忆复用降低协作开销。
 
-当前开发版本：`v5.14j semantic fidelity formal regression`
+当前开发版本：`v0.5.15rc1 release candidate`
 
-v5.14j 真实 AutoGen/openEuler 验收步骤：
-[experiments/v5.14j-semantic-fidelity-formal-regression/README.md](experiments/v5.14j-semantic-fidelity-formal-regression/README.md)
+v0.5.15rc1 openEuler 发行候选验收步骤：
+[experiments/v5.15x-release-candidate-freeze/README.md](experiments/v5.15x-release-candidate-freeze/README.md)
 
-最新发行包门禁版本：`v5.13h package release gate`
+当前发行包门禁版本：`v5.15x release candidate freeze`
 
 实验结果记录见：
 
@@ -75,7 +75,18 @@ v5.14j 真实 AutoGen/openEuler 验收步骤：
 - [docs/experiments/v5.14i-semantic-fidelity-conflict-identity.md](docs/experiments/v5.14i-semantic-fidelity-conflict-identity.md)
 - [docs/experiments/v5.14i-semantic-fidelity-results-20260726.md](docs/experiments/v5.14i-semantic-fidelity-results-20260726.md)
 - [docs/experiments/v5.14j-semantic-fidelity-formal-regression.md](docs/experiments/v5.14j-semantic-fidelity-formal-regression.md)
+- [docs/release/v5.15x-release-candidate-notes.md](docs/release/v5.15x-release-candidate-notes.md)
 - [docs/release/v5.12z-final-release-notes.md](docs/release/v5.12z-final-release-notes.md)
+
+## v0.5.15rc1 Current Note
+
+`v0.5.15rc1` freezes the generic semantic bridge and package release contract
+after the post-commit unseen-domain holdout and independently installed wheel
+gate. Wheel installation, source release checks, and wheel/sdist construction
+share one required-member and forbidden-path contract. The RC acceptance
+verifies source/runtime/artifact version identity and independently recomputes
+artifact hashes on openEuler. Public open-source publication remains blocked
+until the project owner selects and adds an explicit repository license.
 
 ## v5.14j Current Note
 

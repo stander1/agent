@@ -20,41 +20,19 @@ from release_gate_evidence import (
     classify_team_takeover_path,
     collect_team_takeover_evidence,
 )
+from release_package_contract import (
+    DIST_INFO_PREFIX,
+    FORBIDDEN_DISTRIBUTION_PREFIXES,
+    PACKAGE_NAME,
+    REQUIRED_WHEEL_MEMBERS,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TEAM_BENCHMARK_APP = PROJECT_ROOT / "examples" / "autogen_team_benchmark_app.py"
 MIXED_TEAM_CORE_APP = PROJECT_ROOT / "examples" / "autogen_mixed_team_core_smoke.py"
-PACKAGE_NAME = "multi-agent-collaboration-runtime"
 PACKAGE_VERSION = RUNTIME_VERSION
 WHEEL_PREFIX = "multi_agent_collaboration_runtime-"
-REQUIRED_WHEEL_MEMBERS = {
-    "agent_runtime/__init__.py",
-    "agent_runtime/cli.py",
-    "agent_runtime/launcher.py",
-    "agent_runtime/bootstrap/sitecustomize.py",
-    "agent_runtime/bootstrap/startup.py",
-    "agent_runtime/core/kernel.py",
-    "agent_runtime/core/models.py",
-    "agent_runtime/core/runtime.py",
-    "agent_runtime/bridge/state_memory_bridge.py",
-    "agent_runtime/drivers/autogen.py",
-    "agent_runtime/drivers/autogen_codec.py",
-    "agent_runtime/drivers/autogen_shp.py",
-    "agent_runtime/memory/claim_extractor.py",
-    "agent_runtime/memory/conflict_resolver.py",
-    "agent_runtime/memory/schema_registry.py",
-    "agent_runtime/memory/semantic_disambiguator.py",
-    "agent_runtime/memory/memory_store.py",
-    "agent_runtime/reliability/final_delivery_guard.py",
-    "agent_runtime/reliability/typed_events.py",
-    "agent_runtime/state/state_pool.py",
-    "web_monitor/__init__.py",
-    "web_monitor/parser.py",
-    "web_monitor/server.py",
-    "web_monitor/demo/index.html",
-    "web_monitor/demo/agentlite-live.js",
-}
 
 
 def _io_path(path: Path | str) -> Path:
@@ -192,9 +170,10 @@ def inspect_wheel(wheel_path: Path | None) -> dict[str, Any]:
             errors="replace",
         )
     missing_members = sorted(REQUIRED_WHEEL_MEMBERS - names)
-    forbidden_prefixes = ("runs/", "dist/", "build/", ".git/")
     forbidden_members = sorted(
-        name for name in names if name.startswith(forbidden_prefixes)
+        name
+        for name in names
+        if name.startswith(FORBIDDEN_DISTRIBUTION_PREFIXES)
     )
     project_metadata = tomllib.loads(
         (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
@@ -607,7 +586,7 @@ def _single_dist_info_member(names: set[str], basename: str) -> str:
         name
         for name in names
         if name.endswith(f".dist-info/{basename}")
-        and name.startswith(WHEEL_PREFIX)
+        and name.startswith(DIST_INFO_PREFIX)
     )
     if len(matches) != 1:
         raise ValueError(f"expected exactly one {basename}, got {matches}")

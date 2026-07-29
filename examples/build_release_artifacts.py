@@ -14,49 +14,17 @@ from pathlib import Path
 from typing import Any
 
 import setuptools.build_meta as build_meta
+from agent_runtime import __version__ as RUNTIME_VERSION
+from release_package_contract import (
+    DIST_INFO_PREFIX,
+    FORBIDDEN_DISTRIBUTION_PREFIXES,
+    PACKAGE_NAME,
+    REQUIRED_SDIST_MEMBERS,
+    REQUIRED_WHEEL_MEMBERS,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DIST_INFO_PREFIX = "multi_agent_collaboration_runtime-"
-PACKAGE_NAME = "multi-agent-collaboration-runtime"
-
-REQUIRED_WHEEL_MEMBERS = {
-    "agent_runtime/__init__.py",
-    "agent_runtime/cli.py",
-    "agent_runtime/launcher.py",
-    "agent_runtime/bootstrap/sitecustomize.py",
-    "agent_runtime/bootstrap/startup.py",
-    "agent_runtime/core/kernel.py",
-    "agent_runtime/core/models.py",
-    "agent_runtime/core/runtime.py",
-    "agent_runtime/drivers/autogen.py",
-    "agent_runtime/drivers/autogen_codec.py",
-    "agent_runtime/drivers/autogen_shp.py",
-    "agent_runtime/memory/memory_store.py",
-    "agent_runtime/state/state_pool.py",
-}
-
-REQUIRED_SDIST_MEMBERS = REQUIRED_WHEEL_MEMBERS | {
-    "README.md",
-    "pyproject.toml",
-    "MANIFEST.in",
-    "docs/experiments/v5.12z-package-release-gate-results.md",
-    "docs/planning/version-implementation-mapping.md",
-    "docs/release/v5.12z-final-release-notes.md",
-    "examples/build_release_artifacts.py",
-    "examples/run_package_release_gate.py",
-    "examples/run_release_gate.py",
-    "examples/autogen_team_benchmark_app.py",
-    "tests/test_launcher.py",
-    "tests/test_runtime.py",
-}
-
-FORBIDDEN_PREFIXES = (
-    ".git/",
-    "build/",
-    "dist/",
-    "runs/",
-)
 
 
 def parse_args() -> argparse.Namespace:
@@ -99,9 +67,14 @@ def main() -> int:
         inspect_sdist(sdist_path=sdist_path, expected_version=project["version"]),
     ]
     report = {
-        "passed": all(bool(step.get("passed")) for step in steps),
+        "passed": (
+            project["version"] == RUNTIME_VERSION
+            and all(bool(step.get("passed")) for step in steps)
+        ),
         "package": project["name"],
         "version": project["version"],
+        "runtime_version": RUNTIME_VERSION,
+        "source_versions_match": project["version"] == RUNTIME_VERSION,
         "dist_dir": str(dist_dir),
         "wheel_path": str(wheel_path),
         "sdist_path": str(sdist_path),
@@ -221,6 +194,11 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"passed: `{str(report.get('passed')).lower()}`",
         f"package: `{report.get('package')}`",
         f"version: `{report.get('version')}`",
+        f"runtime version: `{report.get('runtime_version')}`",
+        (
+            "source versions match: "
+            f"`{str(report.get('source_versions_match')).lower()}`"
+        ),
         "",
         "## Artifacts",
         "",
@@ -273,7 +251,7 @@ def _forbidden_members(names: set[str]) -> list[str]:
     return sorted(
         name
         for name in names
-        if name.startswith(FORBIDDEN_PREFIXES)
+        if name.startswith(FORBIDDEN_DISTRIBUTION_PREFIXES)
         or "/__pycache__/" in name
         or name.endswith((".pyc", ".pyo"))
     )

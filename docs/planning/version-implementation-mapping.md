@@ -5644,3 +5644,31 @@ Implementation mapping:
 The production rewrite, semantic extraction, memory admission, and delivery
 paths are unchanged. Detailed evidence boundaries are in
 `docs/planning/v5.15w-package-release-hardening.md`.
+
+## 113. v5.15x: Release candidate freeze
+
+v5.15x converts the verified development package into `0.5.15rc1` without
+changing runtime semantics. It removes artifact-contract drift between the
+installed-wheel gate and the wheel/sdist builder.
+
+Implementation mapping:
+
+- `examples/release_package_contract.py`: defines one required-member and
+  forbidden-path contract for release artifacts;
+- `examples/run_package_release_gate.py` and
+  `examples/build_release_artifacts.py`: consume the shared contract, verify
+  source/runtime/artifact version identity, and independently hash the built
+  artifacts;
+- `MANIFEST.in`: includes reproducibility experiments while pruning runtime
+  evidence, local environments, logs, and generated artifacts;
+- `agent_runtime/__init__.py` and `pyproject.toml`: identify the candidate as
+  `0.5.15rc1`;
+- `experiments/v5.15x-release-candidate-freeze/`: runs installed-wheel,
+  complete source, full-unit, wheel/sdist, hash, and immutable-evidence gates
+  on openEuler.
+
+The acceptance distinguishes technical RC readiness from public open-source
+publication. A missing explicit repository license is reported as a publication
+blocker and is not silently resolved by the runtime or experiment code.
+Detailed boundaries are in
+`docs/planning/v5.15x-release-candidate-freeze.md`.
