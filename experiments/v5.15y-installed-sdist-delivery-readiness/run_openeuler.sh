@@ -93,6 +93,7 @@ python -m compileall -q \
 git diff --check
 git show --stat --oneline HEAD > "$RUN_ROOT/system/head-stat.txt"
 git diff HEAD^ HEAD -- \
+  LICENSE \
   agent_runtime \
   examples \
   tests \

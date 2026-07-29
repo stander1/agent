@@ -120,6 +120,23 @@ class ReleaseCandidateFreezeAcceptanceTest(unittest.TestCase):
         self.assertFalse(report["summary"]["passed"])
         self.assertIn("release_artifact_hashes_verified", failed)
 
+    def test_explicit_license_clears_publication_blocker(self) -> None:
+        report = self.verifier.build_report(
+            base_report=self._base_report(),
+            artifact_report=self._artifact_report(),
+            actual_artifact_sha256={
+                "wheel": "b" * 64,
+                "sdist": "c" * 64,
+            },
+            license_present=True,
+        )
+
+        self.assertTrue(report["summary"]["passed"])
+        self.assertTrue(
+            report["summary"]["open_source_publication_ready"]
+        )
+        self.assertEqual(report["publication"]["blockers"], [])
+
     def test_runner_uses_all_three_release_gates(self) -> None:
         runner = (EXPERIMENT_DIR / "run_openeuler.sh").read_text(
             encoding="utf-8"
@@ -140,6 +157,13 @@ class ReleaseCandidateFreezeAcceptanceTest(unittest.TestCase):
         self.assertIn(
             "docs/planning/v5.15x-release-candidate-freeze.md",
             required,
+        )
+        self.assertIn("LICENSE", required)
+        self.assertEqual(contract.REQUIRED_LICENSE_EXPRESSION, "Apache-2.0")
+        self.assertTrue(
+            contract.apache_license_text_valid(
+                (REPO_ROOT / "LICENSE").read_text(encoding="utf-8")
+            )
         )
         self.assertIn(
             "experiments/v5.15x-release-candidate-freeze/verify_acceptance.py",

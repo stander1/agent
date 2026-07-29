@@ -21,9 +21,13 @@ from release_package_contract import (
     FORBIDDEN_DISTRIBUTION_PREFIXES,
     PACKAGE_NAME,
     REQUIRED_CLASSIFIERS,
+    REQUIRED_LICENSE_EXPRESSION,
+    REQUIRED_LICENSE_FILE,
     REQUIRED_PROJECT_URLS,
     REQUIRED_SDIST_MEMBERS,
     REQUIRED_WHEEL_MEMBERS,
+    apache_license_text_valid,
+    normalize_license_text,
 )
 
 
@@ -121,17 +125,36 @@ def cleanup_transient_build_outputs() -> None:
 def inspect_wheel(*, wheel_path: Path, expected_version: str) -> dict[str, Any]:
     if not _exists(wheel_path):
         return {"name": "inspect_wheel", "passed": False, "error": "missing wheel"}
+    source_license = (
+        _read_text(PROJECT_ROOT / REQUIRED_LICENSE_FILE)
+        if _exists(PROJECT_ROOT / REQUIRED_LICENSE_FILE)
+        else ""
+    )
     with zipfile.ZipFile(_io_path(wheel_path)) as archive:
         names = set(archive.namelist())
         metadata_name = _single_dist_info_member(names, "METADATA")
         entry_points_name = _single_dist_info_member(names, "entry_points.txt")
+        license_members = sorted(
+            name
+            for name in names
+            if name.endswith(f".dist-info/licenses/{REQUIRED_LICENSE_FILE}")
+        )
         metadata = archive.read(metadata_name).decode("utf-8", errors="replace")
         entry_points = archive.read(entry_points_name).decode("utf-8", errors="replace")
+        packaged_license = (
+            archive.read(license_members[0]).decode("utf-8", errors="replace")
+            if len(license_members) == 1
+            else ""
+        )
     metadata_checks = {
         "name": f"Name: {PACKAGE_NAME}" in metadata,
         "version": f"Version: {expected_version}" in metadata,
         "requires_tiktoken": "Requires-Dist: tiktoken" in metadata,
         "requires_python": "Requires-Python: >=3.11" in metadata,
+        "license_expression": (
+            f"License-Expression: {REQUIRED_LICENSE_EXPRESSION}" in metadata
+        ),
+        "license_file": f"License-File: {REQUIRED_LICENSE_FILE}" in metadata,
         "project_urls": all(
             f"Project-URL: {name}, {url}" in metadata
             for name, url in REQUIRED_PROJECT_URLS.items()
@@ -139,6 +162,16 @@ def inspect_wheel(*, wheel_path: Path, expected_version: str) -> dict[str, Any]:
         "classifiers": all(
             f"Classifier: {classifier}" in metadata
             for classifier in REQUIRED_CLASSIFIERS
+        ),
+    }
+    license_checks = {
+        "single_packaged_license": len(license_members) == 1,
+        "source_is_apache_2_0": apache_license_text_valid(source_license),
+        "packaged_is_apache_2_0": apache_license_text_valid(packaged_license),
+        "packaged_matches_source": (
+            bool(source_license)
+            and normalize_license_text(packaged_license)
+            == normalize_license_text(source_license)
         ),
     }
     missing_members = sorted(REQUIRED_WHEEL_MEMBERS - names)
@@ -150,11 +183,14 @@ def inspect_wheel(*, wheel_path: Path, expected_version: str) -> dict[str, Any]:
             not missing_members
             and not forbidden_members
             and all(metadata_checks.values())
+            and all(license_checks.values())
             and entry_point_ok
         ),
         "missing_members": missing_members,
         "forbidden_members": forbidden_members,
         "metadata_checks": metadata_checks,
+        "license_checks": license_checks,
+        "license_members": license_members,
         "entry_point_ok": entry_point_ok,
     }
 
@@ -162,6 +198,11 @@ def inspect_wheel(*, wheel_path: Path, expected_version: str) -> dict[str, Any]:
 def inspect_sdist(*, sdist_path: Path, expected_version: str) -> dict[str, Any]:
     if not _exists(sdist_path):
         return {"name": "inspect_sdist", "passed": False, "error": "missing sdist"}
+    source_license = (
+        _read_text(PROJECT_ROOT / REQUIRED_LICENSE_FILE)
+        if _exists(PROJECT_ROOT / REQUIRED_LICENSE_FILE)
+        else ""
+    )
     with tarfile.open(_io_path(sdist_path), mode="r:gz") as archive:
         raw_names = {member.name.replace("\\", "/") for member in archive.getmembers()}
         names = {_strip_sdist_root(name) for name in raw_names}
@@ -174,10 +215,28 @@ def inspect_sdist(*, sdist_path: Path, expected_version: str) -> dict[str, Any]:
             if pkg_info_name
             else ""
         )
+        license_name = next(
+            (
+                name
+                for name in raw_names
+                if _strip_sdist_root(name) == REQUIRED_LICENSE_FILE
+            ),
+            "",
+        )
+        license_member = archive.extractfile(license_name) if license_name else None
+        packaged_license = (
+            license_member.read().decode("utf-8", errors="replace")
+            if license_member is not None
+            else ""
+        )
     metadata_checks = {
         "name": f"Name: {PACKAGE_NAME}" in pkg_info,
         "version": f"Version: {expected_version}" in pkg_info,
         "requires_python": "Requires-Python: >=3.11" in pkg_info,
+        "license_expression": (
+            f"License-Expression: {REQUIRED_LICENSE_EXPRESSION}" in pkg_info
+        ),
+        "license_file": f"License-File: {REQUIRED_LICENSE_FILE}" in pkg_info,
         "project_urls": all(
             f"Project-URL: {name}, {url}" in pkg_info
             for name, url in REQUIRED_PROJECT_URLS.items()
@@ -185,6 +244,15 @@ def inspect_sdist(*, sdist_path: Path, expected_version: str) -> dict[str, Any]:
         "classifiers": all(
             f"Classifier: {classifier}" in pkg_info
             for classifier in REQUIRED_CLASSIFIERS
+        ),
+    }
+    license_checks = {
+        "source_is_apache_2_0": apache_license_text_valid(source_license),
+        "packaged_is_apache_2_0": apache_license_text_valid(packaged_license),
+        "packaged_matches_source": (
+            bool(source_license)
+            and normalize_license_text(packaged_license)
+            == normalize_license_text(source_license)
         ),
     }
     missing_members = sorted(REQUIRED_SDIST_MEMBERS - names)
@@ -195,10 +263,12 @@ def inspect_sdist(*, sdist_path: Path, expected_version: str) -> dict[str, Any]:
             not missing_members
             and not forbidden_members
             and all(metadata_checks.values())
+            and all(license_checks.values())
         ),
         "missing_members": missing_members,
         "forbidden_members": forbidden_members,
         "metadata_checks": metadata_checks,
+        "license_checks": license_checks,
     }
 
 

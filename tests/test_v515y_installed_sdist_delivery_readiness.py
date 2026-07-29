@@ -36,15 +36,15 @@ class InstalledSdistDeliveryReadinessTest(unittest.TestCase):
             "summary": {
                 "passed": True,
                 "technical_release_candidate_ready": True,
-                "open_source_publication_ready": False,
+                "open_source_publication_ready": True,
             },
             "implementation_commit": "abc123",
             "checks": [
                 {"name": "base-rc", "passed": True, "detail": "passed"}
             ],
             "publication": {
-                "license_present": False,
-                "blockers": ["explicit_repository_license_missing"],
+                "license_present": True,
+                "blockers": [],
             },
             "release_artifacts": {"actual_sha256": {}},
         }
@@ -52,6 +52,25 @@ class InstalledSdistDeliveryReadinessTest(unittest.TestCase):
     def _artifact_report(self) -> dict:
         return {
             "steps": [
+                {
+                    "name": "inspect_wheel",
+                    "passed": True,
+                    "license_checks": {
+                        "single_packaged_license": True,
+                        "source_is_apache_2_0": True,
+                        "packaged_is_apache_2_0": True,
+                        "packaged_matches_source": True,
+                    },
+                },
+                {
+                    "name": "inspect_sdist",
+                    "passed": True,
+                    "license_checks": {
+                        "source_is_apache_2_0": True,
+                        "packaged_is_apache_2_0": True,
+                        "packaged_matches_source": True,
+                    },
+                },
                 {
                     "name": "verify_installed_sdist",
                     "passed": True,
@@ -70,6 +89,8 @@ class InstalledSdistDeliveryReadinessTest(unittest.TestCase):
     def _project_metadata(self) -> dict:
         return {
             "version": "0.5.15rc2",
+            "license": "Apache-2.0",
+            "license-files": ["LICENSE"],
             "urls": {
                 "Source": "https://github.com/stander1/agent",
                 "Issues": "https://github.com/stander1/agent/issues",
@@ -84,10 +105,10 @@ class InstalledSdistDeliveryReadinessTest(unittest.TestCase):
     def _delivery_guide(self) -> str:
         return (
             "v0.5.15rc2 openEuler sdist 隔离安装 "
-            "SHA256 公开发布阻塞项"
+            "SHA256 Apache-2.0 公开发布就绪"
         )
 
-    def test_technical_gate_passes_with_license_blocker(self) -> None:
+    def test_final_gate_is_ready_for_open_source_publication(self) -> None:
         report = self.verifier.build_report(
             base_report=self._base_report(),
             artifact_report=self._artifact_report(),
@@ -97,14 +118,36 @@ class InstalledSdistDeliveryReadinessTest(unittest.TestCase):
 
         self.assertTrue(report["summary"]["passed"])
         self.assertTrue(report["summary"]["installed_sdist_verified"])
-        self.assertFalse(
+        self.assertTrue(
             report["summary"]["open_source_publication_ready"]
         )
+        self.assertEqual(report["publication"]["blockers"], [])
+
+    def test_wrong_license_expression_blocks_final_gate(self) -> None:
+        metadata = self._project_metadata()
+        metadata["license"] = "MIT"
+        report = self.verifier.build_report(
+            base_report=self._base_report(),
+            artifact_report=self._artifact_report(),
+            project_metadata=metadata,
+            delivery_guide=self._delivery_guide(),
+        )
+        failed = {
+            item["name"] for item in report["checks"] if not item["passed"]
+        }
+
+        self.assertFalse(report["summary"]["passed"])
+        self.assertIn("release_apache_license_metadata_complete", failed)
 
     def test_installed_sdist_failure_blocks_technical_rc(self) -> None:
         artifacts = self._artifact_report()
-        artifacts["steps"][0]["loaded_from_target"] = False
-        artifacts["steps"][0]["passed"] = False
+        installed_sdist = next(
+            step
+            for step in artifacts["steps"]
+            if step["name"] == "verify_installed_sdist"
+        )
+        installed_sdist["loaded_from_target"] = False
+        installed_sdist["passed"] = False
         report = self.verifier.build_report(
             base_report=self._base_report(),
             artifact_report=artifacts,

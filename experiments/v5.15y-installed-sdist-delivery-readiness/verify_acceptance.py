@@ -78,14 +78,24 @@ def build_report(
         artifact_report,
         "verify_installed_sdist",
     )
+    wheel_artifact = _step(artifact_report, "inspect_wheel")
+    sdist_artifact = _step(artifact_report, "inspect_sdist")
     urls = project_metadata.get("urls", {})
     if not isinstance(urls, dict):
         urls = {}
     classifiers = {
         str(item) for item in project_metadata.get("classifiers", []) or []
     }
+    license_expression = str(project_metadata.get("license") or "")
+    license_files = {
+        str(item) for item in project_metadata.get("license-files", []) or []
+    }
     required_classifiers = set(CONTRACT.REQUIRED_CLASSIFIERS)
     required_urls = dict(CONTRACT.REQUIRED_PROJECT_URLS)
+    publication = base_report.get("publication", {})
+    if not isinstance(publication, dict):
+        publication = {}
+    blockers = list(publication.get("blockers", []) or [])
     new_checks = [
         _check(
             "release_sdist_installed_outside_checkout",
@@ -120,12 +130,44 @@ def build_report(
             ),
         ),
         _check(
+            "release_apache_license_metadata_complete",
+            license_expression == CONTRACT.REQUIRED_LICENSE_EXPRESSION
+            and CONTRACT.REQUIRED_LICENSE_FILE in license_files,
+            (
+                f"expression={license_expression};"
+                f"license_files={sorted(license_files)}"
+            ),
+        ),
+        _check(
+            "release_artifacts_embed_apache_license",
+            all(
+                bool(value)
+                for step in (wheel_artifact, sdist_artifact)
+                for value in (step.get("license_checks", {}) or {}).values()
+            )
+            and bool(wheel_artifact.get("license_checks"))
+            and bool(sdist_artifact.get("license_checks")),
+            (
+                f"wheel={wheel_artifact.get('license_checks', {})};"
+                f"sdist={sdist_artifact.get('license_checks', {})}"
+            ),
+        ),
+        _check(
+            "open_source_publication_blockers_cleared",
+            bool(publication.get("license_present")) and not blockers,
+            (
+                f"license_present={publication.get('license_present')};"
+                f"blockers={blockers}"
+            ),
+        ),
+        _check(
             "current_competition_delivery_guide_complete",
             version in delivery_guide
             and "openEuler" in delivery_guide
             and "sdist 隔离安装" in delivery_guide
             and "SHA256" in delivery_guide
-            and "公开发布阻塞项" in delivery_guide,
+            and "Apache-2.0" in delivery_guide
+            and "公开发布就绪" in delivery_guide,
             (
                 f"version={version};"
                 f"size={len(delivery_guide)}"
@@ -134,8 +176,6 @@ def build_report(
     ]
     checks = [*base_report.get("checks", []), *new_checks]
     passed = all(bool(item.get("passed")) for item in checks)
-    publication = base_report.get("publication", {})
-    blockers = list(publication.get("blockers", []) or [])
     return {
         "schema_version": (
             "agentlite.v515y.installed-sdist-delivery-readiness.v1"
@@ -166,6 +206,8 @@ def build_report(
             "version": version,
             "urls": urls,
             "classifiers": sorted(classifiers),
+            "license": license_expression,
+            "license_files": sorted(license_files),
         },
     }
 
@@ -173,7 +215,7 @@ def build_report(
 def _render_markdown(report: dict[str, Any]) -> str:
     summary = report["summary"]
     lines = [
-        "# v5.15y Installed sdist and Delivery Readiness",
+        "# v5.15y Final Installed sdist and Publication Readiness",
         "",
         f"- technical gate passed: `{summary['passed']}`",
         (

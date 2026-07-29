@@ -25,8 +25,12 @@ from release_package_contract import (
     FORBIDDEN_DISTRIBUTION_PREFIXES,
     PACKAGE_NAME,
     REQUIRED_CLASSIFIERS,
+    REQUIRED_LICENSE_EXPRESSION,
+    REQUIRED_LICENSE_FILE,
     REQUIRED_PROJECT_URLS,
     REQUIRED_WHEEL_MEMBERS,
+    apache_license_text_valid,
+    normalize_license_text,
 )
 
 
@@ -166,10 +170,20 @@ def inspect_wheel(wheel_path: Path | None) -> dict[str, Any]:
         names = set(archive.namelist())
         metadata_name = _single_dist_info_member(names, "METADATA")
         entry_points_name = _single_dist_info_member(names, "entry_points.txt")
+        license_members = sorted(
+            name
+            for name in names
+            if name.endswith(f".dist-info/licenses/{REQUIRED_LICENSE_FILE}")
+        )
         metadata = archive.read(metadata_name).decode("utf-8", errors="replace")
         entry_points = archive.read(entry_points_name).decode(
             "utf-8",
             errors="replace",
+        )
+        packaged_license = (
+            archive.read(license_members[0]).decode("utf-8", errors="replace")
+            if len(license_members) == 1
+            else ""
         )
     missing_members = sorted(REQUIRED_WHEEL_MEMBERS - names)
     forbidden_members = sorted(
@@ -181,12 +195,21 @@ def inspect_wheel(wheel_path: Path | None) -> dict[str, Any]:
         (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     )
     project_version = str(project_metadata.get("project", {}).get("version", ""))
+    source_license = (
+        (PROJECT_ROOT / REQUIRED_LICENSE_FILE).read_text(encoding="utf-8")
+        if (PROJECT_ROOT / REQUIRED_LICENSE_FILE).is_file()
+        else ""
+    )
     metadata_checks = {
         "name": f"Name: {PACKAGE_NAME}" in metadata,
         "version_matches_runtime": f"Version: {PACKAGE_VERSION}" in metadata,
         "source_versions_match": project_version == PACKAGE_VERSION,
         "requires_tiktoken": "Requires-Dist: tiktoken" in metadata,
         "requires_python": "Requires-Python: >=3.11" in metadata,
+        "license_expression": (
+            f"License-Expression: {REQUIRED_LICENSE_EXPRESSION}" in metadata
+        ),
+        "license_file": f"License-File: {REQUIRED_LICENSE_FILE}" in metadata,
         "project_urls": all(
             f"Project-URL: {name}, {url}" in metadata
             for name, url in REQUIRED_PROJECT_URLS.items()
@@ -196,11 +219,22 @@ def inspect_wheel(wheel_path: Path | None) -> dict[str, Any]:
             for classifier in REQUIRED_CLASSIFIERS
         ),
     }
+    license_checks = {
+        "single_packaged_license": len(license_members) == 1,
+        "source_is_apache_2_0": apache_license_text_valid(source_license),
+        "packaged_is_apache_2_0": apache_license_text_valid(packaged_license),
+        "packaged_matches_source": (
+            bool(source_license)
+            and normalize_license_text(packaged_license)
+            == normalize_license_text(source_license)
+        ),
+    }
     entry_point_ok = "agentlite = agent_runtime.cli:main" in entry_points
     passed = (
         not missing_members
         and not forbidden_members
         and all(metadata_checks.values())
+        and all(license_checks.values())
         and entry_point_ok
     )
     return {
@@ -211,6 +245,8 @@ def inspect_wheel(wheel_path: Path | None) -> dict[str, Any]:
         "missing_members": missing_members,
         "forbidden_members": forbidden_members,
         "metadata_checks": metadata_checks,
+        "license_checks": license_checks,
+        "license_members": license_members,
         "project_version": project_version,
         "runtime_version": PACKAGE_VERSION,
         "entry_point_ok": entry_point_ok,

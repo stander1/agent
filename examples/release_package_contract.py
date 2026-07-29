@@ -3,6 +3,8 @@ from __future__ import annotations
 
 PACKAGE_NAME = "multi-agent-collaboration-runtime"
 DIST_INFO_PREFIX = "multi_agent_collaboration_runtime-"
+REQUIRED_LICENSE_EXPRESSION = "Apache-2.0"
+REQUIRED_LICENSE_FILE = "LICENSE"
 REQUIRED_PROJECT_URLS = {
     "Source": "https://github.com/stander1/agent",
     "Issues": "https://github.com/stander1/agent/issues",
@@ -42,6 +44,7 @@ REQUIRED_WHEEL_MEMBERS = {
 }
 
 REQUIRED_SDIST_MEMBERS = REQUIRED_WHEEL_MEMBERS | {
+    REQUIRED_LICENSE_FILE,
     "README.md",
     "pyproject.toml",
     "MANIFEST.in",
@@ -84,3 +87,22 @@ FORBIDDEN_DISTRIBUTION_PREFIXES = (
     "logs/",
     "runs/",
 )
+
+APACHE_LICENSE_MARKERS = (
+    "Apache License",
+    "Version 2.0, January 2004",
+    "TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION",
+    "1. Definitions.",
+    "9. Accepting Warranty or Additional Liability.",
+    "END OF TERMS AND CONDITIONS",
+    "APPENDIX: How to apply the Apache License to your work.",
+)
+
+
+def normalize_license_text(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n").rstrip() + "\n"
+
+
+def apache_license_text_valid(text: str) -> bool:
+    normalized = normalize_license_text(text)
+    return all(marker in normalized for marker in APACHE_LICENSE_MARKERS)

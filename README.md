@@ -9,6 +9,8 @@ v0.5.15rc2 openEuler 发行候选验收步骤：
 
 当前发行包门禁版本：`v5.15y installed sdist delivery readiness`
 
+许可证： [Apache-2.0](LICENSE)
+
 实验结果记录见：
 
 - [docs/experiments/v0-v1-results.md](docs/experiments/v0-v1-results.md)
@@ -87,7 +89,9 @@ artifact contract. The builder installs the generated sdist into an isolated
 target, imports AgentLite from that target outside the source tree, checks
 runtime and distribution version identity, runs the installed CLI, and verifies
 the required runtime members. Current competition delivery guidance and package
-discovery metadata are included without selecting a legal license.
+discovery metadata are included. The project owner selected Apache-2.0; the
+source tree, wheel, sdist, and package metadata now carry and verify the same
+license.
 
 ## v0.5.15rc1 Current Note
 

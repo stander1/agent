@@ -14,5 +14,6 @@ export AGENTLITE_V515Y_EXP_ID="$(date +%Y%m%d-%H%M%S)"
 bash experiments/v5.15y-installed-sdist-delivery-readiness/run_openeuler.sh
 ```
 
-No Provider credential is required. Technical readiness remains separate from
-the explicit repository-license decision required for public publication.
+No Provider credential is required. The final report verifies Apache-2.0 in the
+repository, package metadata, wheel, and sdist, and requires all publication
+blockers to be cleared.
