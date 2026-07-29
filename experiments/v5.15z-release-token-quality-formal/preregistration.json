@@ -1,0 +1,267 @@
+{
+  "schema_version": "agentlite.v515z.preregistration.v1",
+  "frozen_before_provider_run": true,
+  "experiment_kind": "repeated_release_token_quality_formal",
+  "source_lineage": {
+    "mechanism_baseline": "v0.5.15",
+    "mechanism_release_commit": "c7d8c0f068647849cee0392bdce1c0bc042d5bf7",
+    "release_tag": "v0.5.15",
+    "comparison_baseline": "v5.14z-active-fact-terminal-delivery-formal",
+    "comparison_experiment_id": "20260728-082149",
+    "task_scope": "A1-A10 and B1-B10",
+    "input_policy": "reuse_exact_v514z_frozen_tasks_agents_runtime_parameters_judges_and_thresholds_on_the_v0.5.15_release_source",
+    "allowed_post_release_paths": [
+      "experiments/v5.15z-release-token-quality-formal/"
+    ],
+    "v514z_preregistration_sha256": "2c5cac6ccea6985087647c80c8eeb514e07820bdaa8ec2153d2f58db21c2f07f",
+    "v514z_acceptance_verifier_sha256": "ba7abb30742ff198e08506ce4d99ada61117a10ee5f33a09bbdb988ca5051f47",
+    "v514h_preregistration_sha256": "07e088d3cddfbedb37ad66d9b026aa8dd72fec716c14c5133cf1a2827e66490d",
+    "v514j_preregistration_sha256": "c6c9e3ec27ef023f1bff2c8dfd46008ad344054a9698245e47ab5f25b1512ab6",
+    "v514k_acceptance_verifier_sha256": "8bbc3bb5d894dd612da8f275a13612ae78d471a778eff1bfacb1a34af3b9454f",
+    "v514l_preregistration_sha256": "ff625a3af546db77ecb07a0b236f232053a0fda7bb1145b58022bd630f87149d",
+    "v514m_acceptance_verifier_sha256": "d0b1d5b56d16d9a59ffebf61d5556c0b7582e7d272ee2ff3be94b7c978f9a52d",
+    "v514n_preregistration_sha256": "875d8e97143dff6ef1b2504a2e2717bcd188013cf70cc51ae40f0f3ebf840cc9",
+    "v514o_acceptance_verifier_sha256": "049b70c1ce9feeedfc9f33cd65e6e701ceadee2328970e34810cbc940bc8234b",
+    "v514p_preregistration_sha256": "6e40c411c5f1a2f84071f99186f05ab621e186b86b951cdbf1dbae98034f635f",
+    "v514q_acceptance_verifier_sha256": "7b8fcb96e6ada621ea7312fb2034f9b1b8195b7fac0717be7a82aeeeb621054b",
+    "v514r_preregistration_sha256": "ccd3552d2b60a25c7e8746fd1c4caf0fced98ffc2787a736b75c763ec96880a2",
+    "v514s_acceptance_verifier_sha256": "d36a059d7cdc482f56b57a4c39e05c2e9a918aec36136448fc48181c2a5eb691",
+    "v514t_preregistration_sha256": "c45207193e0184f98515ef62c037d60cda9772b2a68d79f664f34f8b363ae21a",
+    "v514u_acceptance_verifier_sha256": "324ba2f40752b8159c8fbd99e2008b839f9a9bf73e3a2471b06524bc25c28aa9",
+    "v514v_preregistration_sha256": "fccec48c06d1a16246594b99152cd06e9c675d3c7b4b50f4838743b060e11bc8",
+    "v514w_acceptance_verifier_sha256": "d99634079b833cf699cb97df08f2c944b68c9bd10971aeacb65c7102918b62ed",
+    "v514x_preregistration_sha256": "0b2ae6c5d34b0309e80d769d547ee69b4c7caa194431551f2ad361d28917aa8e",
+    "v514y_acceptance_verifier_sha256": "1d914ca836c4bf2ad7e71fa19f70a840a77bbf599a2d743ea95544be9493ff7f"
+  },
+  "repetition_plan": {
+    "repeat_count": 3,
+    "execution_order": "serial",
+    "groups_per_repeat": [
+      "native",
+      "observed",
+      "managed"
+    ],
+    "task_executions_per_repeat": 60,
+    "planned_task_executions": 180,
+    "aggregate_policy": "report_each_repeat_and_pooled_totals_without_hiding_failed_repeats",
+    "variance_policy": "report_repeat-level_range_and_sample_standard_deviation_when_all_repeats_complete"
+  },
+  "frozen_input_sha256": {
+    "question_A_formal.json": "cd0250c73743c00d47615e9f8275fe568f7a342809926b5a380d2f829ae58986",
+    "question_B_formal.json": "7ef55fc08060b03879363c88aaed0362c0e965f69147c153d219e883db6abc38"
+  },
+  "frozen_agent_sha256": {
+    "agent_config_A.json": "7f23a353b4491731727ce58914f7abca995ed6e37105ee6107e34ed969a2cb74",
+    "agent_config_B.json": "8371022d39c6e742eb0877169d870ab954fd99dcd937cc1dc8c66f45674cde43"
+  },
+  "scenarios": [
+    {
+      "scenario_id": "A-formal",
+      "directory": "A",
+      "terminal_task_id": "A10"
+    },
+    {
+      "scenario_id": "B-formal",
+      "directory": "B",
+      "terminal_task_id": "B10"
+    }
+  ],
+  "groups": [
+    "native",
+    "observed",
+    "managed"
+  ],
+  "tasks_per_scenario": 10,
+  "provider": {
+    "base_url": "https://token-plan-cn.xiaomimimo.com/v1",
+    "model": "mimo-v2.5"
+  },
+  "temperature": 0,
+  "max_turns": 9,
+  "primary_cost_metrics": [
+    "provider_llm_total_tokens",
+    "end_to_end_collaboration_tokens"
+  ],
+  "diagnostic_cost_metrics": [
+    "direct_message_tokens",
+    "prompt_view_tokens",
+    "retrieved_memory_tokens",
+    "control_llm_tokens",
+    "retry_tokens"
+  ],
+  "state_evidence_metrics": [
+    "state_count",
+    "state_type_counts",
+    "payload_kind_counts",
+    "structured_non_text_count",
+    "contains_embedding_refs_count",
+    "total_size_bytes"
+  ],
+  "epistemic_memory_metrics": [
+    "memory_epistemic_deferred_count",
+    "claim_candidate_certainty",
+    "claim_candidate_admission_status"
+  ],
+  "review_governance_metrics": [
+    "review_governance_event_count",
+    "review_governance_blocking_count",
+    "review_governance_targeted_memory_count",
+    "review_governance_deprecated_memory_count",
+    "review_governance_blocker_admitted_count",
+    "review_governance_failure_event_count"
+  ],
+  "protocol_surface_metrics": [
+    "model_visible_input_protocol_marker_count",
+    "model_visible_agent_output_protocol_marker_count",
+    "model_visible_final_output_protocol_marker_count"
+  ],
+  "candidate_evidence_metrics": [
+    "current_candidate_required_count",
+    "current_candidate_available_count",
+    "current_candidate_complete_count",
+    "current_candidate_missing_count",
+    "current_candidate_source_tokens",
+    "current_candidate_selected_tokens",
+    "current_task_identity_anchored_count",
+    "current_task_identity_guard_blocked_count",
+    "required_evidence_guard_event_count",
+    "required_evidence_guard_blocked_count"
+  ],
+  "diagnostic_requested_state_types": [
+    "retrieval_state",
+    "embedding_state",
+    "artifact_state"
+  ],
+  "required_formal_state_types_by_scenario": {
+    "B-formal": {
+      "retrieval_state": 1,
+      "embedding_state": 1
+    }
+  },
+  "quality_rule": "min(primary_blind_score, technical_blind_score)",
+  "judge_usage_in_runtime_cost": false,
+  "regression_focus": [
+    {
+      "scenario_id": "A-formal",
+      "directory": "A",
+      "task_ids": [
+        "A2",
+        "A4",
+        "A6",
+        "A7",
+        "A10"
+      ]
+    },
+    {
+      "scenario_id": "B-formal",
+      "directory": "B",
+      "task_ids": [
+        "B8",
+        "B9",
+        "B10"
+      ]
+    }
+  ],
+  "forbidden_delivery_guard_reasons": [
+    "internal_protocol_message_not_deliverable",
+    "runtime_safety_hold_not_deliverable",
+    "current_task_requirements_missing",
+    "review_feedback_not_final_artifact"
+  ],
+  "forbidden_final_output_markers": [
+    "AGENTLITE_",
+    "Runtime safety hold"
+  ],
+  "thresholds": {
+    "managed_provider_token_reduction_min": 0.15,
+    "managed_transport_token_reduction_min": 0.15,
+    "managed_quality_noninferiority_margin": 0.3,
+    "managed_delivery_complete_delta_min": 0,
+    "rewrite_error_fallback_count_max": 0,
+    "managed_terminal_score_min": 7,
+    "managed_terminal_score_noninferiority_margin": 1,
+    "managed_terminal_blocking_finding_count_max": 0,
+    "memory_hit_count_min": 1,
+    "memory_injected_count_min": 1,
+    "useful_memory_hit_count_min": 1,
+    "wrong_memory_hit_count_max": 0,
+    "current_task_fidelity_failure_count_max": 0,
+    "model_visible_protocol_marker_count_max": 0,
+    "routing_metadata_state_count_max": 0,
+    "review_governance_event_count_min_per_scenario": 1,
+    "review_governance_failure_event_count_max": 0,
+    "review_governance_targeted_without_deprecation_count_max": 0,
+    "review_governance_unexpected_deprecation_count_max": 0,
+    "review_governance_blocking_without_admitted_blocker_count_max": 0,
+    "review_governance_nonblocking_side_effect_count_max": 0,
+    "model_visible_input_protocol_marker_count_max": 0,
+    "model_visible_agent_output_protocol_marker_count_max": 0,
+    "model_visible_final_output_protocol_marker_count_max": 0,
+    "memory_adoption_enforcement_failure_count_max": 0,
+    "regression_focus_score_min": 7,
+    "regression_focus_score_noninferiority_margin": 1,
+    "regression_focus_blocking_finding_count_max": 0,
+    "review_feedback_final_delivery_count_max": 0,
+    "quantity_cross_dimension_guard_failure_count_max": 0,
+    "epistemic_deferred_count_min_total": 1,
+    "epistemic_admission_violation_count_max": 0,
+    "structured_state_audit_failure_count_max": 0,
+    "contains_embedding_refs_count_min_b": 1,
+    "prior_artifact_approved_count_min_per_scenario": 1,
+    "managed_direct_reviewer_artifact_count_max": 0,
+    "reviewer_artifact_origin_mismatch_count_max": 0,
+    "approval_body_leak_count_max": 0,
+    "explicit_decision_memory_count_min_total": 1,
+    "current_candidate_required_count_min_per_scenario": 1,
+    "current_candidate_missing_count_max": 0,
+    "current_candidate_complete_count_min_per_scenario": 1,
+    "current_candidate_selected_tokens_min_per_scenario": 1,
+    "current_task_identity_anchored_count_min_per_scenario": 1,
+    "superseded_constraint_candidate_count_min": 1,
+    "approved_prior_memory_resolution_count_min_total": 1,
+    "identity_guard_invalid_event_count_max": 0,
+    "required_evidence_guard_invalid_event_count_max": 0
+  },
+  "comparison_baseline_metrics": {
+    "experiment_id": "20260728-082149",
+    "managed_provider_llm_total_tokens": 871311,
+    "native_provider_llm_total_tokens": 946534,
+    "managed_provider_token_reduction": 0.07947205277359291,
+    "managed_end_to_end_collaboration_tokens": 133370,
+    "native_collaboration_tokens": 173706,
+    "managed_transport_token_reduction": 0.23220844415276387,
+    "managed_quality_mean": 6.1,
+    "native_quality_mean": 7.2,
+    "managed_delivery_complete_count": 9,
+    "native_delivery_complete_count": 15,
+    "wrong_memory_hit_count": 9,
+    "focus_scores": {
+      "A2": 8,
+      "A4": 6,
+      "A6": 8,
+      "A7": 8,
+      "A10": 5,
+      "B8": 5,
+      "B9": 0,
+      "B10": 4
+    }
+  },
+  "interpretation": {
+    "formal_scale_passed": "All unchanged v5.14p cost, quality, delivery, memory, review-governance and hygiene gates pass after current-candidate evidence and task-identity protection.",
+    "typed_quantity_passed": "Time, money and count constraints do not cross dimensions in the final-delivery guard.",
+    "review_closure_passed": "A review blocker is never reported as a successful final delivery.",
+    "epistemic_admission_passed": "Inferred or uncertain claims remain pending_confirmation and do not enter formal shared memory.",
+    "real_structured_state_passed": "Required retrieval and embedding states are extracted from actual framework output and their payload digests match the audited source text.",
+    "single_run_boundary": "Each child run is one frozen repeat; the three-repeat batch reports repeat-level range and sample standard deviation.",
+    "reviewer_artifact_continuity_passed": "Reviewer approval references promote the preceding business artifact without replacing it with review prose.",
+    "explicit_decision_memory_passed": "Explicit labeled conclusions enter typed decision memory and remain available to later tasks.",
+    "compact_approval_passed": "Compact approval variants promote the latest valid business artifact and never become the final body.",
+    "current_candidate_evidence_passed": "Validation-capable receivers can inspect the complete latest candidate while older chronology remains compact.",
+    "current_task_identity_passed": "Current-task identity anchors survive rewriting and unsupported future labels are conservatively blocked.",
+    "superseded_constraint_resolution_passed": "Historical or superseded numeric values remain auditable without being misclassified as the current executable total; real current violations remain blocked.",
+    "history_grounded_identity_passed": "Task labels and explicit interaction ordinals remain grounded in the bounded user task sequence without treating ordinary numeric counts as identities.",
+    "approved_artifact_memory_passed": "Compact approvals promote the preceding validated artifact and preserve its explicit decisions in typed shared memory.",
+    "budget_fact_fidelity_passed": "Budget estimates, upper bounds, allocation components, grouped amounts and revision targets keep distinct semantic identities.",
+    "required_evidence_fidelity_passed": "A missing task-required artifact cannot support a strong decision when the user explicitly requires an evidence-insufficient fallback."
+  }
+}
