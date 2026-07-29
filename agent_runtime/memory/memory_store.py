@@ -22,6 +22,7 @@ from agent_runtime.memory.references import (
 from agent_runtime.memory.schema_registry import (
     SchemaRegistryLite,
     SlotPolicy,
+    SUPERSESSION_RELATION_TYPES,
     canonical_claim_polarity,
 )
 
@@ -987,7 +988,7 @@ class MemoryStoreLite:
             polarity=canonical.polarity,
         )
         if any(
-            relation.get("relation_type") == "supersedes_value"
+            relation.get("relation_type") in SUPERSESSION_RELATION_TYPES
             and relation.get("target_candidate_id")
             for relation in candidate.relations
         ):
@@ -1190,7 +1191,7 @@ class MemoryStoreLite:
         for relation in relations:
             current = dict(relation)
             if (
-                current.get("relation_type") != "supersedes_value"
+                current.get("relation_type") not in SUPERSESSION_RELATION_TYPES
                 or current.get("target_candidate_id")
             ):
                 bound.append(current)

@@ -11,6 +11,7 @@ from agent_runtime.memory.claim_extractor import (
 from agent_runtime.memory.memory_store import MemoryAdmissionReport, MemoryStoreLite
 from agent_runtime.memory.schema_registry import (
     SourceSpan,
+    SUPERSESSION_RELATION_TYPES,
     canonical_claim_polarity,
 )
 from agent_runtime.memory.semantic_disambiguator import (
@@ -673,7 +674,7 @@ class StateToMemoryBridgeLite:
         revision_kind = (
             "replaces"
             if any(
-                relation.get("relation_type") == "supersedes_value"
+                relation.get("relation_type") in SUPERSESSION_RELATION_TYPES
                 for relation in relations
             )
             else "asserted"

@@ -8,6 +8,7 @@ from agent_runtime.memory.context_views import (
     build_minimal_context_view,
 )
 from agent_runtime.memory.memory_store import MemoryStoreLite
+from agent_runtime.memory.schema_registry import SUPERSESSION_RELATION_TYPES
 
 
 class FactLevelMemoryTest(unittest.TestCase):
@@ -325,6 +326,99 @@ class FactLevelMemoryTest(unittest.TestCase):
         self.assertIn('"value":"false"', role_view.text)
         self.assertIn('"value_type":"boolean"', role_view.text)
         self.assertNotIn("confidence", role_view.text)
+
+    def test_explicit_typed_history_and_related_active_facts_survive_budget(self) -> None:
+        revised = (
+            "[memory_view:view_offset] slot=slot.open.calibration_offset; "
+            "claim=claim_current; "
+            'active_fact={"slot_id":"slot.open.calibration_offset",'
+            '"scope":"instrument.reference","value":"11.4",'
+            '"value_type":"number","unit":"qx",'
+            '"operator":"eq","polarity":"positive","status":"active"}; '
+            "tags=[generic]\n"
+            '[revision_guard] {"policy":"active_authoritative_for_current_state",'
+            '"historical_claim_count":1}'
+        )
+        flag = (
+            "[memory_view:view_latch] slot=slot.open.safety_latch; "
+            "claim=claim_flag; "
+            'active_fact={"slot_id":"slot.open.safety_latch",'
+            '"scope":"instrument.safety","value":"true",'
+            '"value_type":"boolean","unit":"",'
+            '"operator":"eq","polarity":"positive","status":"active"}; '
+            "tags=[generic]"
+        )
+        historical = (
+            'historical_fact={"slot_id":"slot.open.calibration_offset",'
+            '"scope":"instrument.reference","value":"15.9",'
+            '"value_type":"number","unit":"qx",'
+            '"operator":"eq","polarity":"positive",'
+            '"status":"superseded"}'
+        )
+        unrelated_history = (
+            'historical_fact={"slot_id":"slot.open.unrelated_channel",'
+            '"scope":"another.system","value":"999",'
+            '"value_type":"number","unit":"zz",'
+            '"operator":"eq","polarity":"positive",'
+            '"status":"superseded"}'
+        )
+
+        role_view = build_minimal_context_view(
+            query=(
+                "Produce a two-state record. Label the current calibration "
+                "offset and the former calibration offset archived. Include "
+                "the exact safety-latch flag."
+            ),
+            prompt_views=[revised, flag, historical, unrelated_history],
+            consumer=ConsumerCapabilityContext(
+                consumer_id="arbitrary_record_consumer",
+            ),
+            action="REVIEW_OUTPUT",
+            budget_chars=180,
+        )
+
+        self.assertIn('"value":"11.4"', role_view.text)
+        self.assertIn('"value":"15.9"', role_view.text)
+        self.assertIn('"value":"true"', role_view.text)
+        self.assertEqual(role_view.text.count("active_fact="), 2)
+        self.assertEqual(role_view.text.count("historical_fact="), 1)
+        self.assertNotIn('"value":"999"', role_view.text)
+        self.assertTrue(role_view.target_budget_exceeded)
+
+    def test_all_supersession_relations_bind_a_single_predecessor(self) -> None:
+        store = MemoryStoreLite()
+        old = self._write_claim(
+            store,
+            task_id="R1",
+            scope="instrument.reference",
+            value="15.9",
+            value_type="number",
+            unit="qx",
+        )
+        guard = store.revision_guard(old.memory_ref)
+        old_claim_id = store._memories[old.memory_ref.memory_id].claim_id
+        old_candidate_id = store._claims[old_claim_id].candidate_id
+
+        for relation_type in SUPERSESSION_RELATION_TYPES:
+            with self.subTest(relation_type=relation_type):
+                bound = store._bind_predecessor_relations(
+                    relations=[
+                        {
+                            "relation_type": relation_type,
+                            "target_value": "the former reading",
+                            "target_candidate_id": "",
+                        }
+                    ],
+                    semantic_key=guard["semantic_key"],
+                    value="11.4",
+                    value_type="number",
+                    unit="qx",
+                    polarity="positive",
+                )
+                self.assertEqual(
+                    bound[0]["target_candidate_id"],
+                    old_candidate_id or old_claim_id,
+                )
 
     def test_loaded_legacy_document_claim_is_audit_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

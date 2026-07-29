@@ -41,8 +41,8 @@ def _session_report(*, fetch_count: int = 1) -> dict:
         "current_task_fidelity_failure_count": 0,
         "agentlite_model_visible_protocol_marker_count": 0,
         "actual_agentlite_transport_tokens": 240,
-        "agentlite_memory_field_fetch_count": fetch_count,
-        "agentlite_memory_field_fetch_tokens": 35 if fetch_count else 0,
+        "memory_field_fetch_count": fetch_count,
+        "memory_field_fetch_tokens": 35 if fetch_count else 0,
     }
     return {
         "driver_status": "active",
@@ -135,7 +135,7 @@ def _workflow(commit: str) -> dict:
 
 def _snapshot(*, bind_relation: bool = True) -> dict:
     relation = {
-        "relation_type": "supersedes_value",
+        "relation_type": "supersedes_candidate",
         "target_candidate_id": "candidate_old" if bind_relation else "",
     }
     return {

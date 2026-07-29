@@ -6,6 +6,15 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 
+SUPERSESSION_RELATION_TYPES = frozenset(
+    {
+        "supersedes_value",
+        "supersedes_claim",
+        "supersedes_candidate",
+    }
+)
+
+
 def canonical_claim_polarity(operator: Any) -> str:
     """Return logical assertion polarity, independent of scalar sign."""
 

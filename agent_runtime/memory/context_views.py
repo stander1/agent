@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Iterable
+
+from agent_runtime.memory.claim_extractor import requests_historical_state
 
 
 FIELD_CUES: dict[str, tuple[str, ...]] = {
@@ -383,6 +386,7 @@ _LATIN_OR_ID_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]*|\d+(?:\.\d+)?")
 _CHINESE_RUN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]{2,}")
 _VIEW_ID_RE = re.compile(r"\[memory_view:([^\]]+)\]")
 _SLOT_RE = re.compile(r"\bslot=([^;]+)")
+_TYPED_SLOT_ID_RE = re.compile(r'"slot_id"\s*:\s*"([^"]+)"')
 _CLAIM_RE = re.compile(r"\bclaim=([^;]+)")
 _CURRENT_USER_TASK_BLOCK_RE = re.compile(
     r"(?ms)^CURRENT_USER_TASK(?: \(highest priority\))?:\s*\n"
@@ -589,8 +593,32 @@ def build_minimal_context_view(
     requested_fields = requested_semantic_fields(query)
     units = _collect_units(source_views)
     query_terms = _semantic_terms(query)
+    historical_state_requested = requests_historical_state(query)
+    historical_slot_ids = {
+        unit.slot_id
+        for unit in units
+        if historical_state_requested
+        and unit.text.startswith("historical_fact=")
+        and unit.slot_id != "unresolved"
+        and bool(query_terms & _typed_fact_semantic_terms(unit.text))
+    }
     relevant_fields = set(information_fields)
     required_fields = set(requested_fields)
+
+    def required_unit(unit: _ViewUnit) -> bool:
+        if unit.mandatory:
+            return True
+        if (
+            historical_state_requested
+            and unit.text.startswith("historical_fact=")
+        ):
+            return unit.slot_id in historical_slot_ids
+        if not unit.text.startswith("active_fact="):
+            return False
+        return (
+            unit.slot_id in historical_slot_ids
+            or bool(query_terms & _typed_fact_semantic_terms(unit.text))
+        )
 
     scored: list[tuple[float, _ViewUnit]] = []
     for unit in units:
@@ -611,7 +639,7 @@ def build_minimal_context_view(
     selected_texts: set[str] = set()
 
     for unit in units:
-        if not unit.mandatory:
+        if not required_unit(unit):
             continue
         key = (unit.source_index, unit.source_order)
         normalized_text = _normalize_unit(unit.text)
@@ -643,7 +671,7 @@ def build_minimal_context_view(
         if key in selected_keys or normalized_text in selected_texts or score <= 0:
             continue
         projected = current_chars + len(unit.text) + 3
-        if selected and projected > target_budget and not unit.mandatory:
+        if selected and projected > target_budget and not required_unit(unit):
             continue
         selected.append(unit)
         selected_keys.add(key)
@@ -726,7 +754,11 @@ def _collect_units(prompt_views: list[str]) -> list[_ViewUnit]:
     units: list[_ViewUnit] = []
     for source_index, view in enumerate(prompt_views):
         view_id = _match_or_default(_VIEW_ID_RE, view, f"view_{source_index + 1}")
-        slot_id = _match_or_default(_SLOT_RE, view, "unresolved")
+        slot_id = _match_or_default(
+            _SLOT_RE,
+            view,
+            _match_or_default(_TYPED_SLOT_ID_RE, view, "unresolved"),
+        )
         claim_id = _match_or_default(_CLAIM_RE, view, "unknown")
         body = _memory_view_body(view)
         source_order = 0
@@ -822,9 +854,37 @@ def _render_context_view(
     return "\n".join(lines)
 
 
+def _typed_fact_semantic_terms(text: str) -> set[str]:
+    _, separator, raw_payload = str(text or "").partition("=")
+    if not separator:
+        return set()
+    try:
+        payload = json.loads(raw_payload)
+    except (json.JSONDecodeError, TypeError):
+        return set()
+    if not isinstance(payload, dict):
+        return set()
+    semantic_values = (
+        payload.get("slot_id"),
+        payload.get("scope"),
+        payload.get("value"),
+        payload.get("unit"),
+    )
+    return _semantic_terms(
+        " ".join(str(value or "") for value in semantic_values)
+    )
+
 def _semantic_terms(text: str) -> set[str]:
     lowered = str(text or "").casefold()
-    terms = {match.group(0) for match in _LATIN_OR_ID_RE.finditer(lowered)}
+    terms: set[str] = set()
+    for match in _LATIN_OR_ID_RE.finditer(lowered):
+        token = match.group(0)
+        terms.add(token)
+        terms.update(
+            part
+            for part in re.split(r"[_.-]+", token)
+            if len(part) >= 2
+        )
     for run in _CHINESE_RUN_RE.findall(lowered):
         if len(run) == 2:
             terms.add(run)

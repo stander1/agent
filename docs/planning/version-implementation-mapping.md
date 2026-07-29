@@ -5565,3 +5565,29 @@ Planner、Writer 或 Reviewer。
 通过该门禁只允许进入小规模 Native/Observed/Managed 对照预检，不直接形成
 正式 Token 节省或质量非劣结论。详细说明见
 `docs/planning/v5.15f-integrated-autogen-semantic-preflight.md`。
+
+## 106. v5.15q: Explicit typed context retention
+
+v5.15q follows the frozen v5.15p failure evidence from a previously unseen
+revision chain. The memory store admitted the correct active, historical, and
+boolean facts, but role-view compaction exposed only the current numeric fact
+to the final receivers.
+
+Implementation mapping:
+
+- `agent_runtime/memory/context_views.py`: preserves explicitly requested typed
+  current/history facts and related active facts by open semantic identity even
+  when the nominal role budget would otherwise drop them;
+- `agent_runtime/memory/schema_registry.py`, `semantic_disambiguator.py`,
+  `memory_store.py`, `conflict_resolver.py`, and
+  `bridge/state_memory_bridge.py`: share one supersession relation contract and
+  bind its internal predecessor locally;
+- `experiments/v5.15q-explicit-typed-context-retention/`: verifies the final
+  model-visible typed context for every configured receiver from trace records;
+- `tests/test_fact_level_memory.py`, `tests/test_autogen_shared_memory.py`, and
+  `tests/test_v515q_explicit_typed_context_retention.py`: cover budget pressure,
+  historical expansion, relation variants, and trace-level acceptance.
+
+The repair introduces no benchmark identifiers, fixed roles, domain vocabulary,
+or domain-specific regular expressions. Detailed design and evidence limits are
+in `docs/planning/v5.15q-explicit-typed-context-retention.md`.

@@ -4,6 +4,8 @@ from dataclasses import asdict, dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping
 
+from agent_runtime.memory.schema_registry import SUPERSESSION_RELATION_TYPES
+
 
 @dataclass(frozen=True, slots=True)
 class ClaimConflictResolution:
@@ -144,11 +146,7 @@ def _explicit_supersession(
             relation_type = str(
                 relation.get("relation_type") or ""
             ).strip().lower()
-            if relation_type not in {
-                "supersedes_value",
-                "supersedes_claim",
-                "supersedes_candidate",
-            }:
+            if relation_type not in SUPERSESSION_RELATION_TYPES:
                 continue
             target_reference = str(
                 relation.get("target_candidate_id")

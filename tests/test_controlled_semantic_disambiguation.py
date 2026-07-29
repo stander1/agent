@@ -180,6 +180,7 @@ class ControlledSemanticDisambiguationTest(unittest.TestCase):
             "target_candidate_id must be an empty string",
             system_prompt,
         )
+        self.assertIn('"supersedes_claim"', system_prompt)
 
     def test_normalizes_complete_measurement_from_exact_evidence(self) -> None:
         text = "The transfer coefficient is -1.8 qx."

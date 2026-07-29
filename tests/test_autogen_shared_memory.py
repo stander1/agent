@@ -230,6 +230,10 @@ class AutoGenSharedMemoryTest(unittest.TestCase):
                     '"value":"7.9"',
                     "\n".join(selection.source_prompt_views),
                 )
+                self.assertIn(
+                    '"value":"7.9"',
+                    "\n".join(selection.prompt_views),
+                )
                 self.assertEqual(selection.field_fetch_count, 1)
                 self.assertGreater(selection.field_fetch_tokens, 0)
 

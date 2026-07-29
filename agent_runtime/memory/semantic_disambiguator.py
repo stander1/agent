@@ -11,6 +11,7 @@ from agent_runtime.memory.schema_registry import (
     CanonicalClaimCandidate,
     ClaimRelation,
     SourceSpan,
+    SUPERSESSION_RELATION_TYPES,
     canonical_claim_polarity,
 )
 
@@ -39,8 +40,7 @@ _ALLOWED_TEMPORAL_STATUSES = {
     "unspecified",
 }
 _ALLOWED_RELATION_TYPES = {
-    "supersedes_value",
-    "supersedes_candidate",
+    *SUPERSESSION_RELATION_TYPES,
     "equivalent_to",
     "supports",
     "contradicts",

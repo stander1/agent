@@ -11,6 +11,13 @@ from types import ModuleType
 from typing import Any
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from agent_runtime.memory.schema_registry import SUPERSESSION_RELATION_TYPES
+
+
 BASE_EXPERIMENT_DIR = (
     Path(__file__).resolve().parents[1]
     / "v5.15f-integrated-autogen-semantic-preflight"
@@ -188,7 +195,7 @@ def build_report(
         str(relation.get("target_candidate_id") or "")
         for relation in (active or {}).get("relations", [])
         if isinstance(relation, dict)
-        and relation.get("relation_type") == "supersedes_value"
+        and relation.get("relation_type") in SUPERSESSION_RELATION_TYPES
     }
     relation_bound = bool(historical_targets & relation_targets)
 
@@ -205,8 +212,18 @@ def build_report(
     ]
 
     metrics = _metrics(session_report)
-    fetch_count = _integer(metrics.get("agentlite_memory_field_fetch_count"))
-    fetch_tokens = _integer(metrics.get("agentlite_memory_field_fetch_tokens"))
+    fetch_count = _integer(
+        metrics.get(
+            "agentlite_memory_field_fetch_count",
+            metrics.get("memory_field_fetch_count"),
+        )
+    )
+    fetch_tokens = _integer(
+        metrics.get(
+            "agentlite_memory_field_fetch_tokens",
+            metrics.get("memory_field_fetch_tokens"),
+        )
+    )
     minimum_fetch_count = max(
         1,
         _integer(expectation.get("minimum_field_fetch_count")),
