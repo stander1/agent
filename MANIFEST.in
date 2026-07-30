@@ -4,16 +4,27 @@ include pyproject.toml
 include MANIFEST.in
 recursive-include agent_runtime *.py
 recursive-include web_monitor *.py *.html *.css *.js
-recursive-include docs *.md
+include docs/versioning.md
+include docs/competition/AB_EXPERIMENT_DESIGN.md
+include docs/competition/DEVELOPMENT_RECORD.md
+include docs/competition/RESULTS_SNAPSHOT.md
+include docs/competition/v0.5.15-delivery-guide.md
+include docs/experiments/README.md
+include docs/experiments/v5.12x-autogen-team-benchmark-results.md
+include docs/planning/version-implementation-mapping.md
+include docs/problems/A.md
+include docs/problems/B.md
+include docs/release/v0.5.15-final-release-notes.md
 recursive-include examples *.py
+recursive-include experiments/ordinary-developer-autogen *.py *.md *.json
+recursive-include experiments/v5.14b-fair-cost-quality-preflight *.py *.sh *.md *.json
+recursive-include experiments/v5.14f-formal-scale-acceptance *.py *.sh *.md *.json
 recursive-include experiments/v5.15w-package-release-hardening *.py *.sh *.md *.json
 recursive-include experiments/v5.15x-release-candidate-freeze *.py *.sh *.md *.json
 recursive-include experiments/v5.15y-installed-sdist-delivery-readiness *.py *.sh *.md *.json
 recursive-include tests *.py
 recursive-exclude * __pycache__
 recursive-exclude * *.py[cod]
-prune docs/experiments
-prune docs/history
 prune runs
 prune build
 prune dist

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "multi-agent-collaboration-runtime"
 version = "0.5.15"
-description = "Cross-framework runtime primitives for low-overhead multi-agent collaboration"
+description = "面向低开销多智能体协作的跨框架运行时"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"

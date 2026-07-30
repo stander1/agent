@@ -1,175 +1,75 @@
-# 版本控制策略
+# AgentLite 版本与分支说明
 
-本项目采用“滚动主干 + 版本快照”的方式管理迭代。
+## 当前版本
 
-GitHub 默认打开的是 `competition-submission` 比赛交付分支；`main` 保留稳定
-开发主干。真正的版本边界由 Git tag 和 `version/*` 分支固定。
+- 正式版本：`0.5.15`
+- 比赛分支：`competition-submission`
+- Python 包：`multi-agent-collaboration-runtime`
+- 许可证：Apache-2.0
 
-完整版本能力与实现演进保留在 Git 提交历史中的
-`docs/planning/version-implementation-mapping.md`。`v3.1`、`v3.2` 等
-小版本只表示主版本内部补强，不改变 `docs/planning/README.md` 中的 v0-v6
-主路线。
+版本、实现文件和验证入口的详细对应关系见
+`docs/planning/version-implementation-mapping.md`。
 
-## 分支与标签约定
+## 版本规则
 
-| 类型 | 用途 | 是否继续开发 |
-| --- | --- | --- |
-| `main` | 稳定开发主干 | 是 |
-| `feature/controlled-semantic-disambiguation` | v0.5.15 发布后的维护分支 | 是 |
-| `version/v0.5.15` | v0.5.15 最终比赛交付快照 | 否 |
-| `version/v0.5.15rc2` | v0.5.15rc2 技术验收通过后的比赛展示快照 | 否 |
-| `version/v0.5.15rc1` | v0.5.15rc1 技术验收通过后的比赛展示快照 | 否 |
-| `version/v0-baseline` | v0 基线评测版本快照，便于在 GitHub 直接浏览 | 否 |
-| `version/v1-runtime-lite` | v1 三线 Lite 闭环版本快照，便于在 GitHub 直接浏览 | 否 |
-| `version/v2-llm-eval` | v2 真实 LLM 实验版本快照，便于在 GitHub 直接浏览 | 否 |
-| `version/v2-longcontext-eval` | v2.1 长上下文真实 LLM 实验版本快照 | 否 |
-| `version/v2-quality-rerun` | v2.2 长上下文质量重跑版本快照 | 否 |
-| `version/v2-tiered-state` | v2.3 Hot/Warm/Cold 状态池分层版本快照 | 否 |
-| `version/v3-memory-view-lite` | v3-lite 记忆复用与 Deliverable View 版本快照 | 否 |
-| `version/v3-final-schema` | v3.1 Final Deliverable Schema 与 Reviewer Guard 版本快照 | 否 |
-| `version/v3-reliability-guard` | v3.2 Runtime Output Reliability Guard 版本快照 | 否 |
-| `version/v3-memory-admission` | v3.3 Memory Candidate Admission Lite 版本快照 | 否 |
-| `version/v4-cost-lifecycle` | v4.0 Cost Governance and Lifecycle Lite 版本快照 | 否 |
-| `v0.0-baseline` | v0 不可变标签 | 否 |
-| `v1.0-runtime-lite` | v1 不可变标签 | 否 |
-| `v2.0-llm-eval` | v2 不可变标签 | 否 |
-| `v2.1-longcontext-eval` | v2.1 不可变标签 | 否 |
-| `v2.2-quality-rerun` | v2.2 不可变标签 | 否 |
-| `v2.3-tiered-state` | v2.3 不可变标签 | 否 |
-| `v3.0-memory-view-lite` | v3-lite 不可变标签 | 否 |
-| `v3.1-final-schema` | v3.1 不可变标签 | 否 |
-| `v3.2-reliability-guard` | v3.2 不可变标签 | 否 |
-| `v3.3-memory-admission` | v3.3 不可变标签 | 否 |
-| `v4.0-cost-lifecycle` | v4.0 不可变标签 | 否 |
-| `v0.5.15rc1` | v0.5.15rc1 技术验收通过后的不可变发行候选标签 | 否 |
-| `v0.5.15rc2` | v0.5.15rc2 技术验收通过后的不可变发行候选标签 | 否 |
-| `v0.5.15` | v0.5.15 最终发行与比赛交付不可变标签 | 否 |
+项目版本遵循 `主版本.次版本.修订版本`：
 
-## 当前版本边界
+- 主版本表示不兼容的公共接口变化；
+- 次版本表示向后兼容的能力扩展；
+- 修订版本表示兼容的修复和发行加固；
+- `rcN` 表示发布候选，只用于冻结验收，不替代正式版本。
 
-| 版本 | Git 引用 | 说明 |
-| --- | --- | --- |
-| v0 | `v0.0-baseline` / `version/v0-baseline` | 纯文本基线、tokenizer 统计、metrics/trace 输出、任务集与测试 |
-| v1 | `v1.0-runtime-lite` / `version/v1-runtime-lite` | SHP-lite、StatePool-lite、MemoryStore-lite、端到端成本统计、v0/v1 实验记录 |
-| v2 | `v2.0-llm-eval` / `version/v2-llm-eval` | MiMo v2.5 LLM 实验层、旅行任务组 A1-A5、真实模型对比结果 |
-| v2.1 | `v2.1-longcontext-eval` / `version/v2-longcontext-eval` | A1-A10 长上下文实验、baseline 跨任务完整历史、主实验结果 |
-| v2.2 | `v2.2-quality-rerun` / `version/v2-quality-rerun` | artifact 完整内容留档、网络重试、MiMo 质量裁判重跑 |
-| v2.3 | `v2.3-tiered-state` / `version/v2-tiered-state` | Hot/Warm/Cold State Pool、Cold audit payload、Prompt/Audit 访问分离、分层指标 |
-| v3-lite | `v3.0-memory-view-lite` / `version/v3-memory-view-lite` | PromotionView、ClaimCard、MemoryView、Alias Mapping、Deliverable View、v3 指标 |
-| v3.1 | `v3.1-final-schema` / `version/v3-final-schema` | Final Deliverable Schema、中文字段覆盖、Reviewer 短上下文修复、A/B 最终交付质量记录 |
-| v3.2 | `v3.2-reliability-guard` / `version/v3-reliability-guard` | Provider Response Guard、Agent Output Contract Guard、规则修复、degraded fallback、输出可靠性指标 |
-| v3.3 | `v3.3-memory-admission` / `version/v3-memory-admission` | MemoryCandidate、ClaimCandidate、Admission Lite、admitted-only MemoryView 更新、准入状态指标 |
-| v4.0 | `v4.0-cost-lifecycle` / `version/v4-cost-lifecycle` | Retry Budget、Read Lease-lite、State GC-lite、tombstone、Memory lifecycle、Preflight Validation-lite |
-| v0.5.15rc1 | `v0.5.15rc1` / `version/v0.5.15rc1` | 通用语义桥、AutoGen 接管、类型化记忆与可靠性、统一 wheel/sdist 契约、openEuler 发行候选门禁 |
-| v0.5.15rc2 | `v0.5.15rc2` / `version/v0.5.15rc2` | RC1 能力、隔离 sdist 安装/导入/CLI 门禁、当前比赛交付说明与包发现元数据 |
-| v0.5.15 | `v0.5.15` / `version/v0.5.15` | Apache-2.0、最终版本身份、wheel/sdist 独立安装、openEuler 全量发行门禁与不可变校验 |
+开发阶段使用 `v5.12x`、`v5.14f` 等工程标识记录连续迭代。字母后缀表示
+同一阶段内的机制或实验增量，不直接对应 Python 包版本。
 
-## 如何在本地切换版本
+## 分支用途
 
-查看 v0：
+| 分支或引用 | 用途 |
+|---|---|
+| `competition-submission` | 当前比赛提交、安装和复现入口 |
+| `origin/competition-submission` | GitHub 上的比赛分支 |
+| Git 标签 | 保存发布候选或正式发行的不可变引用 |
+| Git 提交历史 | 证明设计、实现、实验和修复的完整开发过程 |
 
-```powershell
-git fetch --all --tags
-git switch version/v0-baseline
+比赛分支保留当前有效的中文展示文档、问题设计、实验执行程序和最终发行材料。
+已归档的中间叙述仍可通过 Git 历史查看，不通过重写历史隐藏。
+
+## 发行身份
+
+以下位置必须保持版本一致：
+
+- `pyproject.toml` 中的项目版本；
+- `agent_runtime/__init__.py` 中的运行时版本；
+- `agentlite version` 的 CLI 输出；
+- wheel 和 sdist 的文件名及 Core Metadata；
+- 最终验收报告记录的 release version。
+
+## 发行验证
+
+正式版本只有在以下门禁同时通过时才成立：
+
+1. 完整 Python 单元测试；
+2. wheel 内容与独立安装检查；
+3. sdist 内容、隔离安装与导入来源检查；
+4. AutoGen Team/Core 无 Provider smoke；
+5. CLI 版本与诊断检查；
+6. Apache-2.0 源码、包内容和元数据一致性；
+7. openEuler 最终验收及制品 SHA256 校验。
+
+最终入口：
+
+```bash
+bash experiments/v5.15y-installed-sdist-delivery-readiness/run_openeuler.sh
 ```
 
-查看 v1：
+## 文档与证据
 
-```powershell
-git fetch --all --tags
-git switch version/v1-runtime-lite
-```
+- 比赛交付：`docs/competition/v0.5.15-delivery-guide.md`
+- 双任务设计：`docs/competition/AB_EXPERIMENT_DESIGN.md`
+- 展示版问题：`docs/problems/A.md`、`docs/problems/B.md`
+- 当前结果：`docs/competition/RESULTS_SNAPSHOT.md`
+- 开发历程：`docs/competition/DEVELOPMENT_RECORD.md`
+- 最终发行：`docs/release/v0.5.15-final-release-notes.md`
 
-查看 v2：
-
-```powershell
-git fetch --all --tags
-git switch version/v2-llm-eval
-```
-
-查看 v2.1：
-
-```powershell
-git fetch --all --tags
-git switch version/v2-longcontext-eval
-```
-
-查看 v2.2：
-
-```powershell
-git fetch --all --tags
-git switch version/v2-quality-rerun
-```
-
-查看 v2.3：
-
-```powershell
-git fetch --all --tags
-git switch version/v2-tiered-state
-```
-
-查看 v3-lite：
-
-```powershell
-git fetch --all --tags
-git switch version/v3-memory-view-lite
-```
-
-查看 v3.1：
-
-```powershell
-git fetch --all --tags
-git switch version/v3-final-schema
-```
-
-查看 v3.2：
-
-```powershell
-git fetch --all --tags
-git switch version/v3-reliability-guard
-```
-
-查看 v3.3：
-```powershell
-git fetch --all --tags
-git switch version/v3-memory-admission
-```
-
-查看 v4.0：
-```powershell
-git fetch --all --tags
-git switch version/v4-cost-lifecycle
-```
-
-回到最新开发主干：
-
-```powershell
-git switch main
-```
-
-也可以直接按 tag 查看不可变快照：
-
-```powershell
-git checkout v0.0-baseline
-git checkout v1.0-runtime-lite
-git checkout v2.0-llm-eval
-git checkout v2.1-longcontext-eval
-git checkout v2.2-quality-rerun
-git checkout v2.3-tiered-state
-git checkout v3.0-memory-view-lite
-git checkout v3.1-final-schema
-git checkout v3.2-reliability-guard
-git checkout v3.3-memory-admission
-git checkout v4.0-cost-lifecycle
-git checkout v0.5.15
-```
-
-注意：直接 checkout tag 会进入 detached HEAD 状态，只适合查看或复现实验，不适合继续开发。
-
-## 后续迭代规则
-
-- 每完成一个可运行版本，就创建一个 tag，例如 `v2.0-contract-guard`。
-- 每个比赛展示用版本，同时创建一个 `version/*` 分支，方便在 GitHub 网页端切换浏览。
-- `main` 始终保留最新开发状态，不要求目录中只存在某一个历史版本。
-- `docs/planning/` 保存路线规划，可能描述未来版本能力，不等于当前代码已经全部实现。
-- `runs/` 中的原始实验输出不提交到 Git，关键实验结果整理到 `docs/experiments/`。
+运行日志、Provider 凭据、临时分析和本地归档不得进入发行包。历史实验的完整
+演进通过 Git 提交记录追溯，当前结论只以当前适用的验证报告为准。

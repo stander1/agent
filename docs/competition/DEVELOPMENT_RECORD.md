@@ -18,6 +18,21 @@
 | v5.14 | 评审治理、语义保真、类型化可靠性、证据连续性、修订消解和最终交付守卫 |
 | v5.15 | 通用语义桥、精确来源跨度、Schema 校验、受控消歧、包加固和最终 openEuler 发行 |
 
+## 比赛材料校准
+
+最终比赛分支将 A/B 材料分为两个层次：
+
+- `docs/problems/A.md`、`B.md` 面向评委说明问题背景、连续挑战、输入输出、
+  评价维度和系统能力映射；
+- `experiments/ordinary-developer-autogen/question_A.md`、`question_B.md`
+  保留逐轮提示、状态示例和执行要求，用于复现实验；
+- `docs/competition/AB_EXPERIMENT_DESIGN.md` 统一说明 Native、Observed、
+  Managed 三组对照、控制变量、成本质量指标和盲评方法。
+
+当前工作树归档阶段性调研、内部审计、旧规划和中间实验叙述，只保留当前适用
+的中文展示与复现入口。被归档材料及其修改时间线仍完整存在于 Git 提交历史，
+没有通过重写历史删除开发过程。
+
 ## 证据模型
 
 AgentLite 使用四层证据：
@@ -43,6 +58,8 @@ AgentLite 使用四层证据：
 ## 追溯入口
 
 - 版本映射：`docs/versioning.md`
+- 双任务设计：`docs/competition/AB_EXPERIMENT_DESIGN.md`
+- 展示版问题：`docs/problems/A.md`、`docs/problems/B.md`
 - 实现演进：在 Git 历史中查看 `docs/planning/`
 - 实验记录：在 Git 历史中查看 `docs/experiments/` 与 `experiments/`
 - 发行说明：`docs/release/v0.5.15-final-release-notes.md`

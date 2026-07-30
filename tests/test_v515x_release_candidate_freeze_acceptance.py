@@ -165,16 +165,18 @@ class ReleaseCandidateFreezeAcceptanceTest(unittest.TestCase):
         self.assertIn("sha256sum -c", runner)
         self.assertNotIn("OPENAI_API_KEY", runner)
 
-    def test_sdist_contract_contains_release_candidate_reproduction_files(
+    def test_sdist_contract_contains_competition_reproduction_files(
         self,
     ) -> None:
         contract = _load_release_contract()
         required = contract.REQUIRED_SDIST_MEMBERS
 
         self.assertIn(
-            "docs/planning/v5.15x-release-candidate-freeze.md",
+            "docs/competition/AB_EXPERIMENT_DESIGN.md",
             required,
         )
+        self.assertIn("docs/problems/A.md", required)
+        self.assertIn("docs/problems/B.md", required)
         self.assertIn(
             "docs/competition/RESULTS_SNAPSHOT.md",
             required,
@@ -199,11 +201,15 @@ class ReleaseCandidateFreezeAcceptanceTest(unittest.TestCase):
             required,
         )
         self.assertIn(
-            "docs/experiments/",
-            contract.FORBIDDEN_DISTRIBUTION_PREFIXES,
+            "docs/experiments/v5.12x-autogen-team-benchmark-results.md",
+            required,
         )
         self.assertIn(
-            "docs/history/",
+            "experiments/ordinary-developer-autogen/question_A_sequence.json",
+            required,
+        )
+        self.assertNotIn(
+            "docs/experiments/",
             contract.FORBIDDEN_DISTRIBUTION_PREFIXES,
         )
         self.assertIn(

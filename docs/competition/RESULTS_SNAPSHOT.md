@@ -47,6 +47,18 @@ bash experiments/v5.15y-installed-sdist-delivery-readiness/run_openeuler.sh
 - `docs/experiments/v5.12x-autogen-team-benchmark-results.md`
 - `examples/run_autogen_team_benchmark.py`
 
+## 双任务实验入口
+
+比赛问题设计采用两个互补的十阶段连续任务：
+
+- 任务组 A：连续约束下的个性化旅行规划；
+- 任务组 B：连续证据修订下的合成安全审计。
+
+统一对照组、控制变量、成本质量指标和盲评方法见
+`docs/competition/AB_EXPERIMENT_DESIGN.md`。展示版问题位于
+`docs/problems/A.md` 和 `docs/problems/B.md`，逐轮执行规约及脚本位于
+`experiments/`。问题设计与已验证结果分开陈述，不以实验计划替代结果证据。
+
 ## 指标边界
 
 通信实验测量运行时边界上采用 tokenizer 统计的消息与 Prompt View 内容，

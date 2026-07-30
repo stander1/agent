@@ -5,6 +5,15 @@
 1. 代码端：开发者正常写 AutoGen Python 程序，然后只在启动命令前加 `agentlite autogen --`。
 2. 网页端：开发者打开 AutoGen Studio 原生网页，手动配置 Agent 和 Team，然后用 AgentLite 接管 Studio 后端进程。
 
+面向比赛评委的问题设计、挑战说明和统一评价方法见：
+
+- `docs/competition/AB_EXPERIMENT_DESIGN.md`
+- `docs/problems/A.md`
+- `docs/problems/B.md`
+
+本目录中的问题文档是实验执行规约，保留逐轮提示、状态示例和运行要求，
+不作为比赛展示正文。
+
 ## 文件说明
 
 | 文件 | 作用 |
@@ -14,8 +23,8 @@
 | `question_A_sequence.json` | A1-A10 结构化连续任务；由同一个有状态 Team 依次执行 |
 | `studio_agent_prompts.md` | AutoGen Studio 网页端手动配置 Agent 时可复制的提示词 |
 | `studio_team_config.template.json` | AutoGen Studio 可导入的 Team 配置模板，不包含真实 API Key |
-| `question_A.md` | A 组实验问题 |
-| `question_B.md` | B 组实验问题 |
+| `question_A.md` | A 组逐轮实验执行规约 |
+| `question_B.md` | B 组逐轮实验执行规约 |
 
 ## 环境变量
 

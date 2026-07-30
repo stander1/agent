@@ -38,6 +38,19 @@ AgentLite 是面向多智能体低开销协作的跨框架运行时工具层。�
 计费 Token，也不作为所有领域普遍质量一致的证明。精确口径与复现入口见
 [比赛结果快照](docs/competition/RESULTS_SNAPSHOT.md)。
 
+## 双任务问题设计
+
+比赛实验设置两个十阶段连续任务。任务组 A 验证偏好、预算、天气和方案的
+连续修订；任务组 B 验证多跳证据、来源、污染纠偏和结论追溯。两题使用同一套
+通用运行时，不在生产代码中加入领域词表、固定角色或题目专用逻辑。
+
+- [双任务对照实验设计](docs/competition/AB_EXPERIMENT_DESIGN.md)
+- [任务组 A：连续约束下的个性化旅行规划](docs/problems/A.md)
+- [任务组 B：连续证据修订下的合成安全审计](docs/problems/B.md)
+
+展示版文档说明问题价值、难点和评价方法；逐轮提示、状态示例、预注册文件和
+执行脚本保留在 `experiments/`，用于完整复现实验。
+
 ## 核心能力
 
 - **结构化状态传递**：在成本门和契约守卫允许时，使用 StatePool 引用和
@@ -89,11 +102,13 @@ bash experiments/v5.15y-installed-sdist-delivery-readiness/run_openeuler.sh
 ## 文档
 
 - [比赛交付说明](docs/competition/v0.5.15-delivery-guide.md)
+- [双任务对照实验设计](docs/competition/AB_EXPERIMENT_DESIGN.md)
+- [任务组 A](docs/problems/A.md)与[任务组 B](docs/problems/B.md)
 - [已验证结果快照](docs/competition/RESULTS_SNAPSHOT.md)
 - [开发历程](docs/competition/DEVELOPMENT_RECORD.md)
 - [最终发行说明](docs/release/v0.5.15-final-release-notes.md)
 - [版本与分支映射](docs/versioning.md)
-- [历史实验说明](docs/experiments/README.md)
+- [实验复现索引](docs/experiments/README.md)
 
 历史实验和中间结果完整保留在 Git 提交历史中，用于追溯开发过程；当前
 比赛分支只保留中文索引和最终复现入口。当前发布结论以比赛结果快照和最终

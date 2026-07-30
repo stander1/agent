@@ -1,27 +1,27 @@
-# 历史实验说明
+# AgentLite 实验复现索引
 
-AgentLite 的迭代实验报告完整保留在 Git 提交历史中，用于追溯实现决策、
-中间测量结果以及推动后续修改的证据。当前比赛分支只保留本中文索引，避免
-把已经被后续版本取代的阶段性结论与最终发行结论并列展示。
+当前比赛分支只保留问题设计、可复现实验入口和适用的结果摘要。中间版本的
+诊断、修复与回归报告完整保留在 Git 提交历史中，不在当前工作树重复展示。
 
-## 状态含义
+## 问题设计
 
-- 文件名中的 `results` 表示一次有边界的运行结果，不代表永久产品属性。
-- `formal-regression` 表示冻结的回归边界。
-- 当后续版本修改相关实现或验收契约时，原中间结果由后续证据取代。
-- 当前发行状态只由最终比赛结果快照和不可变发行验收归档确定。
+- 统一方法：`docs/competition/AB_EXPERIMENT_DESIGN.md`
+- 任务组 A 展示版：`docs/problems/A.md`
+- 任务组 B 展示版：`docs/problems/B.md`
+- A 组实验执行规约：`experiments/ordinary-developer-autogen/question_A.md`
+- B 组实验执行规约：`experiments/ordinary-developer-autogen/question_B.md`
 
-## 当前证据入口
+## 复现入口
 
-- `../competition/RESULTS_SNAPSHOT.md`
-- `../competition/v0.5.15-delivery-guide.md`
-- `../release/v0.5.15-final-release-notes.md`
+- 普通开发者 AutoGen 实验：`experiments/ordinary-developer-autogen/README.md`
+- 成本质量预检：`experiments/v5.14b-fair-cost-quality-preflight/`
+- 正式规模运行：`experiments/v5.14f-formal-scale-acceptance/`
+- 最终发行验收：`experiments/v5.15y-installed-sdist-delivery-readiness/`
 
-可通过 GitHub 提交历史或以下命令查看完整实验记录：
+## 当前结果
 
-```bash
-git log --all -- docs/experiments experiments
-```
+- 冻结通信对照：`docs/experiments/v5.12x-autogen-team-benchmark-results.md`
+- 比赛结果快照：`docs/competition/RESULTS_SNAPSHOT.md`
 
-历史记录保留任务范围、指标定义和证据边界。通信 Token、Provider Token、
-确定性质量检查和模型评审交付质量属于不同指标，不能互相替代。
+结果声明以对应实验的输入、模型、阈值和归档边界为准。问题设计和实验计划
+不能替代实际结果，通信 Token 也不等同于 Provider 计费 Token。

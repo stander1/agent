@@ -56,6 +56,8 @@
 |---|---|
 | 完整单元测试 | `python -m unittest discover -s tests -p "test_*.py"` |
 | 最终 openEuler 门禁 | `experiments/v5.15y-installed-sdist-delivery-readiness/run_openeuler.sh` |
+| 双任务对照设计 | `docs/competition/AB_EXPERIMENT_DESIGN.md` |
+| 展示版问题 | `docs/problems/A.md`、`docs/problems/B.md` |
 | 比赛结果快照 | `docs/competition/RESULTS_SNAPSHOT.md` |
 | 最终交付说明 | `docs/competition/v0.5.15-delivery-guide.md` |
 | 最终发行说明 | `docs/release/v0.5.15-final-release-notes.md` |
