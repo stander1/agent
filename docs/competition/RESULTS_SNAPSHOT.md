@@ -1,63 +1,58 @@
-# AgentLite v0.5.15 Validated Results Snapshot
+# AgentLite v0.5.15 已验证结果快照
 
-## Release Readiness
+## 发行就绪状态
 
-The final openEuler release evidence for `v0.5.15` records:
+`v0.5.15` 最终 openEuler 发行证据记录如下：
 
-| Check group | Result |
+| 检查组 | 结果 |
 |---|---:|
-| Final installed-sdist acceptance | 22 / 22 passed |
-| Inherited release acceptance | 15 / 15 passed |
-| Full Python unit suite | 602 / 602 passed |
-| Focused final-release tests | 20 / 20 passed |
-| Wheel inspection | passed |
-| sdist inspection | passed |
-| Isolated sdist installation and import | passed |
-| Installed CLI version identity | passed |
-| Apache-2.0 source/package identity | passed |
-| Publication blockers | 0 |
+| 最终 sdist 隔离安装验收 | 22 / 22 通过 |
+| 继承发行验收 | 15 / 15 通过 |
+| Python 完整单元测试 | 602 / 602 通过 |
+| 最终发行定向测试 | 20 / 20 通过 |
+| wheel 检查 | 通过 |
+| sdist 检查 | 通过 |
+| sdist 隔离安装与导入 | 通过 |
+| 已安装 CLI 版本身份 | 通过 |
+| Apache-2.0 源码与包身份 | 通过 |
+| 公开发布阻塞项 | 0 |
 
-The acceptance report records matching project and runtime version `0.5.15`,
-`technical_release_ready=true`, `open_source_publication_ready=true`, and
-`installed_sdist_verified=true`.
+验收报告记录项目版本与运行时版本均为 `0.5.15`，并满足
+`technical_release_ready=true`、`open_source_publication_ready=true`
+和 `installed_sdist_verified=true`。
 
-Reproduction entry point:
+复现入口：
 
 ```bash
 bash experiments/v5.15y-installed-sdist-delivery-readiness/run_openeuler.sh
 ```
 
-## Controlled AutoGen Communication Benchmark
+## AutoGen 通信受控对照实验
 
-The frozen `v5.12x` benchmark runs the same deterministic AutoGen Team program
-in Native and AgentLite-managed modes. The user program imports AutoGen but
-does not import AgentLite.
+冻结的 `v5.12x` 实验使用同一套确定性 AutoGen Team 程序，分别运行原生
+模式和 AgentLite 托管模式。用户程序只导入 AutoGen，不导入 AgentLite。
 
-| Metric | Native | Managed | Managed change |
+| 指标 | 原生模式 | 托管模式 | 托管模式变化 |
 |---|---:|---:|---:|
-| First Team input tokens | 2,071 | 1,045 | -49.54% |
-| Team broadcast transport tokens | 6,213 | 900 | -85.51% |
-| Agent input tokens | 3,315 | 919 | -72.28% |
-| Deterministic delivery score | 12 / 12 | 12 / 12 | 0 |
+| 首条 Team 输入 Token | 2,071 | 1,045 | -49.54% |
+| Team 广播传输 Token | 6,213 | 900 | -85.51% |
+| Agent 输入 Token | 3,315 | 919 | -72.28% |
+| 确定性交付得分 | 12 / 12 | 12 / 12 | 0 |
 
-The run passed 20 / 20 benchmark checks. Managed execution recorded one Team
-rewrite and three Agent-input rewrites with zero fallback on the benchmark's
-happy path.
+该实验 20 / 20 项检查全部通过。托管组在实验正常路径中记录 1 次 Team
+改写和 3 次 Agent 输入改写，安全回退次数为 0。
 
-Detailed evidence:
+详细证据：
 
 - `docs/experiments/v5.12x-autogen-team-benchmark-results.md`
 - `examples/run_autogen_team_benchmark.py`
 
-## Metric Boundaries
+## 指标边界
 
-The communication benchmark measures tokenizer-backed message and Prompt View
-content at the runtime boundary. It does not equate those values with Provider
-billing tokens.
+通信实验测量运行时边界上采用 tokenizer 统计的消息与 Prompt View 内容，
+不将其等同于 Provider 计费 Token。
 
-The deterministic 12 / 12 score validates the benchmark's declared delivery
-contract. It is not a claim that every model, prompt, framework, or natural
-language domain has identical quality.
+确定性 `12 / 12` 得分只验证该实验声明的交付契约，不表示所有模型、提示、
+框架或自然语言领域都具有完全相同的质量。
 
-All current release claims remain bounded by the checked-in experiment
-definition and the retrieved immutable evidence.
+所有当前发行结论均受已提交实验定义和取回的不可变证据约束。

@@ -1,11 +1,10 @@
-# v5.15y Final Installed sdist and Delivery Readiness
+# v5.15y 最终已安装 sdist 与交付就绪
 
-This gate builds AgentLite `0.5.15` on openEuler and extends the inherited
-artifact checks with final-version identity, isolated sdist installation,
-import-origin, installed CLI, package discovery metadata, and current
-competition delivery-guide checks.
+该门禁在 openEuler 上构建 AgentLite `0.5.15`，并在继承的制品检查基础上，
+增加最终版本一致性、隔离 sdist 安装、导入来源、已安装 CLI、软件包发现
+元数据和当前比赛交付指南检查。
 
-Run from a clean tracked checkout:
+在干净且已跟踪的检出目录中运行：
 
 ```bash
 cd /home/competition/multi-agent-runtime
@@ -15,6 +14,5 @@ export AGENTLITE_V515Y_EXP_ID="$(date +%Y%m%d-%H%M%S)"
 bash experiments/v5.15y-installed-sdist-delivery-readiness/run_openeuler.sh
 ```
 
-No Provider credential is required. The final report verifies Apache-2.0 in
-the repository, package metadata, wheel, and sdist, requires a non-prerelease
-version, and requires all publication blockers to be cleared.
+该实验不需要 Provider 凭据。最终报告会校验仓库、软件包元数据、wheel 和
+sdist 中的 Apache-2.0，要求版本不是预发行版本，并要求清除所有发布阻塞项。
