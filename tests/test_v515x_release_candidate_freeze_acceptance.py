@@ -175,6 +175,14 @@ class ReleaseCandidateFreezeAcceptanceTest(unittest.TestCase):
             "docs/planning/v5.15x-release-candidate-freeze.md",
             required,
         )
+        self.assertIn(
+            "docs/competition/RESULTS_SNAPSHOT.md",
+            required,
+        )
+        self.assertIn(
+            "docs/competition/DEVELOPMENT_RECORD.md",
+            required,
+        )
         self.assertIn("LICENSE", required)
         self.assertEqual(contract.REQUIRED_LICENSE_EXPRESSION, "Apache-2.0")
         self.assertTrue(
@@ -189,6 +197,18 @@ class ReleaseCandidateFreezeAcceptanceTest(unittest.TestCase):
         self.assertIn(
             "experiments/v5.15x-release-candidate-freeze/run_openeuler.sh",
             required,
+        )
+        self.assertIn(
+            "docs/experiments/",
+            contract.FORBIDDEN_DISTRIBUTION_PREFIXES,
+        )
+        self.assertIn(
+            "docs/history/",
+            contract.FORBIDDEN_DISTRIBUTION_PREFIXES,
+        )
+        self.assertIn(
+            "experiments/v5.15z-release-token-quality-formal/",
+            contract.FORBIDDEN_DISTRIBUTION_PREFIXES,
         )
 
 

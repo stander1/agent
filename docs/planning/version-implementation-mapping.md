@@ -5659,8 +5659,9 @@ Implementation mapping:
   `examples/build_release_artifacts.py`: consume the shared contract, verify
   source/runtime/artifact version identity, and independently hash the built
   artifacts;
-- `MANIFEST.in`: includes reproducibility experiments while pruning runtime
-  evidence, local environments, logs, and generated artifacts;
+- `MANIFEST.in`: includes only the final release-reproduction experiments while
+  pruning historical experiment reports, runtime evidence, local environments,
+  logs, and generated artifacts;
 - `agent_runtime/__init__.py` and `pyproject.toml`: identify the candidate as
   `0.5.15rc1`;
 - `experiments/v5.15x-release-candidate-freeze/`: runs installed-wheel,

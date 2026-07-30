@@ -6,10 +6,14 @@ recursive-include agent_runtime *.py
 recursive-include web_monitor *.py *.html *.css *.js
 recursive-include docs *.md
 recursive-include examples *.py
-recursive-include experiments *.py *.sh *.md *.json
+recursive-include experiments/v5.15w-package-release-hardening *.py *.sh *.md *.json
+recursive-include experiments/v5.15x-release-candidate-freeze *.py *.sh *.md *.json
+recursive-include experiments/v5.15y-installed-sdist-delivery-readiness *.py *.sh *.md *.json
 recursive-include tests *.py
 recursive-exclude * __pycache__
 recursive-exclude * *.py[cod]
+prune docs/experiments
+prune docs/history
 prune runs
 prune build
 prune dist
