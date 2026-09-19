@@ -260,6 +260,74 @@ class MemoryStoreLiteTest(unittest.TestCase):
         self.assertIn("memory_view", view)
         self.assertIn("结构化 SHP", view)
 
+    def test_required_scope_still_requires_semantic_overlap(self) -> None:
+        store = MemoryStoreLite()
+        relevant = store.write_memory(
+            task_id="T1",
+            source_agent="writer",
+            task_topic="开放式通信",
+            summary="结构化消息可以减少长文本传递。",
+            tags=["shared_scope"],
+        )
+        store.write_memory(
+            task_id="T2",
+            source_agent="writer",
+            task_topic="无关记录",
+            summary="另一条记录讨论颜色和季节。",
+            tags=["shared_scope"],
+        )
+
+        report = store.search_memory_with_report(
+            "结构化消息如何减少文本传递",
+            tags=["shared_scope"],
+            required_tags=["shared_scope"],
+            top_k=5,
+        )
+
+        self.assertEqual([item.memory_id for item in report.refs], [relevant.memory_id])
+        self.assertEqual(report.semantic_filter_rejected_count, 1)
+
+    def test_required_scope_with_empty_query_does_not_inject_group_history(self) -> None:
+        store = MemoryStoreLite()
+        store.write_memory(
+            task_id="T3",
+            source_agent="writer",
+            task_topic="共享记录",
+            summary="一条已确认的跨任务事实。",
+            tags=["shared_scope"],
+        )
+
+        report = store.search_memory_with_report(
+            "",
+            tags=["shared_scope"],
+            required_tags=["shared_scope"],
+            top_k=5,
+        )
+
+        self.assertEqual(report.refs, [])
+        self.assertEqual(report.semantic_filter_rejected_count, 1)
+
+    def test_scope_only_retrieval_requires_explicit_continuity_signal(self) -> None:
+        store = MemoryStoreLite()
+        ref = store.write_memory(
+            task_id="T4",
+            source_agent="writer",
+            task_topic="上一轮记录",
+            summary="上一轮已经确认了一个跨任务事实。",
+            tags=["shared_scope"],
+        )
+
+        report = store.search_memory_with_report(
+            "继续上一轮",
+            tags=["shared_scope"],
+            required_tags=["shared_scope"],
+            top_k=5,
+            allow_scope_only=True,
+        )
+
+        self.assertEqual([item.memory_id for item in report.refs], [ref.memory_id])
+        self.assertTrue(report.scope_only_retrieval)
+
     def test_claim_memory_view_and_deliverable_view(self) -> None:
         store = MemoryStoreLite()
         report = store.write_memory_with_report(

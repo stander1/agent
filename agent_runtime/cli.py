@@ -500,6 +500,7 @@ def _doctor_checks(*, framework: str | None) -> list[dict[str, object]]:
             "detail": platform.python_version(),
         },
         _module_check("tiktoken"),
+        _tokenizer_backend_check(),
         _module_check("agent_runtime.launcher"),
         _module_check("agent_runtime.bootstrap.startup"),
     ]
@@ -512,6 +513,30 @@ def _doctor_checks(*, framework: str | None) -> list[dict[str, object]]:
             ]
         )
     return checks
+
+
+def _tokenizer_backend_check() -> dict[str, object]:
+    """Verify that the installed tokenizer can load its encoding data."""
+
+    try:
+        from agent_runtime.eval.token_counter import TokenCounter
+
+        counter = TokenCounter()
+        description = counter.describe()
+        return {
+            "name": "tokenizer:cl100k_base",
+            "ok": True,
+            "detail": (
+                f"{description['tokenizer_name']} "
+                f"{description['tokenizer_version']}"
+            ),
+        }
+    except Exception as exc:
+        return {
+            "name": "tokenizer:cl100k_base",
+            "ok": False,
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
 
 
 def _module_check(module_name: str) -> dict[str, object]:

@@ -131,6 +131,10 @@ agentlite doctor --framework autogen
 agentlite doctor --framework autogen --json
 ```
 
+其中 tokenizer 检查不仅验证 `tiktoken` 能否导入，还会实际加载
+`cl100k_base` 编码表。若首次运行需要联网下载编码资源，请先准备本地缓存或
+允许该下载；检查失败时不要使用估算 Token 代替正式基准统计。
+
 ### 4. 运行无需 API Key 的快速演示
 
 该演示使用相同的确定性 AutoGen Team 程序，对比原生运行与 AgentLite 托管
@@ -330,6 +334,7 @@ bash experiments/v5.15y-installed-sdist-delivery-readiness/run_openeuler.sh
 - [双任务对照实验设计](docs/competition/AB_EXPERIMENT_DESIGN.md)
 - [任务组 A](docs/problems/A.md)与[任务组 B](docs/problems/B.md)
 - [已验证结果快照](docs/competition/RESULTS_SNAPSHOT.md)
+- [质量整改记录](docs/competition/QUALITY_REPAIR_STATUS.md)
 - [开发历程](docs/competition/DEVELOPMENT_RECORD.md)
 - [最终发行说明](docs/release/v0.5.15-final-release-notes.md)
 - [版本与分支映射](docs/versioning.md)

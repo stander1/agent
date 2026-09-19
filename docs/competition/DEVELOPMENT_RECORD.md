@@ -51,9 +51,13 @@ AgentLite 使用四层证据：
 - 许可证：Apache-2.0；
 - openEuler 最终验收：22 / 22；
 - 继承发行验收：15 / 15；
-- 完整单元测试：602 / 602；
+- 历史发行归档完整单元测试：602 / 602；
 - wheel 与 sdist：均完成独立检查与隔离安装；
 - 公开发布阻塞项：0。
+
+本轮质量整改的源码回归结果与当前环境前置条件见
+`docs/competition/QUALITY_REPAIR_STATUS.md`；未重新完成 Provider 基准前，不将
+本轮工作树写成新的最终发行验收。
 
 ## 追溯入口
 
@@ -65,3 +69,4 @@ AgentLite 使用四层证据：
 - 发行说明：`docs/release/v0.5.15-final-release-notes.md`
 - 交付说明：`docs/competition/v0.5.15-delivery-guide.md`
 - 当前结果：`docs/competition/RESULTS_SNAPSHOT.md`
+- 质量整改：`docs/competition/QUALITY_REPAIR_STATUS.md`

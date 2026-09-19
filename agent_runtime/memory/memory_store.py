@@ -446,6 +446,8 @@ class MemorySearchReport:
     vector_retrieval_count: int = 0
     alias_mapping_hit_count: int = 0
     unresolved_slot_count: int = 0
+    semantic_filter_rejected_count: int = 0
+    scope_only_retrieval: bool = False
 
 
 @dataclass(slots=True)
@@ -1224,12 +1226,14 @@ class MemoryStoreLite:
         tags: list[str] | None = None,
         top_k: int = 3,
         required_tags: list[str] | None = None,
+        allow_scope_only: bool = False,
     ) -> list[MemoryRef]:
         return self.search_memory_with_report(
             query,
             tags=tags,
             top_k=top_k,
             required_tags=required_tags,
+            allow_scope_only=allow_scope_only,
         ).refs
 
     def search_memory_with_report(
@@ -1238,12 +1242,14 @@ class MemoryStoreLite:
         tags: list[str] | None = None,
         top_k: int = 3,
         required_tags: list[str] | None = None,
+        allow_scope_only: bool = False,
     ) -> MemorySearchReport:
         self.apply_lifecycle_transitions()
         query_terms = set(self._terms(query))
         requested_tags = set(tags or [])
         required_tag_set = set(required_tags or [])
         scored: list[tuple[int, MemoryObject]] = []
+        semantic_filter_rejected_count = 0
         for memory in self._memories.values():
             if memory.status not in PROMPT_VIEW_MEMORY_STATUSES | DORMANT_MEMORY_STATUSES:
                 continue
@@ -1259,6 +1265,13 @@ class MemoryStoreLite:
             overlap = len(query_terms & memory_terms)
             tag_overlap = len(requested_tags & memory_tags)
             group_overlap = self._group_overlap(requested_tags, memory_tags)
+            # Required scope is a safety boundary, not a relevance signal.
+            # A same-scope memory must still share content with the query;
+            # otherwise every item in a long-lived group is injected and later
+            # becomes an unassessed context cost.
+            if required_tag_set and overlap <= 0 and not allow_scope_only:
+                semantic_filter_rejected_count += 1
+                continue
             score = overlap + tag_overlap * 3 + group_overlap * 5
             if memory.status in DORMANT_MEMORY_STATUSES:
                 score = max(0, score - 2)
@@ -1280,7 +1293,11 @@ class MemoryStoreLite:
                 break
         if refs:
             self._persist_snapshot()
-        return MemorySearchReport(refs=refs)
+        return MemorySearchReport(
+            refs=refs,
+            semantic_filter_rejected_count=semantic_filter_rejected_count,
+            scope_only_retrieval=bool(allow_scope_only and required_tag_set),
+        )
 
     def validate_read_set(
         self, refs: list[MemoryRef], *, requester: str = ""

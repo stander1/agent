@@ -287,6 +287,7 @@ class CollaborationKernel:
         final_task: bool,
         deliverable_budget_chars: int,
         strict_group_scope: bool = False,
+        continuity_required: bool = False,
     ) -> MemoryContext:
         self._ensure_open()
         started = time.perf_counter()
@@ -295,6 +296,7 @@ class CollaborationKernel:
             tags=[task.group_id],
             top_k=4 if final_task else 2,
             required_tags=[task.group_id] if strict_group_scope else None,
+            allow_scope_only=continuity_required,
         )
         self.metrics.record_memory_search_backend(
             task_id=task.task_id,
@@ -302,6 +304,20 @@ class CollaborationKernel:
             mode=mode,
             retrieval_backend=search_report.retrieval_backend,
             vector_retrieval_count=search_report.vector_retrieval_count,
+        )
+        self.trace.write(
+            "memory_search_semantic_filter",
+            {
+                "task_id": task.task_id,
+                "round_id": round_id,
+                "mode": mode,
+                "required_tag_count": int(strict_group_scope),
+                "continuity_required": continuity_required,
+                "scope_only_retrieval": search_report.scope_only_retrieval,
+                "semantic_filter_rejected_count": (
+                    search_report.semantic_filter_rejected_count
+                ),
+            },
         )
         prompt_views = [
             self.memory_store.render_prompt_view(ref) for ref in search_report.refs

@@ -765,6 +765,7 @@ class AutoGenHookManager:
         target_kind: str,
         method_name: str,
         prompt: str,
+        continuity_required: bool = False,
     ) -> MemoryContext:
         empty = MemoryContext([], [])
         if not self.shared_memory_enabled or not prompt.strip():
@@ -789,6 +790,7 @@ class AutoGenHookManager:
                     final_task=_looks_like_final_task(prompt),
                     deliverable_budget_chars=1800,
                     strict_group_scope=True,
+                    continuity_required=continuity_required,
                 ),
             )
         if not isinstance(memory_context, MemoryContext):
@@ -811,6 +813,7 @@ class AutoGenHookManager:
                 "mixed_memory_hit_count": 0,
                 "unassessed_memory_hit_count": 0,
                 "memory_use_status": "retrieved_pending_cost_gate",
+                "continuity_required": continuity_required,
                 "retrieved_memory_tokens": _count_tokens(
                     self.token_counter,
                     memory_text,
@@ -2277,6 +2280,7 @@ class AutoGenHookManager:
             target_kind=target_kind,
             method_name=method_name,
             prompt=prompt,
+            continuity_required=bool(continuity_context_reasons),
         )
         continuity_cache_key = (task.group_id, task_sequence_index)
         if target_kind == "agentchat_team" and task_sequence_index:
